@@ -20,6 +20,8 @@ import tempfile
 import unittest
 import zipfile
 
+import pytest
+
 from oss_verify import check_checks
 from oss_verify import check_records
 from oss_verify import validate
@@ -1016,15 +1018,16 @@ class PostingStep(Runner):
         self.serve(f"repos/{self.REPO}/check-runs", {"id": 1})
         if label:
             self.serve(f"repos/{self.REPO}/issues/8/labels/review-held", [])
+        if name is None:
+            name = "libreac" if kind == "enrollment" else ""
         given = {"PR": "8", "HEAD_SHA": head, "RUN_URL": self.RUN_URL, "REVIEW": review,
                  "VERDICTS": "" if verdicts is None else json.dumps(verdicts), "REASONS": json.dumps(reasons or {}),
+                 "CHANGE": "", "OUTSIDE": "0" if kind == "enrollment" else "", "NAME": name,
                  "CHECKS": "### new report\n" if kind == "enrollment" else "", "SCREENED": "",
                  "TRUST": "writer", "FREE": "", "GATHER_RESULT": "success", "SCREEN_RESULT": "skipped",
                  "SCREEN_VERDICT": "", "REVIEW_RESULT": "success", "HELD": "false", "HOLD_RESULT": "success",
                  "CRITICALITY_SCORE": "", "OSS_FUZZ": "", "SIZES": ""}
         given.update(env)
-        if name is None:
-            name = "libreac" if kind == "enrollment" else ""
         needs = {"needs.route.outputs.kind": kind, "needs.route.outputs.trust": given["TRUST"],
                  "needs.route.outputs.held": "false", "needs.gather.outputs.name": name,
                  "needs.review.result": given["REVIEW_RESULT"], "needs.screen.result": given["SCREEN_RESULT"],
@@ -1060,9 +1063,11 @@ class PostingStep(Runner):
         return [(m, e, b["body"]) for m, e, b in requests if m in ("POST", "PATCH") and "/comments" in e]
 
     def record(self, requests):
-        """The one check run that the run sent, with the fields that are the same on every run: it names pull request 8
-        by its number, as its external_id."""
-        runs = [b for m, e, b in requests if (m, e) == ("POST", f"repos/{self.REPO}/check-runs")]
+        """The one check run Enrollment review that the run sent, with the fields that are the same on every run: it
+        names pull request 8 by its number, as its external_id. The check run review beside it is
+        tests/test_review_check.py's."""
+        runs = [b for m, e, b in requests if (m, e) == ("POST", f"repos/{self.REPO}/check-runs")
+                and b["name"] == "Enrollment review"]
         self.assertEqual(len(runs), 1, runs)
         run = runs[0]
         self.assertEqual((run["name"], run["head_sha"], run["external_id"], run["status"], run["details_url"],
@@ -1187,12 +1192,13 @@ class PostingStep(Runner):
         self.assertEqual((method, endpoint), ("POST", f"repos/{self.REPO}/issues/8/comments"))
         self.assertNotIn("<details>", text)
 
-    def test_a_change_review_posts_its_comment_and_no_check_run(self):
-        _, requests = self.post(kind="change", review="Thanks.\n")
+    def test_a_change_review_posts_its_comment_and_no_check_run_enrollment_review(self):
+        change = {"verdicts": {str(n): "pass" for n in range(1, 6)}, "choices": []}
+        _, requests = self.post(kind="change", review="Thanks.\n", CHANGE=json.dumps(change))
         [(method, _, text)] = self.comments(requests)
-        self.assertTrue(text.startswith(self.MARKER + "\n<sub>Claude wrote this review of `bbbbbbb` from "
-                                        "`review-change.md`."), text[:120])
-        self.assertEqual([e for _, e, _ in requests if "check-runs" in e], [])
+        self.assertTrue(text.startswith(self.MARKER + "\nNothing blocks this pull request.\n\n<sub>Claude wrote this "
+                                        "review of `bbbbbbb` from `review-change.md`."), text[:160])
+        self.assertEqual([b["name"] for m, e, b in requests if "check-runs" in e], ["review"])
         # Its posted review takes the label review-held off (Hold in test_outside_screen).
         self.assertEqual([e for m, e, _ in requests if m == "DELETE"],
                          [f"repos/{self.REPO}/issues/8/labels/review-held"])
@@ -2577,6 +2583,7 @@ class ReviewJob(unittest.TestCase):
                      "gone.txt"]
             run = self.gather(root, (
                 f'case "$*" in\n'
+                f'  *"pulls/8 --jq .changed_files"*) echo {len(files)} ;;\n'
                 f'  "pr view"*) echo "{{}}" ;;\n'
                 f'  *"/files"*) printf "%s\\n" {" ".join(shlex.quote(f) for f in files)} ;;\n'
                 '  "pr diff"*) echo diff ;;\n'
@@ -2654,12 +2661,15 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual(output["comment"], "Thanks.\n")
 
     def test_a_change_without_a_held_field_holds_nothing(self):
-        # Nothing reads a change's verdicts: no output carries them.
-        run, comment, verdicts, held, output, _ = self.result(
-            {"comment": "Thanks.\n", "verdicts": {str(n): "pass" for n in range(1, 6)}}, kind="change")
+        # A change's verdicts and choices reach the check run review through the output change alone, one line of
+        # JSON; a list of choices the review did not give is kept as a text that review-check cannot read.
+        verdicts = {str(n): "pass" for n in range(1, 6)}
+        run, comment, got, held, output, _ = self.result({"comment": "Thanks.\n", "verdicts": verdicts}, kind="change")
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertEqual((output, held, self.summary, self.issue_draft, verdicts),
-                         ({"comment": "Thanks.\n"}, "<!-- held finding -->\n\n", None, None, None))
+        self.assertEqual((output, held, self.summary, self.issue_draft, got),
+                         ({"comment": "Thanks.\n", "change": json.dumps({"verdicts": verdicts, "choices": "not read"},
+                                                                        separators=(",", ":"))},
+                          "<!-- held finding -->\n\n", None, None, None))
 
     @staticmethod
     def outputs(text):
@@ -2801,7 +2811,8 @@ class ReviewJob(unittest.TestCase):
         self.assertTrue(out["prompt"].startswith("Read review-change.md at the root of this checkout"))
         self.assertIn("pull request #8,", out["prompt"])
         schema = self.schema(out["arguments"])
-        self.assertEqual(schema["required"], ["comment", "verdicts"])
+        self.assertEqual(schema["required"], ["comment", "verdicts", "choices"])
+        self.assertEqual(schema["properties"]["choices"]["items"]["required"], ["check", "choice", "reserved", "basis"])
         self.assertEqual(schema["properties"]["verdicts"]["required"], ["1", "2", "3", "4", "5"])
         self.assertNotIn("held", schema["properties"])
         self.assertNotIn("--resume", out["arguments"])
@@ -2819,7 +2830,15 @@ class ReviewJob(unittest.TestCase):
         schema = self.schema(out["arguments"])
         self.assertEqual((schema["required"], schema["properties"]["verdicts"]["required"]),
                          (["comment", "held", "verdicts", "reasons"], check_ids("review.md")))
+        self.assertNotIn("change", schema["properties"])
         self.assertNotIn("--resume", out["arguments"])
+        # An enrollment that changes files outside projects/<name>/ also gives review-change.md's verdicts and choices.
+        code, out = self.prompt(KIND="enrollment", PR="8", NAME="zlib", OUTSIDE="2")
+        self.assertEqual(code, 0)
+        self.assertIn("also changes 2 files outside projects/zlib/", out["prompt"])
+        schema = self.schema(out["arguments"])
+        self.assertEqual((schema["required"][-1], schema["properties"]["change"]["required"]),
+                         ("change", ["verdicts", "choices"]))
         for code, out in (self.prompt(KIND="issue", ISSUE="45"), self.prompt(KIND="change", PR="8")):
             self.assertTrue(out["prompt"].endswith(" Give the result as the structured output."))
 
@@ -2884,9 +2903,10 @@ class ReviewJob(unittest.TestCase):
              "reasons": {"F7": "Fix X.\nIn fuzz/x.c."}})
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertEqual(comment, "Thanks.\n\n1. Fix X.\n")
-        # The verdicts and the reasons, each one line of JSON, for the comment job.
+        # The verdicts and the reasons, each one line of JSON, for the comment job; and no change, since an enrollment
+        # that changes only its project's files gives none.
         self.assertEqual(output, {"comment": "Thanks.\n\n1. Fix X.\n", "verdicts": '{"F2":"pass","F7":"fail"}',
-                                  "reasons": '{"F7":"Fix X.\\nIn fuzz/x.c."}'})
+                                  "reasons": '{"F7":"Fix X.\\nIn fuzz/x.c."}', "change": "null"})
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef01 head={'1' * 40}\n")
 
     def test_a_held_finding_stays_out_of_the_draft_and_its_session_is_not_kept(self):
@@ -2897,7 +2917,8 @@ class ReviewJob(unittest.TestCase):
         self.assertNotIn("SECRETBUG", comment + verdicts + json.dumps(output) + run.stdout + run.stderr)
         self.assertEqual(held, "<!-- held finding -->\n" + ReviewHeld.HELD + "\n")
         self.assertEqual(output, {"comment": "Thanks.\n\nA finding was sent for private review.\n",
-                                  "verdicts": '{"F2":"pass","F7":"pass"}', "reasons": "{}", "held": "yes"})
+                                  "verdicts": '{"F2":"pass","F7":"pass"}', "reasons": "{}", "change": "null",
+                                  "held": "yes"})
         self.assertIsNone(last)
 
     def test_each_output_the_comment_job_reads_fits_one_environment_variable(self):
@@ -2966,7 +2987,7 @@ class ReviewJob(unittest.TestCase):
         self.assertEqual((comment, verdicts), ("Second.\n", '{"F2":"pass"}'))
         self.assertEqual(last, f"session=09227178-7bbf-4e5f-86db-8736e530ef02 head={'1' * 40}\n")
         # The outputs are the review's alone: no step writes a count of the attempts.
-        self.assertEqual(set(output), {"comment", "verdicts", "reasons"})
+        self.assertEqual(set(output), {"comment", "verdicts", "reasons", "change"})
 
     # The cost collector's URL: bootstrap/'s stack output spendCollectorTailnetUrl in agent-infra, read with `pulumi
     # stack output --stack prod` after the apply of 2026-10-31 that made the Service svc:spend (INFRA-832 S1a): http://
@@ -3431,7 +3452,8 @@ else:
             root = pathlib.Path(directory)
             (root / "bin").mkdir()
             repo = "repos/theorem-labs/oss-verify"
-            state = {"ahead": list(ahead), f"{repo}/issues/34/comments": list(comments)}
+            state = {"ahead": list(ahead), f"{repo}/issues/34/comments": list(comments),
+                     f"{repo}/pulls/34": {"changed_files": 0}}
             (root / "state.json").write_text(json.dumps(state))
             (root / "bin" / "gh").write_text(
                 self.GATHER_GH.replace("@@PYTHON@@", sys.executable).replace("@@ROOT@@", repr(str(root))))
@@ -3520,6 +3542,15 @@ else:
         self.assertEqual(whole, "the whole diff against the base\n")
         _, output, since, whole, _ = self.gather_change([], None)
         self.assertEqual((output, since, whole), ("", None, "the whole diff against the base\n"))
+
+
+def main_only_on_pull_request(path, job, holds):
+    """What (m) of .github/scripts/workflow-credentials says of `job` of the pull_request workflow `path` that can get a
+    credential with `holds` and declares no environment."""
+    where = f"{path}: the job {job} can get a credential ({holds})"
+    return [f"{where} and declares no environment, so a run of any branch gets it: it must declare one of comment, "
+            "enroll-review, required-checks, review-screen, whose one deployment branch is main",
+            f"{where} and its workflow starts on pull_request, where it would run beside a pull request's code"]
 
 
 @functools.cache
@@ -3968,9 +3999,10 @@ class WorkflowCredentials(unittest.TestCase):
     UNOWN_TOOLCHAIN = (CODEOWNERS, LAST_UNOWNED, LAST_UNOWNED + "/.github/workflows/toolchain-images.yaml\n")
     # triage.yaml's one step.
     STEP = "    steps:\n      - run: echo"
-    # What a read of a secret in triage.yaml, with no owner, fails: the owners' check, then (r).
+    # What a read of a secret in triage.yaml, with no owner, fails: the owners' check, then (r), then (m).
     SECRET_READ = [".github/workflows/triage.yaml: the job triage holds a read of a secret, but .github/CODEOWNERS "
-                   "gives .github/workflows/triage.yaml no owner", "triage.yaml: it reads a secret"]
+                   "gives .github/workflows/triage.yaml no owner", "triage.yaml: it reads a secret",
+                   *main_only_on_pull_request(".github/workflows/triage.yaml", "triage", "a read of a secret")]
     # What a file that GitHub and PyYAML could read differently fails.
     DIFFERENTLY = ", which GitHub and this check could read differently"
 
@@ -4037,7 +4069,8 @@ class WorkflowCredentials(unittest.TestCase):
             [UNOWN_TRIAGE, (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {id-token: write}\n")],
             [".github/workflows/triage.yaml: the job triage holds id-token: write, but .github/CODEOWNERS gives "
              ".github/workflows/triage.yaml no owner", "triage.yaml, the job triage: it has id-token: write",
-             "triage.yaml, the job triage: id-token: write, but its if is not github.event_name == 'push'"]),
+             "triage.yaml, the job triage: id-token: write, but its if is not github.event_name == 'push'",
+             *main_only_on_pull_request(".github/workflows/triage.yaml", "triage", "id-token: write")]),
         "triage.yaml with no owner gets packages: write on push": (
             [UNOWN_TRIAGE, (TRIAGE, IF, PUSH_IF),
              (TRIAGE, JOB, "    timeout-minutes: 2\n    permissions: {packages: write}\n")],
@@ -4308,6 +4341,202 @@ class WorkflowCredentials(unittest.TestCase):
                 code, lines = self.run_on(root)
                 self.assertEqual((code, lines), (1, [f"::error::{workflows} holds no workflow file (*.yml, *.yaml): "
                                                      "nothing was checked."]))
+
+
+# (m) of .github/scripts/workflow-credentials, R10 of dispatch://INFRA-5359/spec: every job that can get a credential
+# declares an environment whose one deployment branch is main, none starts on pull_request, and none checks out a pull
+# request's code. These are pytest's tests (R13), beside the class above.
+CREDENTIAL_FIXTURES = ROOT / "tests" / "fixtures" / "review-check"
+# The jobs that can get a credential on main at 7639d04, each with its environment, read 2026-11-26.
+CREDENTIALED_JOBS = {
+    (".github/workflows/review.yml", "screen", "review-screen"),
+    (".github/workflows/review.yml", "review", "enroll-review"),
+    (".github/workflows/review.yml", "hold", "comment"),
+    (".github/workflows/review.yml", "comment", "comment"),
+    (".github/workflows/review.yml", "triage", "comment"),
+    (".github/workflows/enroll-dispatch.yml", "dispatch", "comment"),
+    (".github/workflows/required-checks.yml", "post", "required-checks"),
+}
+MAIN_ONLY = "comment, enroll-review, required-checks, review-screen"
+NO_ENVIRONMENT = (" and declares no environment, so a run of any branch gets it: it must declare one of "
+                  f"{MAIN_ONLY}, whose one deployment branch is main")
+# What (m) says of a run that can put other code than its run's own commit in the workspace.
+TRIPWIRE = ("a step runs gh pr checkout or git fetch, checkout, switch, worktree, pull or reset, or names "
+            "refs/pull/, which can put other code than its run's own commit in its workspace")
+# A workflow file that the controls add: it starts on push, and its one job, deploy, is what each control changes.
+ADDED = ".github/workflows/added.yml"
+
+
+def added_workflow(job, top="", on="push"):
+    """The text of ADDED: on `on`, with `top` before its jobs, and the job deploy whose keys after runs-on are `job`."""
+    return f"on: {on}\npermissions: {{}}\ncache-mode: none\n{top}jobs:\n  deploy:\n    runs-on: ubuntu-24.04\n{job}"
+
+
+def run_credentials(root):
+    """The script run on the checkout `root` as tests.yaml's job suite runs it: (its exit status, the lines it
+    printed)."""
+    run = subprocess.run([sys.executable, "-I", str(ROOT / ".github" / "scripts" / "workflow-credentials"), str(root)],
+                         capture_output=True, text=True, timeout=120)
+    return run.returncode, run.stdout.splitlines() + run.stderr.splitlines()
+
+
+@pytest.fixture(scope="module")
+def credentials_baseline(tmp_path_factory):
+    """A copy of each file that git tracks under .github/, the only files the script reads, which it passes: the
+    unchanged tree of every control below, made and checked once."""
+    root = tmp_path_factory.mktemp("credentials-baseline")
+    tracked = subprocess.run(["git", "ls-files", "-z", "--", ".github"], cwd=ROOT, capture_output=True, text=True,
+                             check=True)
+    names = [name for name in tracked.stdout.split("\0") if name]
+    assert ".github/CODEOWNERS" in names, "git enumerated no tracked file under .github/ for the copy"
+    for name in names:
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(ROOT / name, root / name)
+    code, lines = run_credentials(root)
+    assert code == 0, lines
+    return root
+
+
+def credentials_control(baseline, tmp_path, changes):
+    """Run the script on a copy of `baseline` with `changes`, each (path, old, new): the one `old` of the file replaced
+    by `new`, or with old None a new file. Return (its exit status, the lines it printed)."""
+    root = tmp_path / "tree"
+    shutil.copytree(baseline, root)
+    for name, old, new in changes:
+        path = root / name
+        if old is None:
+            assert not path.exists(), name
+            path.write_text(new)
+            continue
+        text = path.read_text()
+        assert text.count(old) == 1, (name, old)
+        path.write_text(text.replace(old, new, 1))
+    return run_credentials(root)
+
+
+def test_each_credentialed_job_is_listed_with_its_environment():
+    script = workflow_credentials()
+    problems, found = script.main_only(ROOT, script.workflow_files(ROOT))
+    assert problems == []
+    assert len(found) == len(CREDENTIALED_JOBS)
+    assert {(path, name, environment) for path, name, _, environment in found} == CREDENTIALED_JOBS
+    assert {holds for _, _, holds, _ in found} == {"id-token: write"}
+
+
+def test_each_main_only_environment_has_main_as_its_one_branch():
+    """The list in the script is the environments whose deployment-branch policies GitHub gave as main alone, saved by
+    gh api repos/theorem-labs/oss-verify/environments/<name>/deployment-branch-policies on 2026-11-26."""
+    saved = sorted(path.stem for path in (CREDENTIAL_FIXTURES / "environments").glob("*.json"))
+    assert saved == sorted(workflow_credentials().MAIN_ONLY_ENVIRONMENTS)
+    for name in saved:
+        answer = json.loads((CREDENTIAL_FIXTURES / "environments" / f"{name}.json").read_text())
+        assert answer["total_count"] == 1, name
+        assert [(policy["type"], policy["name"]) for policy in answer["branch_policies"]] == [("branch", "main")], name
+
+
+@pytest.mark.parametrize("changes, said", [
+    pytest.param([(ADDED, None, added_workflow("    permissions: {id-token: write}\n    steps:\n      - run: echo\n"))],
+                 [f"{ADDED}: the job deploy can get a credential (id-token: write){NO_ENVIRONMENT}"], id="a new job"),
+    pytest.param([(ADDED, None, added_workflow("    permissions: write-all\n    steps:\n      - run: echo\n"))],
+                 [f"{ADDED}: the job deploy can get a credential (id-token: write){NO_ENVIRONMENT}"], id="write-all"),
+    pytest.param([(".github/workflows/required-checks.yml",
+                   "    environment:\n      name: required-checks\n      deployment: false\n", "")],
+                 [".github/workflows/required-checks.yml: the job post can get a credential (id-token: write)"
+                  f"{NO_ENVIRONMENT}"], id="required-checks.yml's post loses its environment"),
+    pytest.param([(ADDED, None, "on: push\npermissions: {}\njobs:\n  call:\n    permissions: {id-token: write}\n"
+                                "    uses: ./.github/workflows/called.yml\n"),
+                  (".github/workflows/called.yml", None,
+                   "on: workflow_call\ncache-mode: none\njobs:\n  inner:\n    runs-on: ubuntu-24.04\n"
+                   "    steps:\n      - run: echo\n")],
+                 [".github/workflows/called.yml: the job inner, which the job call of .github/workflows/added.yml "
+                  f"calls, can get a credential (id-token: write){NO_ENVIRONMENT}"],
+                 id="a called job takes the calling job's identity token"),
+])
+def test_id_token_without_an_environment_fails(credentials_baseline, tmp_path, changes, said):
+    assert credentials_control(credentials_baseline, tmp_path, changes) == (1, [f"::error::{line}" for line in said])
+
+
+@pytest.mark.parametrize("read", [
+    "      - env: {T: '${{ secrets.TOKEN }}'}\n        run: echo\n",
+    "      - env: {T: \"${{ secrets['TOKEN'] }}\"}\n        run: echo\n",
+    "      - env: {T: '${{ SeCrEtS.TOKEN }}'}\n        run: echo\n",
+    "      - env: {T: '${{ toJSON(SECRETS) }}'}\n        run: echo\n",
+    "      - if: secrets.TOKEN != ''\n        run: echo\n",
+], ids=["dotted", "bracket", "any case", "whole", "an if with no ${{ }}"])
+def test_secrets_context_without_an_environment_fails(credentials_baseline, tmp_path, read):
+    got = credentials_control(credentials_baseline, tmp_path,
+                              [(ADDED, None, added_workflow(f"    permissions: {{}}\n    steps:\n{read}"))])
+    assert got == (1, [f"::error::{ADDED}: the job deploy can get a credential (a read of a secret){NO_ENVIRONMENT}"])
+
+
+def test_a_workflows_env_that_reads_a_secret_reaches_its_jobs(credentials_baseline, tmp_path):
+    got = credentials_control(credentials_baseline, tmp_path, [(ADDED, None, added_workflow(
+        "    permissions: {}\n    steps:\n      - run: echo\n", top="env: {T: '${{ secrets.TOKEN }}'}\n"))])
+    assert got == (1, [f"::error::{ADDED}: the job deploy can get a credential (a read of a secret){NO_ENVIRONMENT}"])
+
+
+@pytest.mark.parametrize("environment", ["production", "${{ inputs.environment }}"])
+def test_an_environment_not_on_the_main_only_list_fails(credentials_baseline, tmp_path, environment):
+    got = credentials_control(credentials_baseline, tmp_path, [(
+        ".github/workflows/required-checks.yml", "      name: required-checks\n", f"      name: {environment}\n")])
+    assert got == (1, [f"::error::.github/workflows/required-checks.yml: the job post can get a credential (id-token: "
+                       f"write) in the environment {environment}, which is not one of the main-only environments "
+                       f"{MAIN_ONLY}"])
+
+
+def test_a_credential_on_pull_request_fails(credentials_baseline, tmp_path):
+    # (r) refuses the environment and the identity token of a pull_request workflow's job too; (m) names the event.
+    got = credentials_control(credentials_baseline, tmp_path, [(
+        ".github/workflows/triage.yaml", "    timeout-minutes: 2\n    permissions: {}\n",
+        "    timeout-minutes: 2\n    environment: comment\n    permissions: {id-token: write}\n")])
+    assert got == (1, [f"::error::{line}" for line in (
+        "triage.yaml, the job triage: it has an environment",
+        "triage.yaml, the job triage: it has id-token: write",
+        "triage.yaml, the job triage: id-token: write, but its if is not github.event_name == 'push'",
+        ".github/workflows/triage.yaml: the job triage can get a credential (id-token: write) and its workflow starts "
+        "on pull_request, where it would run beside a pull request's code")])
+
+
+def test_a_credential_on_pull_request_review_fails(credentials_baseline, tmp_path):
+    # pull_request_review runs the pull request's copy of the workflow too; rule (r) reads pull_request alone.
+    got = credentials_control(credentials_baseline, tmp_path, [(
+        ".github/workflows/review-approvals.yml", "    timeout-minutes: 2\n",
+        "    timeout-minutes: 2\n    environment: comment\n    permissions: {id-token: write}\n")])
+    assert got == (1, ["::error::.github/workflows/review-approvals.yml: the job decided can get a credential "
+                       "(id-token: write) and its workflow starts on pull_request_review, where it would run beside a "
+                       "pull request's code"])
+
+
+@pytest.mark.parametrize("step, said", [
+    ("      - uses: actions/checkout@v6\n        with: {ref: '${{ github.event.workflow_run.head_sha }}'}\n",
+     "checks out ref ${{ github.event.workflow_run.head_sha }}: a job that can get one checks out only its run's own "
+     "commit"),
+    ("      - uses: Actions/Checkout@v6\n"
+     "        with: {repository: '${{ github.event.workflow_run.head_repository.full_name }}'}\n",
+     "checks out repository ${{ github.event.workflow_run.head_repository.full_name }}: a job that can get one checks "
+     "out only its run's own commit"),
+    *((run, TRIPWIRE) for run in (
+        "      - run: gh pr checkout 12\n", "      - run: echo +refs/pull/12/head\n",
+        "      - run: git fetch origin \"$HEAD_SHA\"\n", "      - run: |\n          cd x\n          git checkout FETCH_HEAD\n",
+        "      - run: git switch --detach abc\n", "      - run: git worktree add w abc\n", "      - run: git pull\n",
+        "      - run: git reset --hard abc\n")),
+], ids=["a ref", "a repository", "gh pr checkout", "refs/pull/", "git fetch", "git checkout", "git switch",
+        "git worktree", "git pull", "git reset"])
+def test_running_a_pull_requests_checkout_with_a_credential_fails(credentials_baseline, tmp_path, step, said):
+    job = "    environment: {name: comment, deployment: false}\n    permissions: {id-token: write}\n    steps:\n" + step
+    got = credentials_control(credentials_baseline, tmp_path,
+                              [(ADDED, None, added_workflow(job, on="{workflow_run: {workflows: [Build]}}"))])
+    assert got == (1, [f"::error::{ADDED}: the job deploy can get a credential (id-token: write) and {said}"])
+
+
+def test_a_job_with_a_main_only_environment_and_its_own_checkout_passes(credentials_baseline, tmp_path):
+    # The other side of the controls above: the same job, with its run's own checkout, passes.
+    job = ("    environment: {name: comment, deployment: false}\n    permissions: {id-token: write}\n    steps:\n"
+           "      - uses: actions/checkout@v6\n        with: {persist-credentials: false}\n")
+    code, lines = credentials_control(credentials_baseline, tmp_path,
+                                      [(ADDED, None, added_workflow(job, on="{workflow_run: {workflows: [Build]}}"))])
+    assert code == 0, lines
+    assert f"{ADDED} deploy in comment" in lines[0]
 
 
 if __name__ == "__main__":

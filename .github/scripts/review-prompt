@@ -4,7 +4,8 @@
 #
 # The prompt and the arguments of review.yml's one Review step, for the kind of review that route decided:
 #
-#   KIND=enrollment PR=<number> NAME=<project> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
+#   KIND=enrollment PR=<number> NAME=<project> [OUTSIDE=<count>] [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] \
+#     review-prompt
 #   KIND=change PR=<number> [SESSION=<id> LAST=<commit> HEAD_SHA=<commit>] review-prompt
 #   KIND=issue ISSUE=<number> review-prompt
 #
@@ -17,16 +18,29 @@
 # enrollment's verdicts give every check id of review.md, each with the verdicts it takes, as
 # .github/scripts/review-verdict lists them, and nothing else; its reasons give the sentences that decide each verdict
 # that is not pass, by the same ids. A change's verdicts take its rules file's check numbers and nothing else
-# (`propertyNames`). Claude Code validates the structured output against the schema and asks the model again on a
-# mismatch.
+# (`propertyNames`), and its choices list each choice of checks 4 and 5, ordinary or reserved for a person, with its
+# basis, which .github/scripts/review-check reads. An enrollment that also changes files outside projects/<name>/
+# (OUTSIDE, take-project's count, is not 0) gives the same verdicts and choices for those files, as `change`. Claude
+# Code validates the structured output against the schema and asks the model again on a mismatch.
 set -euo pipefail
 die() { echo "review-prompt: $1" >&2; exit 2; }
 number='^[0-9]+$' commit='^[0-9a-f]{40}$'
 resume=""
+# The verdicts and choices of review-change.md: of a change, and of the files of an enrollment outside its project.
+change=$(jq -cn '{type: "object", additionalProperties: false, required: ["verdicts", "choices"],
+  properties: {
+    verdicts: {type: "object", description: "The verdict of each check of review-change.md by its number.",
+               required: ["1", "2", "3", "4", "5"], propertyNames: {pattern: "^[0-9]+$"},
+               additionalProperties: {enum: ["pass", "fail", "person"]}},
+    choices: {type: "array", description: "Each choice of check 4 or check 5 of review-change.md that the change makes: what it is, whether review-change.md reserves it for a person, and its basis as the pull request records it, or empty when it records none.",
+              items: {type: "object", additionalProperties: false, required: ["check", "choice", "reserved", "basis"],
+                      properties: {check: {enum: ["4", "5"]}, choice: {type: "string"}, reserved: {type: "boolean"},
+                                   basis: {type: "string"}}}}}}')
 case ${KIND:-} in
   enrollment)
     [[ ${PR:-} =~ $number ]] || die "PR is not a number"
     [[ ${NAME:-} =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || die "NAME is not a project name"
+    [[ ${OUTSIDE:-0} =~ $number ]] || die "OUTSIDE is not a number"
     prompt="Read review.md at the root of this checkout: it says what OSS Verify's enrollment check of pull request"
     prompt+=" #$PR, projects/$NAME/, checks."
     if [[ ${SESSION:-} =~ ^[0-9a-f-]{36}$ && ${LAST:-} =~ $commit && ${HEAD_SHA:-} =~ $commit ]]; then
@@ -40,35 +54,41 @@ case ${KIND:-} in
       prompt+=" Then review"
     fi
     prompt+=' as the section "In CI" of .claude/skills/review-enrollment/SKILL.md says.'
+    if (( ${OUTSIDE:-0} > 0 )); then
+      prompt+=" This pull request also changes $OUTSIDE files outside projects/$NAME/, which .review/outside.txt names"
+      prompt+=" and .review/head/ holds: judge those files by the checks of review-change.md, on the whole diff of the"
+      prompt+=" pull request against its base, .review/pr.diff, as on a first review, whatever this prompt says of the"
+      prompt+=" diff since your last review, and give its verdicts and choices for them as change."
+    fi
     # Each check id, with the verdicts it takes: the one list, in review-verdict.
     takes=$("$(dirname "${BASH_SOURCE[0]}")/review-verdict" --ids)
-    schema=$(jq -cn --argjson takes "$takes" '{type: "object", additionalProperties: false,
-      required: ["comment", "held", "verdicts", "reasons"],
-      properties: {
+    schema=$(jq -cn --argjson takes "$takes" --argjson change "$change" --argjson outside "${OUTSIDE:-0}" '
+      {type: "object", additionalProperties: false,
+      required: (["comment", "held", "verdicts", "reasons"] + (if $outside > 0 then ["change"] else [] end)),
+      properties: ({
         comment: {type: "string", description: "The comment to the maintainer, in Markdown. Never a held finding."},
         held: {type: "string", description: "Each finding held back under rule 6 of review.md, as the skill section A held finding says, or empty."},
         verdicts: {type: "object", description: "The verdict of each check of review.md by its id, A1 to G5, and for an F check the worst over the fuzz targets. optional is the verdict of a weak fail of F5 or F8 alone, as review.md defines it.",
                    required: ($takes | keys_unsorted), additionalProperties: false,
                    properties: ($takes | map_values({enum: .}))},
         reasons: {type: "object", description: "For each check whose verdict is not pass, by its id: one or two sentences that the maintainer reads in the check run Enrollment review, the fact that decides the verdict. Never a held finding, and never a guess about whether we take the project.",
-                  propertyNames: {enum: ($takes | keys_unsorted)}, additionalProperties: {type: "string"}}}}')
+                  propertyNames: {enum: ($takes | keys_unsorted)}, additionalProperties: {type: "string"}}}
+        + (if $outside > 0 then {change: ($change + {description: "The verdicts and choices of review-change.md for the files outside projects/<name>/ that .review/outside.txt names."})} else {} end))}')
     ;;
   change)
     [[ ${PR:-} =~ $number ]] || die "PR is not a number"
     prompt="Read review-change.md at the root of this checkout: it says what OSS Verify's change review of pull request"
-    prompt+=" #$PR, which changes no file under projects/, checks, on what the workflow gathered into .review/."
+    prompt+=" #$PR, a change that is no enrollment of one project, checks, on what the workflow gathered into .review/."
     if [[ ${SESSION:-} =~ ^[0-9a-f-]{36}$ && ${LAST:-} =~ $commit && ${HEAD_SHA:-} =~ $commit ]]; then
       prompt+=" Earlier in this session you reviewed $LAST. .review/since-last-review.diff, the diff from $LAST to"
       prompt+=" $HEAD_SHA, is an aid for checks 1 to 3 only. Judge checks 4 and 5 on the whole diff of the pull request"
       prompt+=" against its base, .review/pr.diff, as on a first review."
       resume=" --resume $SESSION"
     fi
-    schema=$(jq -cn '{type: "object", additionalProperties: false, required: ["comment", "verdicts"],
-      properties: {
-        comment: {type: "string", description: "The comment to the contributor, in Markdown."},
-        verdicts: {type: "object", description: "The verdict of each check of review-change.md by its number.",
-                   required: ["1", "2", "3", "4", "5"], propertyNames: {pattern: "^[0-9]+$"},
-                   additionalProperties: {enum: ["pass", "fail", "person"]}}}}')
+    schema=$(jq -cn --argjson change "$change" '{type: "object", additionalProperties: false,
+      required: ["comment", "verdicts", "choices"],
+      properties: ({comment: {type: "string", description: "The comment to the contributor, in Markdown."}}
+                   + $change.properties)}')
     ;;
   issue)
     [[ ${ISSUE:-} =~ $number ]] || die "ISSUE is not a number"

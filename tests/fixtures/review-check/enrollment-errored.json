@@ -1,0 +1,12 @@
+{
+  "KIND": "enrollment",
+  "VERDICTS": null,
+  "REASONS": null,
+  "GATHER_RESULT": "success",
+  "SCREEN_RESULT": "success",
+  "SCREEN_VERDICT": "clean",
+  "REVIEW_RESULT": "failure",
+  "HEAD_SHA": "db464dc478cfaf82fd9aec5ed4cdf867b7411353",
+  "PR": "277",
+  "TRUST": "screen"
+}

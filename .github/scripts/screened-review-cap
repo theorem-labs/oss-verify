@@ -6,7 +6,7 @@
 # for every item whose trust is screen, a run started by hand included):
 #
 #   GH_TOKEN=<token with actions: read> REPO=<owner>/<name> RUN_ID=<this run's id> ACCOUNT=<the account this run is
-#     charged to> ALLOWED_BOTS=<the Apps that count as having write access> REVIEW_CAP=<runs in 24 hours> \
+#     charged to> WRITER_BOTS=<the Apps that count as having write access> REVIEW_CAP=<runs in 24 hours> \
 #     REVIEW_CAP_AUTHOR=<runs of one account in 24 hours> [NOW=<the time, for tests>] .github/scripts/screened-review-cap
 #
 # It reads review.yml's runs made in the 24 hours before NOW (by default the time it runs) that are older than this
@@ -27,7 +27,7 @@
 # count: a run that was cancelled (a re-run of the same Build or Triage run, or a newer run by hand for the same
 # pull request, cancels a run), and the run of an older head, whose gather job keeps nothing when the head moved.
 # Nor does a run that route capped or a run of a writer's trust. Write access is what GitHub's collaborator
-# permission API answers, admin or write, and the Apps of ALLOWED_BOTS count as having it, with one read of each
+# permission API answers, admin or write, and the Apps of WRITER_BOTS count as having it, with one read of each
 # account's permission. It reads the runs, their status included, and the two artifacts' lists, each in one
 # paginated call, and no run's jobs.
 # A known limit: route reads this count in its trust step and keeps its mark in the step after, so routes that run in
@@ -50,12 +50,12 @@ fail() {
 # The text between the two marks is the same as the copies in review.yml's route and gather jobs, so that it decides as
 # route's trust step does.
 # trusted
-# trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
+# trusted <login>: 0 when <login> is one of the WRITER_BOTS, or an account that GitHub's collaborator
 # permission API gives admin or write; 1 when it is neither; 2 when the API could not say.
 trusted() {
   local permission
   [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
-  [[ ,$ALLOWED_BOTS, != *",$1,"* ]] || return 0
+  [[ ,$WRITER_BOTS, != *",$1,"* ]] || return 0
   [[ $1 != *'[bot]' ]] || return 1
   permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
   [[ $permission == admin || $permission == write ]]
@@ -65,7 +65,7 @@ trusted() {
 [[ ${REVIEW_CAP:-} =~ ^[1-9][0-9]*$ && ${REVIEW_CAP_AUTHOR:-} =~ ^[1-9][0-9]*$ ]] \
   || fail "REVIEW_CAP or REVIEW_CAP_AUTHOR is not a number."
 [ -n "${ACCOUNT:-}" ] || fail "No account to charge this run to."
-ALLOWED_BOTS=${ALLOWED_BOTS:-}
+WRITER_BOTS=${WRITER_BOTS:-}
 now=$(date -u -d "${NOW:-now}" +%s) || fail "Not a time: ${NOW:-}."
 SINCE=$(date -u -d "@$((now - 86400))" +%Y-%m-%dT%H:%M:%SZ)
 export SINCE

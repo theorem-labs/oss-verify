@@ -222,14 +222,15 @@ def test_builds_route_fails_when_it_cannot_read_the_files(tmp_path):
 
 def route_review(tmp_path, files, changed=None, actor="someone", event="workflow_run",
                  run_path=".github/workflows/build.yaml", run_event="pull_request", conclusion="success", pulls=None,
-                 held=(), builds=(), fail=False):
+                 held=(), builds=(), fail=False, run_actor=("a-maintainer", "User"), permission="write"):
     """Run review.yml's route step on main, started by `actor`, with a fake gh that applies the step's --jq filter as
     gh does. On workflow_run, after run 900 of `run_path` on `run_event` that ended `conclusion`, at the head a*40 of
     mallory/libx's branch main; on workflow_dispatch, a run by hand of pull request 8. The gh gives as the open pull
     requests of that head `pulls` (by default pull request 8 into main), pull request 8 and its `files` (or fails to
     list them when `fail`), the runs GitHub holds at its head (`held`, their ids), and the completed Build runs of the
     head in `builds`, each a pair (the run, the artifacts named build-results that it lists), by default none.
-    Return its exit status, its outputs (one line each), and the gh calls."""
+    `run_actor` is the run's triggering account and its type, and `permission` that account's collaborator permission
+    (None: the read fails). Return its exit status, its outputs (one line each), and the gh calls."""
     bin = tmp_path / "bin"
     bin.mkdir()
     pull = pull_request(files, changed)
@@ -239,6 +240,8 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
                                            "head_sha": "a" * 40, "head_branch": "main",
                                            "head_repository": {"full_name": "mallory/libx"}} for i in held]}}
     answers.update({f"artifacts-{run['id']}": {"artifacts": list(artifacts)} for run, artifacts in builds})
+    if permission is not None:
+        answers["permission"] = {"permission": permission}
     if not fail:
         answers["files"] = files_of(files)
     for name, answer in answers.items():
@@ -250,6 +253,7 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
                             f'  jq -r "$filter" {tmp_path}/$1.json\n}}\n'
                             f'case " $*" in {USERS_GH}'
                             '  *"/pulls?"*) serve pulls ;;\n'
+                            '  *"/collaborators/"*) serve permission ;;\n'
                             '  *"/files"*) serve files ;;\n'
                             '  *"/pulls/"*) serve pull ;;\n'
                             '  *"status=action_required"*) serve held ;;\n'
@@ -267,7 +271,8 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
            "GITHUB_OUTPUT": str(written), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")}
     if event == "workflow_run":
         env.update(RUN_ID="900", RUN_EVENT=run_event, RUN_PATH=run_path, RUN_CONCLUSION=conclusion,
-                   RUN_HEAD_SHA="a" * 40, RUN_HEAD_REPOSITORY="mallory/libx", RUN_HEAD_BRANCH="main")
+                   RUN_HEAD_SHA="a" * 40, RUN_HEAD_REPOSITORY="mallory/libx", RUN_HEAD_BRANCH="main",
+                   RUN_ACTOR=run_actor[0], RUN_ACTOR_TYPE=run_actor[1])
     else:
         env["PR"] = "8"
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT, env=env)
@@ -301,13 +306,28 @@ def test_reviews_route_reviews_a_pull_request_with_no_file_under_projects_as_a_c
 
 @pytest.mark.parametrize("actor, want", [
     ("someone", ["kind=change"]), ("sjawhar-agent[bot]", ["kind=change"]), ("oss-verify[bot]", ["kind=change"]),
+    # Dependabot, whose pull requests bump the pinned actions: admitted, so its change gets the change review.
+    ("dependabot[bot]", ["kind=change"]),
     # An App the action refuses (src/github/validation/actor.ts) would fail the review, and so the check review jobs:
     # by its account type, so Copilot, whose login has no [bot] and which the Users API does not find, too.
-    ("dependabot[bot]", ENROLLMENT), ("oss-verify[bot]x[bot]", ENROLLMENT), ("Copilot", ENROLLMENT),
+    # route says so (refused), so that the gather job gives it no kind when take-project takes no project.
+    ("oss-verify[bot]x[bot]", ENROLLMENT + ["refused=true"]), ("Copilot", ENROLLMENT + ["refused=true"]),
 ])
 def test_a_change_that_an_app_the_review_refuses_started_is_an_enrollment_as_before(tmp_path, actor, want):
     code, outputs, _ = route_review(tmp_path, [".github/workflows/build.yaml"], actor=actor)
     assert (code, outputs) == (0, PULL + want)
+
+
+def test_a_refused_apps_pull_request_is_marked_refused_whatever_it_changes(tmp_path):
+    """The refusal does not depend on the files: a change of two projects (which take-project takes no project from)
+    is marked too, so that the gather job gives it no kind."""
+    for files in (["projects/p/project.yaml", "projects/q/project.yaml"], ["projects/p/project.yaml"]):
+        (tmp_path / str(len(files))).mkdir()
+        code, outputs, _ = route_review(tmp_path / str(len(files)), files, actor="Copilot")
+        assert (code, outputs) == (0, PULL + ENROLLMENT + ["refused=true"]), files
+    (tmp_path / "writer").mkdir()
+    code, outputs, _ = route_review(tmp_path / "writer", ["projects/p/project.yaml", "projects/q/project.yaml"])
+    assert (code, outputs) == (0, PULL + ENROLLMENT)
 
 
 def merged(base, change):
@@ -356,6 +376,14 @@ def test_reviews_route_reads_the_open_pull_request_at_the_runs_head(tmp_path, ch
     (".github/workflows/other.yml", "pull_request", "success", []),
     (".github/workflows/build.yaml", "pull_request_target", "success", []),
     (".github/workflows/build.yaml", "push", "success", []),
+    # A Review approvals run on pull_request_review that ended success: route asks for the comment job's refresh of
+    # the pull request's check run review alone, with no kind. On another event, or ended otherwise: nothing.
+    (".github/workflows/review-approvals.yml", "pull_request_review", "success", PULL + ["refresh=true"]),
+    (".github/workflows/review-approvals.yml", "pull_request", "success", []),
+    (".github/workflows/review-approvals.yml", "pull_request_review", "skipped", []),
+    (".github/workflows/review-approvals.yml", "pull_request_review", "failure", []),
+    (".github/workflows/review-approvals.yml", "pull_request_review", "", []),
+    (".github/workflows/build.yaml", "pull_request_review", "success", []),
 ])
 def test_reviews_route_reads_only_a_build_or_triage_run_of_a_pull_request_that_ended_so(tmp_path, run_path, run_event,
                                                                                         conclusion, want):
@@ -364,6 +392,35 @@ def test_reviews_route_reads_only_a_build_or_triage_run_of_a_pull_request_that_e
     assert (code, outputs) == (0, want)
     # A run it does not read stops route before any read of GitHub.
     assert bool(calls) == bool(want), calls
+
+
+@pytest.mark.parametrize("run_actor, permission, want", [
+    (("a-maintainer", "User"), "write", PULL + ["refresh=true"]),
+    (("a-maintainer", "User"), "admin", PULL + ["refresh=true"]),
+    # An App: only its installation on this repository lets it review or dismiss here.
+    (("sjawhar-agent[bot]", "Bot"), None, PULL + ["refresh=true"]),
+    # Any other account's review changes no person's approval: nothing runs, and no job that reads the App's key.
+    (("someone", "User"), "read", []),
+    (("someone", "User"), "triage", []),
+    (("someone", "User"), None, []),
+    (("some-org", "Organization"), None, []),
+    (("", ""), None, []),
+    (("someone;id", "User"), "write", []),
+], ids=["a writer", "an admin", "an App", "a reader", "a triager", "an unreadable permission", "an organization",
+        "no account", "a login of another shape"])
+def test_a_review_approvals_run_refreshes_only_for_a_writer_or_an_app(tmp_path, run_actor, permission, want):
+    code, outputs, calls = route_review(tmp_path, ["projects/p/project.yaml"],
+                                        run_path=".github/workflows/review-approvals.yml",
+                                        run_event="pull_request_review", run_actor=run_actor, permission=permission)
+    assert (code, outputs) == (0, want), calls
+    if not want:
+        # It stops before it reads the pull request, and asks for no job: the comment job, which signs in, does not
+        # run (its if needs route's refresh, kind, replay or a held head).
+        assert [c for c in calls if "/pulls" in c] == [], calls
+        comment_if = workflow("review.yml")["jobs"]["comment"]["if"]
+        context = {"github.event_name": "workflow_run", "github.ref": "refs/heads/main",
+                   "needs.route.result": "success"}
+        assert not evaluate(comment_if, context)
 
 
 def actor_kind(tmp_path, login, allowed="sjawhar-agent[bot],oss-verify[bot]", answer=None):

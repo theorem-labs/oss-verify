@@ -62,6 +62,7 @@ In the review job (Claude Code, through `anthropics/claude-code-action`), these 
 | the seed corpora (F3) | `$IN/seeds/<target>.listing.txt` (`unzip -l`) and `$IN/seeds/<target>.hex.txt` (the first 512 bytes of each of the first 200 inputs; an input that is not stored or deflated is not read, and its line says so) |
 | the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
+| the files outside `projects/<name>/`, which a branch of this repository can change too: judged by `review-change.md`, as `change`, on the whole diff (`$IN/pr.diff`) on every push, not only on the diff since the last review | `$IN/outside.txt` (their names) and `$IN/head/<path>` (each at the head) |
 
 ### A held finding
 

@@ -9,7 +9,7 @@
 #             workflow and event that must make it, at the commit; the record that build.yaml's record job wrote for
 #             it (each binary's .text and executable bytes); the pull request the record names and its files; and,
 #             for the label review-passed (below), the pull request's events, the runs from its head, and whether
-#             review.yml's rule trusts its author (ALLOWED_BOTS, from main's .github/workflows/review.yml, or write
+#             review.yml's rule trusts its author (WRITER_BOTS, from main's .github/workflows/review.yml, or write
 #             access). Its decision is dispatch, label or none (the script's header says when).
 #   dispatch  on dispatch: sends the repository_dispatch event enrollment-checked, with the pull request's number,
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
@@ -153,7 +153,7 @@ jobs:
           persist-credentials: false
           # .github/scripts: enroll-dispatch, and triage.py, which the maintainer check comes from, with the rules of
           # oss-verify validate it imports (.github/scripts/validate_rules/). .github/workflows: review.yml's
-          # ALLOWED_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this repository;
+          # WRITER_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this repository;
           # nothing of the pull request is checked out. Nor is src/, which has no code owner: no job that holds a token,
           # or whose outputs such a job reads, loads code from it (tests/test_token_jobs.py).
           sparse-checkout: |

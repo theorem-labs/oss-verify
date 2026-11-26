@@ -1,0 +1,33 @@
+{
+  "permission": "admin",
+  "user": {
+    "login": "sjawhar",
+    "id": 5074378,
+    "node_id": "MDQ6VXNlcjUwNzQzNzg=",
+    "avatar_url": "https://avatars.githubusercontent.com/u/5074378?v=4",
+    "gravatar_id": "",
+    "url": "https://api.github.com/users/sjawhar",
+    "html_url": "https://github.com/sjawhar",
+    "followers_url": "https://api.github.com/users/sjawhar/followers",
+    "following_url": "https://api.github.com/users/sjawhar/following{/other_user}",
+    "gists_url": "https://api.github.com/users/sjawhar/gists{/gist_id}",
+    "starred_url": "https://api.github.com/users/sjawhar/starred{/owner}{/repo}",
+    "subscriptions_url": "https://api.github.com/users/sjawhar/subscriptions",
+    "organizations_url": "https://api.github.com/users/sjawhar/orgs",
+    "repos_url": "https://api.github.com/users/sjawhar/repos",
+    "events_url": "https://api.github.com/users/sjawhar/events{/privacy}",
+    "received_events_url": "https://api.github.com/users/sjawhar/received_events",
+    "type": "User",
+    "user_view_type": "public",
+    "site_admin": false,
+    "permissions": {
+      "admin": true,
+      "maintain": true,
+      "push": true,
+      "triage": true,
+      "pull": true
+    },
+    "role_name": "admin"
+  },
+  "role_name": "admin"
+}

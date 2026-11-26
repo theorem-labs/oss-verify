@@ -42,7 +42,14 @@ name: "Tests"
 #               called workflow that the script cannot read, or Python unless the job's steps are the checkout, then
 #               the step that fails when an entry at the top of the checkout is named for a module of Python's
 #               standard library, exactly as written, then CodeQL's steps with no if, and neither the job nor its
-#               workflow sets defaults, no CodeQL step gets a PYTHONPATH and no step writes $GITHUB_ENV.
+#               workflow sets defaults, no CodeQL step gets a PYTHONPATH and no step writes $GITHUB_ENV;
+#             - a job that can get a credential (id-token: write, write-all, or a read of a secret, its own or its
+#               workflow's, or the calling job's for a called workflow) declares no environment of the script's
+#               MAIN_ONLY_ENVIRONMENTS, whose one deployment branch is main, starts on pull_request,
+#               pull_request_target, pull_request_review or pull_request_review_comment, or checks out other
+#               than its run's own commit (actions/checkout with a ref or a repository, gh pr checkout,
+#               refs/pull/, or a git fetch, checkout, switch, worktree, pull or reset); or a job that calls a
+#               workflow passes it secrets (R10 of dispatch://INFRA-5359/spec).
 #           The script, steering.py, which it imports, .github/CODEOWNERS and this file have owners, so only a person
 #           can change the rule. A fork's run takes the script and steering.py from the merge's first parent, a commit
 #           of the base branch (the step that checks out the merge checks it is one), and runs it with python3 -I,
