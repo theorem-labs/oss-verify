@@ -68,14 +68,16 @@ requires (rules/branches/main), must have passed at that commit in a run of the 
 on one of the events it names, whose head commit is that commit and whose head is that head; of those runs, the newest
 decides. A check run of the same name from any other run (a run of another file or event, a run of another commit, a
 second pull request at the same commit from another head) is not counted, and a required check with no entry in
-REQUIRED_SOURCES is never passed. build.yaml, validate.yaml and terms.yaml ran on pull_request_target, and they run on
-pull_request after they moved to it (the move). A run on either event counts, so that the checks of a head that ran
-before the move still count. A pull_request_target run ran the base branch's copy of the file. The bound checks are of
-a pull request into main (open_at, and the base check of a merge), so for them that copy is main's. A pull_request
-run runs the merge commit's copy, which a pull request that changes the file controls: the_project makes every such
-pull request none, as it has a file outside one projects/<name>/. The record is the artifact enrollment-record of the
-Build run whose project-builds check is the bound one, which build.yaml's record job wrote from project-builds'
-outputs; every value of it is checked against its shape.
+REQUIRED_SOURCES or PULL_CHECKS is never passed. Each check of PULL_CHECKS (review, which review.yml's comment job
+posts) must have passed at that commit in the newest check run of its name by the oss-verify App for that pull
+request, as Enrollment review is read. build.yaml, validate.yaml and terms.yaml ran on pull_request_target, and they
+run on pull_request after they moved to it (the move). A run on either event counts, so that the checks of a head that
+ran before the move still count. A pull_request_target run ran the base branch's copy of the file. The bound checks
+are of a pull request into main (open_at, and the base check of a merge), so for them that copy is main's. A
+pull_request run runs the merge commit's copy, which a pull request that changes the file controls: the_project makes
+every such pull request none, as it has a file outside one projects/<name>/. The record is the artifact
+enrollment-record of the Build run whose project-builds check is the bound one, which build.yaml's record job wrote
+from project-builds' outputs; every value of it is checked against its shape.
 
 The pull request of any other run is the one the record names. It must be open, into main, from that head, with that
 commit as its head commit, and its files must all be under one projects/<name>/, the record's project; it is read again
@@ -87,7 +89,7 @@ The steering-file gate. A steering file can change what a workflow runs, or what
 (steering.py lists them: each file under .github/, src/, infra/ and seeds/ among others, and files at any depth such as
 projects/<name>/AGENTS.md). So when a file of the pull request (by its name or its
 previous name) is a steering file, the run is none, for an open pull request and for a merge, unless a person approved
-the commit (person_approval). With
+the commit (person_approval of .github/scripts/approval.py, which review-check reads too). With
 that approval the run goes on, and its reason says who approved. A person approval is a review of the pull request in
 state APPROVED, of that commit, by a user of type User who is not the pull request's author and whose collaborator
 permission is admin or write. That user's newest review in state APPROVED, CHANGES_REQUESTED or DISMISSED must be that
@@ -159,9 +161,12 @@ import yaml
 # triage.py's maintainer check, the one the triage table shows as "Opened by an active maintainer". steering.py's list
 # of steering files, for the steering-file gate. artifact.py's read of one file of a Build run's artifact for the record
 # (read_member), the errors that this read does not catch (UNREADABLE), Api, and the check of a whole number (whole).
+# approval.py's person approval of a commit (person_approval), the one rule that review-check reads too, with the
+# write access, the login's shape and the time that it reads.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
 import triage  # noqa: E402
+from approval import LOGIN, person_approval, time_of, write_access  # noqa: E402
 from artifact import UNREADABLE, Api, read_member, whole  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
@@ -186,6 +191,11 @@ REQUIRED_SOURCES = {
     "terms-accepted": (".github/workflows/terms.yaml", PULL_EVENTS),
     "tests": (".github/workflows/tests.yaml", frozenset({"pull_request"})),
 }
+# The checks that review.yml's comment job posts as the oss-verify App (REVIEW_APP) for one pull request, with the
+# pull request's number as external_id (.github/scripts/review-check; R14 of dispatch://INFRA-5359/spec): each is
+# bound to that App and that pull request, as REVIEW_CHECK is, not to a run (its details_url is the review comment's
+# address). Each is required here whatever the ruleset says, as each of REQUIRED_SOURCES is (pull_checks).
+PULL_CHECKS = ("review",)
 # GitHub Actions, the app of every check run above. A theorem-labs/agent-infra change makes main's ruleset require the
 # four from the oss-verify App, whose copy of each .github/workflows/required-checks.yml posts after the run ends. This
 # script reads GitHub Actions' own check run of each instead, whatever App the ruleset names (required_checks).
@@ -207,8 +217,6 @@ NOT_REVIEWED = "not yet reviewed"
 REVIEW_WORKFLOW = ".github/workflows/review.yml"
 REVIEW_RUN_TITLE = re.compile(r"Review of run ([1-9][0-9]*)")
 REVIEW_PULL_TITLE = re.compile(r"Pull request ([1-9][0-9]*)")
-# The states of a review that give a reviewer's decision (person_approval). The newest of them is the one that counts.
-DECIDING_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
 # The label that someone other than the author, who can label (a member of theorem-labs, or one of its Apps), puts on an enrollment whose author the maintainer check does not show (a
 # pull request that our bot opened at a maintainer's request, for one): with it, the check is skipped. Putting it on
 # runs .github/workflows/maintainer-confirmed.yml, whose completion runs this again.
@@ -239,10 +247,7 @@ REVIEW_PASSED_NAMES = frozenset({REVIEW_PASSED, "passes-not-merging"})
 # The oss-verify App, whose token enroll-dispatch.yml writes the label with. A removal by any other account is a
 # person's, and the label does not go on again.
 APP_LOGIN = "oss-verify[bot]"
-# review.yml's rule for trusted accounts takes a login of this shape only.
-LOGIN = re.compile(r"[A-Za-z0-9-]+(\[bot\])?")
-TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
-# The checkout this script is in: review.yml there holds ALLOWED_BOTS.
+# The checkout this script is in: review.yml there holds WRITER_BOTS.
 CHECKOUT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
 
@@ -278,10 +283,11 @@ def required_checks(api: Api, repo: str) -> list[tuple[str, int | None]]:
     (.github/workflows/required-checks.yml), and the App posts its copy only after the run ends: this script, which
     starts when the run ends, would not find the App's copy yet, and no later event would run it again."""
     out: dict[str, int | None] = {context: ACTIONS_APP for context in REQUIRED_SOURCES}
+    out.update({context: REVIEW_APP for context in PULL_CHECKS})
     for rule in api.get(f"repos/{repo}/rules/branches/{DEFAULT_BRANCH}"):
         if rule.get("type") == "required_status_checks":
             for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
-                if check["context"] not in REQUIRED_SOURCES:
+                if check["context"] not in REQUIRED_SOURCES and check["context"] not in PULL_CHECKS:
                     out[check["context"]] = check.get("integration_id") or out.get(check["context"])
     return sorted(out.items())
 
@@ -307,6 +313,8 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
                   for c in page.get("check_runs") or []]
     waiting, build_run = [], None
     for context, app in required_checks(api, repo):
+        if context in PULL_CHECKS:
+            continue   # bound to a pull request, which pull_checks reads once the pull request is known
         source = REQUIRED_SOURCES.get(context)
         if source is None:
             waiting.append(f"{context} (no known source)")
@@ -330,6 +338,25 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
         elif context == "project-builds":
             build_run = found[1]
     return waiting, build_run
+
+
+def pull_checks(api: Api, repo: str, sha: str, number: int) -> list[str]:
+    """Each check of PULL_CHECKS that has not passed at `sha` for pull request `number`, with why: the newest check run
+    of that name by REVIEW_APP at `sha` whose external_id is `number` decides, as review_conclusion reads REVIEW_CHECK.
+    A check run of that name from another App, or of another pull request at the same commit, is not counted."""
+    check_runs = [c for page in api.pages(f"repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100")
+                  for c in page.get("check_runs") or []]
+    waiting = []
+    for name in PULL_CHECKS:
+        found = [c for c in check_runs if c.get("name") == name and (c.get("app") or {}).get("id") == REVIEW_APP
+                 and c.get("external_id") == str(number)]
+        if not found:
+            waiting.append(f"{name} (not posted by the oss-verify App for pull request {number})")
+            continue
+        newest = max(found, key=lambda c: c["id"])
+        if newest.get("status") != "completed" or newest.get("conclusion") != "success":
+            waiting.append(f"{name} ({newest.get('conclusion') or newest.get('status')})")
+    return waiting
 
 
 def build_record(api: Api, repo: str, run_id: int) -> tuple[dict | None, str]:
@@ -521,28 +548,16 @@ def passes(result: dict) -> str:
     return "" if result["decision"] == "dispatch" else "the run sends nothing"
 
 
-def write_access(api: Api, repo: str, login: str) -> bool | None:
-    """Whether GitHub's collaborator permission API gives `login` admin or write; None when the read fails or its
-    answer is not an object."""
-    try:
-        answer = api.get(f"repos/{repo}/collaborators/{login}/permission")
-    except (subprocess.CalledProcessError, ValueError):
-        return None
-    if not isinstance(answer, dict):
-        return None
-    return answer.get("permission") in ("admin", "write")
-
-
 def trusted(api: Api, repo: str, login: str) -> bool | None:
     """review.yml's rule for trusted accounts (the bash function trusted of its route's trust step), with the same
-    answers: True for an App of ALLOWED_BOTS, or an account that has write access (write_access); False for any other
-    account, and for a login of another shape; None when it could not be read. ALLOWED_BOTS is read from the env of
+    answers: True for an App of WRITER_BOTS, or an account that has write access (write_access); False for any other
+    account, and for a login of another shape; None when it could not be read. WRITER_BOTS is read from the env of
     review.yml in this checkout, so that there is one list."""
     if not LOGIN.fullmatch(login):
         return False
     try:
         with open(os.path.join(CHECKOUT, REVIEW_WORKFLOW), encoding="utf-8") as file:
-            bots = str(yaml.safe_load(file)["env"]["ALLOWED_BOTS"]).split(",")
+            bots = str(yaml.safe_load(file)["env"]["WRITER_BOTS"]).split(",")
     except (OSError, yaml.YAMLError, KeyError, TypeError):
         return None
     if login in bots:
@@ -550,38 +565,6 @@ def trusted(api: Api, repo: str, login: str) -> bool | None:
     if login.endswith("[bot]"):
         return False
     return write_access(api, repo, login)
-
-
-def person_approval(api: Api, repo: str, number: int, pull: dict, sha: str) -> str | None:
-    """The login of a person who approved the commit `sha` of pull request `number` (`pull`), or None. A person
-    approval is a review in state APPROVED with commit_id `sha`, by a user of type User who is not the pull request's
-    author and whose collaborator permission is admin or write (write_access, as trusted reads it, but with no
-    ALLOWED_BOTS). That user's newest review in a state of DECIDING_STATES (by submitted_at, then id) must be that
-    approval: a later CHANGES_REQUESTED, or the dismissal of the approval, takes it back. A read that fails gives no
-    approval."""
-    author = str((pull.get("user") or {}).get("login") or "").lower()
-    try:
-        reviews = [r for page in api.pages(f"repos/{repo}/pulls/{number}/reviews?per_page=100") for r in page
-                   if isinstance(r, dict)]
-    except (subprocess.CalledProcessError, ValueError):
-        return None
-    newest = {}   # each reviewer's newest review of DECIDING_STATES, by login in lower case
-    for review in reviews:
-        login = str((review.get("user") or {}).get("login") or "").lower()
-        if not login or review.get("state") not in DECIDING_STATES:
-            continue
-        order = (time_of(review.get("submitted_at")) or "", review["id"] if isinstance(review.get("id"), int) else -1)
-        if login not in newest or order > newest[login][0]:
-            newest[login] = (order, review)
-    for _, review in sorted(newest.values(), key=lambda found: found[0]):
-        user = review.get("user") or {}
-        login = str(user.get("login"))
-        if review.get("state") != "APPROVED" or review.get("commit_id") != sha or user.get("type") != "User" \
-                or login.lower() == author or not LOGIN.fullmatch(login):
-            continue
-        if write_access(api, repo, login) is True:
-            return login
-    return None
 
 
 def steering_gate(api: Api, repo: str, number: int, pull: dict, files: list[dict], sha: str) -> tuple[str, str]:
@@ -603,11 +586,6 @@ def steering_gate(api: Api, repo: str, number: int, pull: dict, files: list[dict
 def labelled(pull: dict, name: str = REVIEW_PASSED) -> bool:
     """Whether the pull request carries the label `name`."""
     return name in {(label or {}).get("name") for label in pull.get("labels") or []}
-
-
-def time_of(value: object) -> str | None:
-    """`value`, when it is a time as GitHub gives it (2026-11-11T20:44:39Z), else None."""
-    return value if isinstance(value, str) and TIME.fullmatch(value) else None
 
 
 def pull_of_head(api: Api, repo: str, sha: str, head: tuple) -> dict | None:
@@ -753,7 +731,7 @@ def review_passed(api: Api, repo: str, result: dict, pull: dict | None = None, s
         trust = trusted(api, repo, author)
         if trust is True:
             return say(f"is not put on: its author {author} is trusted by review.yml's rule (write access, or an App "
-                       "of ALLOWED_BOTS)")
+                       "of WRITER_BOTS)")
         if trust is None:
             return say(f"is not put on: whether its author {author} is trusted could not be read")
     try:
@@ -846,6 +824,7 @@ def merged_decision(api: Api, repo: str, runs: Runs, run: dict, number: int, pul
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
     waiting, build_run = bound_checks(api, runs, repo, sha, head)
+    waiting += pull_checks(api, repo, sha, number)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}{approval}: {', '.join(waiting)}; once they "
                        f"pass, {replay} decides again", number, project, sha)
@@ -949,6 +928,10 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
     why = open_at(pull, repo, sha, head)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
+    waiting = pull_checks(api, repo, sha, number)
+    if waiting:
+        return outcome("none", f"pull request {number}: required checks not passed at {sha[:7]}: "
+                       f"{', '.join(waiting)}", number, project, sha)
     why, approval = steering_gate(api, repo, number, pull, files, sha)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)

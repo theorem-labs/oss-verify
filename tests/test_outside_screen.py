@@ -949,8 +949,10 @@ class Routes(unittest.TestCase):
                 self.assertEqual(r.returncode == 0, ok, r.stdout + r.stderr)
 
     def test_nothing_reviewable_holds_nothing(self):
-        """An enrollment pull request whose gather job took no project (one that removes its project, say) is not
-        reviewed, so nothing is held either; nor is an enrollment with neither a Build run's results nor a held head."""
+        """An enrollment pull request whose gather job kept nothing, neither a project nor a kind (the head moved after
+        route read it, say), is not reviewed, so nothing is held either; nor is an enrollment with neither a Build run's
+        results nor a held head. A gather job that took no project gives the kind change instead
+        (tests/test_review_check.py)."""
         for trust in ("screen", "writer"):
             with self.subTest(trust=trust):
                 jobs, ctx = self.ran(dict(self.ENROLLMENT, trust=trust), outputs={"gather": {"digest": "", "name": ""}})
@@ -1359,18 +1361,22 @@ class Hold(Runner):
         return {f"env.{k}": v for k, v in comment_job_env(ctx).items()}
 
     def hold(self, trust, pr="7", number="7", comments=(), head="a" * 40, review="skipped", free=""):
-        """free: route's output free, the time the daily cap frees, for trust cap."""
+        """free: route's output free, the time the daily cap frees, for trust cap. Returns the calls, the body of each
+        comment the step sent, and its output. A pull request's hold also posts the check run review
+        (tests/test_review_check.py checks it)."""
         self.serve(f"repos/{REPO}/issues/{number}/comments", list(comments))
         self.serve(f"repos/{REPO}/issues/{number}/labels", [{"name": "review-held"}])
         self.serve(f"repos/{REPO}/labels/review-held", {"name": "review-held"})
         self.serve(f"repos/{REPO}/issues/comments/5", {})
         self.serve(f"repos/{REPO}/pulls/7", {"head": {"sha": head}})
-        rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR=pr, NUMBER=number, TRUST=trust,
-                                     HEAD_SHA="a" * 40, REVIEW=review, RUN_ID="100", FREE=free)
+        self.serve(f"repos/{REPO}/check-runs", {"id": 1})
+        rc, out, _ = self.run_script(step("comment", self.STEP)["run"], cwd=ROOT, PR=pr, NUMBER=number, TRUST=trust,
+                                     HEAD_SHA="a" * 40, REVIEW=review, RUN_ID="100", FREE=free, KIND="change",
+                                     RUN_URL=f"https://github.com/{REPO}/actions/runs/100")
         self.assertEqual(rc, 0, out)
         calls = self.calls()
         bodies = [json.loads((self.api / f"input.{i + 1}").read_text())["body"]
-                  for i, c in enumerate(calls) if "--input" in c]
+                  for i, c in enumerate(calls) if "--input" in c and any("/comments" in a for a in c)]
         return calls, bodies, out
 
     def test_a_held_item_is_labelled_and_told_in_fixed_words(self):
@@ -2201,7 +2207,9 @@ class RunWiring(unittest.TestCase):
                 self.assertEqual((self.group(ctx, BUILD), self.cancels(ctx, BUILD)), ("build-pull_request-7", True))
         on = REVIEW.get("on", REVIEW.get(True))
         triage = read_workflow("triage.yaml")
-        self.assertEqual(on["workflow_run"]["workflows"], [BUILD["name"], triage["name"]])
+        # And after a Review approvals run, which only refreshes the check run review (the refresh job).
+        self.assertEqual(on["workflow_run"]["workflows"],
+                         [BUILD["name"], triage["name"], read_workflow("review-approvals.yml")["name"]])
         # Runs 900 and 901 of Build are of two pull requests from mallory/libx's branch main, one into main and one into
         # another base. The review of each run has a group of its own. Runs 902 and 903 of Triage are of the first,
         # after two edits of its description. Their runs share one group, and the newer run cancels the older. Runs 904,
@@ -2215,7 +2223,8 @@ class RunWiring(unittest.TestCase):
                                                 ("Triage", 902, "success", shared), ("Triage", 903, "success", shared),
                                                 ("Triage", 904, "skipped", "review-workflow_run-904"),
                                                 ("Triage", 905, "cancelled", "review-workflow_run-905"),
-                                                ("Triage", 906, "failure", "review-workflow_run-906")):
+                                                ("Triage", 906, "failure", "review-workflow_run-906"),
+                                                ("Review approvals", 907, "success", "review-workflow_run-907")):
             with self.subTest(workflow_run=name, run_id=run_id, conclusion=conclusion):
                 ctx = dict(run, **{"github.event.workflow_run.name": name, "github.event.workflow_run.id": run_id,
                                    "github.event.workflow_run.conclusion": conclusion})

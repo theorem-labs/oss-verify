@@ -24,12 +24,13 @@ import urllib.parse
 import warnings
 import zipfile
 
+import pytest
 import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # The workflow tests' workflow reader, expression evaluator and step runner with a stand-in gh: GitHub's expressions,
 # evaluated as test_outside_screen.py evaluates them (the dispatch job's if and env, and its steps' if and env). REVIEW
-# is review.yml, whose env holds ALLOWED_BOTS and whose route holds the bash function trusted, the rule that trusted
+# is review.yml, whose env holds WRITER_BOTS and whose route holds the bash function trusted, the rule that trusted
 # ports.
 from test_outside_screen import REVIEW, Runner, as_text, evaluate, interpolated, read_workflow  # noqa: E402
 
@@ -142,7 +143,8 @@ class Calls:
 
 class World:
     """One enrollment pull request whose four required checks passed at its head commit (SHA unless one is given),
-    Build run 101's record of it, and the oss-verify App's check run Enrollment review at that commit, success."""
+    Build run 101's record of it, and the oss-verify App's check runs Enrollment review and review at that commit, each
+    success."""
 
     def __init__(self, sha=SHA):
         self.sha = sha
@@ -156,6 +158,9 @@ class World:
         self.artifacts[101] = record(sha=sha)
         self.review_runs = []  # check runs Enrollment review at the commit
         self.review(400)
+        # The check run review, as review.yml's comment job posts it for the pull request (after the four, so that
+        # the tests that name a check by its index still name the same one).
+        self.change_review(450)
         self.files = [{"filename": "projects/plugin-hostd/project.yaml", "status": "added"},
                       {"filename": "projects/plugin-hostd/build.sh", "status": "added"}]
         self.pulls = [self.pull(sha=sha)]
@@ -174,6 +179,13 @@ class World:
         whose number is its external_id (another App's, with `app`)."""
         self.review_runs.append({"id": check_id, "name": "Enrollment review", "app": {"id": app}, "status": status,
                                  "conclusion": conclusion, "head_sha": self.sha, "external_id": str(pr)})
+
+    def change_review(self, check_id, conclusion="success", app=OSS_VERIFY, status="completed", pr=PR):
+        """A check run review at the commit, as review.yml's comment job posts it for pull request `pr`, whose number is
+        its external_id (another App's, with `app`), and whose details_url is the review comment's address."""
+        self.checks.append({"id": check_id, "name": "review", "app": {"id": app}, "status": status,
+                            "conclusion": conclusion, "head_sha": self.sha, "external_id": str(pr),
+                            "details_url": f"https://github.com/{REPO}/pull/{pr}#issuecomment-1"})
 
     def run(self, run_id, path, event, head_sha=SHA, branch="add-plugin-hostd", head_repo="FreeREAC/oss-verify"):
         self.runs[run_id] = {"id": run_id, "path": path, "event": event, "head_sha": head_sha, "head_branch": branch,
@@ -2701,7 +2713,7 @@ class TrustRule(unittest.TestCase):
         if not shutil.which("jq"):
             self.skipTest("jq is not installed")
         script = "set -uo pipefail\n" + copies.pop() + 'trusted "$1"\n'
-        bots = REVIEW["env"]["ALLOWED_BOTS"]
+        bots = REVIEW["env"]["WRITER_BOTS"]
         collaborators = {"an-admin": "admin", "a-writer": "write", "a-reader": "read", "no-access": "none"}
         api = LabelApi({f"repos/{REPO}/collaborators/{login}/permission": {"permission": permission}
                         for login, permission in collaborators.items()},
@@ -2717,10 +2729,66 @@ class TrustRule(unittest.TestCase):
                 with self.subTest(login=login):
                     run = subprocess.run(["bash", "-c", script, "trusted", login], capture_output=True, text=True,
                                          env={**os.environ, "PATH": f"{bin}:{os.environ['PATH']}", "REPO": REPO,
-                                              "GH_STATE": str(directory / "state.json"), "ALLOWED_BOTS": bots})
+                                              "GH_STATE": str(directory / "state.json"), "WRITER_BOTS": bots})
                     self.assertIn(run.returncode, (0, 1, 2), run.stderr)
                     self.assertEqual((dispatch.trusted(api, REPO, login), {0: True, 1: False, 2: None}[run.returncode]),
                                      (want, want), run.stderr)
+
+
+# The check run review (R14 of dispatch://INFRA-5359/spec), which review.yml's comment job posts as the oss-verify App
+# for each pull request, its number as external_id: once main's ruleset requires it, an enrollment is sent only when
+# the newest one of the App for that pull request at the head is success, and it is required here whatever the
+# ruleset says, as the four are.
+def without_review(world):
+    world.checks = [c for c in world.checks if c["name"] != "review"]
+    return world
+
+
+@pytest.mark.parametrize("change, why", [
+    (without_review, "review (not posted by the oss-verify App for pull request 32)"),
+    (lambda w: w.checks[-1].update(conclusion="failure"), "review (failure)"),
+    (lambda w: w.checks[-1].update(conclusion=None, status="in_progress"), "review (in_progress)"),
+    (lambda w: (without_review(w), w.change_review(451, pr=33)), "review (not posted by the oss-verify App"),
+    (lambda w: (without_review(w), w.change_review(452, app=ACTIONS)), "review (not posted by the oss-verify App"),
+    (lambda w: w.change_review(453, conclusion="failure"), "review (failure)"),
+], ids=["missing", "failing", "running", "another pull request's", "another App's", "a newer failure"])
+@pytest.mark.parametrize("required", [False, True], ids=["the ruleset lists it not", "the ruleset requires it"])
+def test_an_enrollment_whose_check_review_has_not_passed_is_not_sent(change, why, required):
+    world = World()
+    if required:
+        world.required.append("review")
+        world.required_app = OSS_VERIFY
+    change(world)
+    got = world.decide()
+    assert got["decision"] == "none", got["reason"]
+    assert why in got["reason"]
+    assert "no known source" not in got["reason"]
+
+
+def test_an_enrollment_whose_check_review_passed_is_sent_when_the_ruleset_requires_it():
+    # The control of the cases above: the ruleset requires review from the App, and the App's newest one is success
+    # (an older failure of it does not count).
+    world = World()
+    world.required.append("review")
+    world.required_app = OSS_VERIFY
+    world.checks[-1].update(conclusion="failure")
+    world.change_review(454)
+    got = world.decide()
+    assert got["decision"] == "dispatch", got["reason"]
+    assert ("review", OSS_VERIFY) in dispatch.required_checks(world.api(), REPO)
+
+
+def test_a_merged_enrollment_whose_check_review_has_not_passed_is_not_sent():
+    merged = Merged()
+    for change, why in ((without_review, "review (not posted by the oss-verify App for pull request 32)"),
+                        (lambda w: w.checks[-1].update(conclusion="failure"), "review (failure)")):
+        world = merged.world()
+        change(world)
+        got = merged.decide(world)
+        assert got["decision"] == "none", got["reason"]
+        assert why in got["reason"]
+    # The control: the same merge with its check run review is sent.
+    assert merged.decide(merged.world())["decision"] == "dispatch"
 
 
 if __name__ == "__main__":

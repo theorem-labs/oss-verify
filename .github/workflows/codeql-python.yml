@@ -22,6 +22,7 @@ on:
       - .github/scripts/binary-sizes
       - .github/scripts/copy-validate-rules
       - .github/scripts/enroll-dispatch
+      - .github/scripts/review-check
       - .github/scripts/review-neutralize
       - .github/scripts/review-verdict
       - .github/scripts/take-build-results

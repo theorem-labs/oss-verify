@@ -2058,7 +2058,8 @@ class FirstRunArtifact(Stand):
             ctx.update({"needs.route.outputs.free": "", "needs.gather.result": "success",
                         "needs.gather.outputs.checks": build["checks"], "needs.gather.outputs.sizes": build["sizes"],
                         "needs.gather.outputs.screen": "true",
-                        "needs.gather.outputs.name": "x", "needs.screen.result": "success",
+                        "needs.gather.outputs.name": "x", "needs.gather.outputs.outside": "0",
+                        "needs.screen.result": "success",
                         "needs.screen.outputs.verdict": "clean", "needs.screen.outputs.checks": "claude",
                         "needs.review.result": "success", "needs.review.outputs.comment": "Thanks.\n",
                         "needs.review.outputs.verdicts": json.dumps({check: "pass" for check in ids}),
@@ -2071,7 +2072,12 @@ class FirstRunArtifact(Stand):
             sent = [r for r in self.requests(since) if r["method"] != "GET"]
             self.assertEqual([(r["token"], r["method"], r["endpoint"]) for r in sent],
                              [(APP_TOKEN, "POST", f"repos/{REPO}/issues/7/comments"),
+                              (APP_TOKEN, "POST", f"repos/{REPO}/check-runs"),
                               (APP_TOKEN, "POST", f"repos/{REPO}/check-runs")], f"the comment job's post ({label})")
+            # After Enrollment review, the check run review: this enrollment changes only projects/x/.
+            self.assertEqual((sent[1]["body"]["name"], sent[2]["body"]["name"], sent[2]["body"]["head_sha"],
+                              sent[2]["body"]["conclusion"]), ("Enrollment review", "review", HEAD, "success"),
+                             f"the comment job's post ({label})")
             self.assertTrue(sent[0]["body"]["body"].endswith(f"\n<!-- oss-verify-review-head {HEAD} -->\n"),
                             f"the comment job's post ({label})")
             self.assertEqual((sent[1]["body"]["head_sha"], sent[1]["body"]["external_id"]), (HEAD, PR),
@@ -3040,8 +3046,11 @@ class HeldApproval(Stand):
         """The check run that the step records for that hold when the oss-verify App has no check run Enrollment
         review of pull request 7 at HEAD: the body of its request."""
         rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
-        self.assertEqual((rc, out, [(r["method"], r["endpoint"]) for r in sent]),
-                         (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs")]), log)
+        self.assertEqual((rc, out, [(r["method"], r["endpoint"], r["body"]["name"]) for r in sent]),
+                         (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs", "Enrollment review"),
+                                                    ("POST", f"repos/{REPO}/check-runs", "review")]), log)
+        # The hold fails the check run review too.
+        self.assertEqual(sent[1]["body"]["conclusion"], "failure", log)
         return sent[0]["body"]
 
     def test_held_a_hold_of_a_held_head_replaces_no_verdict_of_the_review_at_that_head(self):
@@ -3082,7 +3091,8 @@ class HeldApproval(Stand):
                 self.assertEqual(earlier["output"]["title"], title)
                 rc, log, out, sent = self.hold_of_held_head(*screen_hold, (*self.not_app_runs, earlier))
                 self.assertEqual((rc, out), (0, {"recorded": "true"}), f"the earlier hold stands: {log}")
-                self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent],
+                self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent
+                                  if r["body"]["name"] == "Enrollment review"],
                                  [("POST", f"repos/{REPO}/check-runs", alone)], log)
 
     def test_held_the_newest_check_run_of_the_app_at_a_held_head_decides(self):
@@ -3098,7 +3108,8 @@ class HeldApproval(Stand):
                 rc, log, out, sent = self.hold_of_held_head(*self.HOLDS[0][1:4], runs)
                 if replaced:
                     self.assertEqual((rc, out), (0, {"recorded": "true"}), f"the newer hold stands: {log}")
-                    self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent],
+                    self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent
+                                      if r["body"]["name"] == "Enrollment review"],
                                      [("POST", f"repos/{REPO}/check-runs", self.recorded(*self.HOLDS[0][1:4]))], log)
                 else:
                     self.assertEqual((rc, out, sent), (0, {}, []), f"the hold replaces the newer verdict: {log}")
@@ -3453,7 +3464,7 @@ class HeldScreen(Stand):
                     {"id": n * 10, "name": name, "expired": False, "workflow_run": {"id": n}} for n in marked]})
             rc, log, _ = self.run_script(".github/scripts/screened-review-cap", ROOT, REPO=REPO, RUN_ID="1000",
                                          ACCOUNT="mallory", NOW=now,
-                                         **{k: str(review["env"][k]) for k in ("ALLOWED_BOTS", "REVIEW_CAP",
+                                         **{k: str(review["env"][k]) for k in ("WRITER_BOTS", "REVIEW_CAP",
                                                                                 "REVIEW_CAP_AUTHOR")})
             self.assertEqual(rc, 0, log)
             self.assertEqual(dict(re.findall(r"^(count|account_count)=(.*)$", log, re.M)),
