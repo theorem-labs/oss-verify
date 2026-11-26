@@ -73,7 +73,8 @@ name: "Review"
 #            them, and the enrollment review judges them by review-change.md as well. Its output `screen` is true for
 #            route's trust `screen`, and for a writer's item whose comments, reviews or review comments include one by
 #            an account without write access (or one GitHub cannot name; an App's own comment is told by the REST API's
-#            account type). Every item keeps the session of its last review, screened or not: the review job takes it,
+#            account type for that comment, and a writer App's review by the login the REST API gives that review).
+#            Every item keeps the session of its last review, screened or not: the review job takes it,
 #            and the screen job does not. For every enrollment it gathers the project's repository at the built commit,
 #            and a fetch that fails fails this job (below).
 #   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
@@ -195,9 +196,12 @@ name: "Review"
 #            An enrollment passes once its review ran without error, when it changes only files directly inside
 #            projects/<name>/: Enrollment review keeps the review's own conclusion. One that changes other files too
 #            (only a branch of this repository can) passes only as a change does, on the verdicts and choices that the
-#            same review gives those files. A hold fails it. A review that fails on a path that records no hold posts
-#            no check run review, so the head stays without one, and GitHub holds its merge. A newer head has no check
-#            run until its own review posts one.
+#            same review gives those files. A hold fails it, unless a person approved that head: a User with write
+#            access who is not the author, whose newest deciding review is that approval (.github/scripts/approval.py;
+#            dispatch://INFRA-5359/ask/605104e3-b85c-4c22-9a54-b254ba0e3c10). Then it passes, and its summary names that
+#            person and nothing of the pull request's text. A review that fails on a path that records no hold posts no
+#            check run review, so the head stays without one, and GitHub holds its merge. A newer head has no check run
+#            until its own review posts one.
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
@@ -207,7 +211,8 @@ name: "Review"
 #            It also holds a change pull request or an issue: for one that the screen held, that could not be
 #            gathered or screened, whose screened review did not finish, or that route held at the daily cap, it puts
 #            the label review-held on it and posts one comment in fixed words (marker <!-- oss-verify-held -->) that
-#            says it was held and how a person with write access starts the review, and nothing of why; a hold at the
+#            says it was held, how a person with write access starts the review, and for a pull request that such a
+#            person's approval of the head passes the check run review, and nothing of why; a hold at the
 #            cap says from when a push (for an issue, an edit of it) or a run by hand reviews it. A review it posts
 #            later, or for an issue a later review that made its draft, takes the label off and deletes that comment,
 #            unless a newer hold came after that review's run started.
@@ -222,8 +227,8 @@ name: "Review"
 #            After a Review approvals run (route's refresh), its step "Post the check run review again, with the
 #            approvals read now" posts the check run review of route's head again from the record of the newest
 #            one, with the approvals read then (.github/scripts/review-check --refresh), so a choice reserved for a
-#            person passes once that person approves the head, and fails again when the approval is dismissed or
-#            followed by a request for changes. No model runs. Such a run does nothing else.
+#            person, or a hold, passes once a person approves the head, and fails again once no person's approval of
+#            that head stands. No model runs. Such a run does nothing else.
 #   triage-gather
 #            after a Triage run, or on a run by hand that a person starts, for a pull request that touches projects/
 #            (the paths GitHub lists for it, renames under both names): writes the triage comment with main's
@@ -469,14 +474,22 @@ cache-mode: none
 env:
   # The Apps whose runs the review's action admits (its allowed_bots): our automation's, which opens enrollments and
   # starts this file by hand, the oss-verify App's, Legion's implementer App, which opens the pull requests of Legion's
-  # workers, and Dependabot's, whose pull requests bump the pinned actions and so need the check run review to merge.
-  # The one list: route reads it through .github/scripts/actor-kind, which decides as the action does, and the Review
-  # step gives it to the action.
-  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot],dependabot[bot]
+  # workers, Legion's reviewer App, which reviews them (and opens some), and Dependabot's, whose pull requests bump the
+  # pinned actions and so need the check run review to merge. The one list: route reads it through
+  # .github/scripts/actor-kind, which decides as the action does, and the Review step gives it to the action.
+  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot],legion-reviewer[bot],dependabot[bot]
   # The Apps of ALLOWED_BOTS that count as accounts with write access: route's and the gather job's trusted,
-  # .github/scripts/screened-review-cap and enroll-dispatch's trusted read this list. Dependabot is not one of them:
-  # the text of its pull requests is screened, and its runs are capped, as an account's without write access.
-  WRITER_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot]
+  # .github/scripts/screened-review-cap and enroll-dispatch's trusted read this list. Each one's installation holds
+  # write permissions on this repository, the criterion the collaborator API answers for a person: by gh api
+  # apps/<slug> on 2026-11-27, each of the four holds contents, pull_requests, issues and actions write, and
+  # legion-reviewer[bot], legion-implementer[bot] and oss-verify[bot] checks and statuses write as well. Their
+  # comments and reviews are this project's own text, so the screen does not read them, and their review comments
+  # only when every review comment of the item is a writer's (the gather job's step "Whether the review reads text
+  # of an account without write access", and all_review_comments_are_ours of .github/scripts/screen.py). An App
+  # never counts as a
+  # person's approval (.github/scripts/approval.py). Dependabot is not one of them: the text of its pull requests is
+  # screened, and its runs are capped, as an account's without write access.
+  WRITER_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot],legion-reviewer[bot]
   # The daily cap on the screens and model reviews of accounts without write access: at most REVIEW_CAP runs in any 24
   # hours over all pull requests and issues, and at most REVIEW_CAP_AUTHOR of them charged to one account. route's
   # trust step counts them with .github/scripts/screened-review-cap for every item whose trust is screen, before the
@@ -971,6 +984,10 @@ jobs:
       # The ids of the comments the step below confirmed are this App's own, by the account type the REST API
       # gives for each: gh names an App without its [bot], and a user can take that name.
       app_comments: ${{ steps.outside.outputs.app_comments }}
+      # The node ids of the reviews the step below confirmed are an App's of WRITER_BOTS, by the login the REST API
+      # gives each review (review-gather's review-authors.txt): gh's reviews in pr.json name an App without its
+      # [bot], and give no address by which to ask.
+      app_reviews: ${{ steps.outside.outputs.app_reviews }}
       # The session to resume and the commit it reviewed, from review-gather (empty for a fresh review), for every
       # item, screened or not. Only the review job takes the session from the file this job keeps; the screen job
       # takes none (.github/scripts/take-review-data), and reads the new text first.
@@ -1138,8 +1155,11 @@ jobs:
       # comments, which anyone can write and the review reads. This step asks GitHub which of their accounts have
       # write access, for two decisions. A writer's item whose text is all writers' is not screened at all; one
       # that holds text of another account is screened for those texts (SCREEN_SCOPE comments). And whatever the
-      # trust, the screen reads none of the writers' own text: it is this project's, not the outside text the
-      # screen is for (its output writers, and .github/scripts/screen.py). The accounts come from the files the
+      # trust, the screen reads none of the writers' own comments and reviews: they are this project's, not the
+      # outside text the screen is for (its output writers, and .github/scripts/screen.py). Their review comments
+      # are the exception: one outside author makes review-comments.txt read whole, writers' review comments in it,
+      # because a review comment's body can hold newlines and no line of that file can be given back to its author
+      # (all_review_comments_are_ours). The accounts come from the files the
       # review reads. A run started by hand is screened as an event's run is: route gives it trust writer only when
       # the item's author and the person who started it both have write access, and then this step still has the
       # screen read the text of any other account.
@@ -1173,22 +1193,31 @@ jobs:
             id=${BASH_REMATCH[1]}
             [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
           }
-          screen=true writers="" app=""
+          screen=true writers="" app="" app_reviews=""
           item=.review/pr.json
           [ -f "$item" ] || item=.review/issue.json
           # keep()'s last line is the exit status; an account GitHub no longer names is "-". A read that cannot be
           # parsed, or a pull request with no list of its review comments' authors, names no writer, and leaves
           # screen true: then the screen reads every comment, as it did before any of them was told apart.
-          if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // "")]),
-              ((.reviews // [])[] | [(.author.login // ""), ""])
-              | (if .[0] == "" then "-" else .[0] end) + "\t" + .[1]' 2> /dev/null) \
+          # A review's line carries its node id, which review-gather's review-authors.txt maps to the login the REST
+          # API gives its author, with an App's [bot]. The fields are split at U+001F, which read does not merge as
+          # it merges two tabs, so an empty url keeps its place.
+          if accounts=$(sed '$d' "$item" | jq -r '((.comments // [])[] | [(.author.login // ""), (.url // ""), ""]),
+              ((.reviews // [])[] | [(.author.login // ""), "", (.id // "")])
+              | (if .[0] == "" then "-" else .[0] end) + "\u001f" + .[1] + "\u001f" + .[2]' 2> /dev/null) \
               && { [ "$item" = .review/issue.json ] || [ -f .review/review-comment-authors.txt ]; }; then
             if [ -f .review/review-comment-authors.txt ]; then
               accounts+=$'\n'$(sed '$d' .review/review-comment-authors.txt | sed 's/^$/-/')
             fi
             outside=0
-            while IFS=$'\t' read -r login url; do
-              [ -n "$login$url" ] || continue
+            # review-authors.txt, when its read passed: each review's node id and its author's login, by the REST API.
+            rest=""
+            authors=.review/review-authors.txt
+            if [ -f "$authors" ] && [ "$(tail -n 1 "$authors")" = "(exit status 0)" ]; then
+              rest=$(sed '$d' "$authors")
+            fi
+            while IFS=$'\x1f' read -r login url id; do
+              [ -n "$login$url$id" ] || continue
               rc=0
               trusted "${login:--}" || rc=$?
               if (( rc == 0 )); then
@@ -1200,6 +1229,12 @@ jobs:
                 # App's, by the account type the REST API gives for it, so the screen is told its id, not a
                 # name.
                 app+=",${BASH_REMATCH[1]}"
+              elif [[ ${id:-} =~ ^[A-Za-z0-9_-]+$ ]] \
+                  && by=$(awk -v id="$id" '$1 == id { print $2; exit }' <<< "$rest") && [[ $by == *'[bot]' ]] \
+                  && trusted "$by"; then
+                # A review an App of WRITER_BOTS wrote, by the REST API's login of this very review: no other
+                # account can hold a login with [bot], so the screen is told the review's node id.
+                app_reviews+=",$id"
               else
                 outside=1
               fi
@@ -1216,6 +1251,7 @@ jobs:
             echo "screen=$screen"
             echo "writers=${writers#,}"
             echo "app_comments=${app#,}"
+            echo "app_reviews=${app_reviews#,}"
           } >> "$GITHUB_OUTPUT"
       # The session goes with every item, screened or not: the review job takes it, and the screen job does not
       # (.github/scripts/take-review-data).
@@ -1369,9 +1405,11 @@ jobs:
           # rest is a writer's, which the review reads as before.
           SCREEN_SCOPE: ${{ needs.route.outputs.trust == 'writer' && 'comments' || 'all' }}
           # The comments' and reviews' authors that have write access (the gather job): the screen reads none of
-          # their text, whatever the scope, since it is this project's own and not the outside text it is for.
+          # their comments or reviews, whatever the scope, since they are this project's own and not the outside
+          # text it is for; their review comments go with the others when one of those is an outside account's.
           SCREEN_WRITERS: ${{ needs.gather.outputs.writers }}
           SCREEN_APP_COMMENTS: ${{ needs.gather.outputs.app_comments }}
+          SCREEN_APP_REVIEWS: ${{ needs.gather.outputs.app_reviews }}
         run: python3 .github/scripts/screen.py .review ${NAME:+"projects/$NAME"}
       # Every listed check, MEASURE_REPEATS times, on each text of the labelled set kept in the private bucket (the
       # screen's account can read only its measure/set-* objects), and the verdict of each rule of SCREEN_RULE's
@@ -1938,8 +1976,9 @@ jobs:
     # comment says that it was sent. Any other outcome posts no comment and leaves the comment of an earlier head as
     # it is: the review comment stays the App's only comment on an enrollment pull request.
     # For a change pull request it posts the review's comment the same way, with no check run Enrollment review. For
-    # both kinds it posts the check run review of the reviewed head, and a hold of a pull request fails that check run
-    # (the top of this file, and .github/scripts/review-check). For a change pull
+    # both kinds it posts the check run review of the reviewed head, and a hold of a pull request fails that check
+    # run unless a person approved that head, which passes it (the top of this file, and
+    # .github/scripts/review-check). For a change pull
     # request or an issue that the screen held, that could not be gathered or screened, whose screened review failed,
     # or that route held at the daily cap: it puts the label review-held on it and posts one comment that says so, in
     # fixed words, which a later hold replaces. The comment says nothing of why, and this job could not: the screen
@@ -2001,7 +2040,8 @@ jobs:
       queue: max
     permissions:
       # contents: read only for the checkout of .github/scripts, main's (review-verdict, review-body, review-neutralize,
-      # review-check, approval.py, artifact.py, approve-held).
+      # review-check, approval.py, artifact.py, approve-held). The App's token reads the pull request's reviews, which
+      # review-check reads for a reserved choice and for a hold (approval.py's person_approval).
       contents: read
       # Only for the GitHub identity token that Google's federation trades for an access token of
       # ossv-app-comment@theorem-agent-root, which reads the App's key. It writes with the oss-verify App's token, not
@@ -2136,10 +2176,12 @@ jobs:
           echo "$said" >> "$GITHUB_STEP_SUMMARY"
 
       # Only after a Review approvals run (REFRESH, route's refresh): the check run review of route's head again, from
-      # the record of the newest one, with the approvals read now (.github/scripts/review-check --refresh), so a choice
-      # reserved for a person passes once that person approves the head and fails again when the approval is
-      # dismissed or followed by a request for changes. No model runs, and no other step of this job does anything on
-      # this path. It posts only when the conclusion or the title changes.
+      # the record of the newest one, with the approvals read now (.github/scripts/review-check --refresh), so a
+      # choice reserved for a person, or a hold, passes once a person approves the head and fails again once no
+      # person's approval of that head stands, a dismissal or a later request for changes having taken the last one
+      # back. No model runs, and no other step of this job does
+      # anything on this path. It posts only when the conclusion, the title or the record (output.text, which names
+      # the login whose approval the check run rests on) changes.
       - name: Post the check run review again, with the approvals read now
         if: env.REFRESH == 'true'
         env:
@@ -2163,18 +2205,25 @@ jobs:
             echo "Check run $id holds no record that an approval changes: nothing is posted."
             exit 0
           fi
-          if [ "$(jq -c '[.conclusion, .output.title]' <<< "$check")" = "$(jq -c '[.conclusion, .output.title]' <<< "$newest")" ]; then
-            echo "Check run $id stands: the approvals read now give it the same conclusion and title."
+          # The record too (output.text): it names the login whose approval the check run rests on, so one that still
+          # credits an approval that was taken back is replaced, even where another person's approval keeps the
+          # conclusion and the title. The record is this App's own text, which no text of the pull request reaches,
+          # so this compares what the App wrote and never what someone wrote in the pull request.
+          fields='[.conclusion, .output.title, .output.text]'
+          if [ "$(jq -c "$fields" <<< "$check")" = "$(jq -c "$fields" <<< "$newest")" ]; then
+            echo "Check run $id stands: the approvals read now give it the same conclusion, title and record."
             exit 0
           fi
-          jq --arg url "$(jq -r '.details_url // ""' <<< "$newest")" 'if $url == "" then . else . + {details_url: $url} end' <<< "$check" \
+          url=$(jq -r '.details_url // ""' <<< "$newest")
+          jq --arg url "$url" 'if $url == "" then . else . + {details_url: $url} end' <<< "$check" \
             | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
           echo "Posted the check run review of #$PR at $HEAD_SHA again: $(jq -r .conclusion <<< "$check")."
 
       # Fixed words: nothing of the pull request, the issue, its account or the screen's reason. Only an item that
       # gets no check run Enrollment review: that check run records the hold of an enrollment that RECORD names. A
-      # pull request's hold also posts the check run review of its head, failure, with the hold's title
-      # (.github/scripts/review-check): no review of the head gave it a verdict.
+      # pull request's hold also posts the check run review of its head (.github/scripts/review-check): failure with
+      # the hold's title, because no review of the head gave it a verdict, or success once a person approved that
+      # head (approval.py's person_approval), which the hold comment says a person can do.
       - name: Label it review-held and say so
         if: env.HOLDING == 'true' && env.RECORD != 'true'
         env:
@@ -2226,6 +2275,12 @@ jobs:
           else
             why="It comes from, or holds the text of, an account without write access to this repository, so an automated screen reads it before the automated review does, and the screen did not pass it or could not read it. Theorem decides the next step."
           fi
+          # A person's approval of this head passes the check run review of a pull request
+          # (dispatch://INFRA-5359/ask/605104e3-b85c-4c22-9a54-b254ba0e3c10, .github/scripts/review-check).
+          if [ -n "${PR:-}" ]; then
+            ask+=" A person with write access who is not its author can also approve this head on GitHub: the check"
+            ask+=" review then passes with no review."
+          fi
           [[ $RUN_ID =~ ^[0-9]+$ ]] || { echo "::error::not a run id: $RUN_ID"; exit 1; }
           printf '%s\n%s\n\n%s %s\n\n%s\n' '<!-- oss-verify-held -->' "**Automated review held.**" "$why" "$ask" \
             "<!-- oss-verify-held-run $RUN_ID -->" > "$RUNNER_TEMP/held.md"
@@ -2255,9 +2310,12 @@ jobs:
           elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then hold=failed job=review
           else hold=screen
           fi
-          HOLD=$hold JOB=$job .github/scripts/review-check | jq --arg url "$RUN_URL" '. + {details_url: $url}' \
+          # failure, or success when a person approved this head (.github/scripts/review-check).
+          check=$(HOLD=$hold JOB=$job .github/scripts/review-check)
+          jq --arg url "$RUN_URL" '. + {details_url: $url}' <<< "$check" \
             | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
-          echo "Posted the check run review of #$PR at $HEAD_SHA: failure ($hold${job:+, the $job job})."
+          posted=$(jq -r .conclusion <<< "$check")
+          echo "Posted the check run review of #$PR at $HEAD_SHA: $posted ($hold${job:+, the $job job})."
 
       # The review comment of a change pull request; for an enrollment pull request that RECORD names, the check run
       # Enrollment review too, from the same parsed verdicts, on every run this job runs for. The check run also keeps
@@ -2358,8 +2416,8 @@ jobs:
             verdict=$(HOLD=$hold JOB=$job .github/scripts/review-verdict)
             conclusion=$(jq -r .conclusion <<< "$verdict")
           fi
-          # The check run review, before anything is posted: review-check reads CHANGE, OUTSIDE and NAME, and for a
-          # choice reserved for a person, the pull request's reviews.
+          # The check run review, before anything is posted: review-check reads CHANGE, OUTSIDE and NAME, and the
+          # pull request's reviews for a choice reserved for a person and, with HOLD, for the hold.
           check=$(HOLD=$hold JOB=$job .github/scripts/review-check)
           url=""
           if [ -n "$hold" ]; then
