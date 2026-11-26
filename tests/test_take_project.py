@@ -11,6 +11,7 @@ import itertools
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 
@@ -519,6 +520,21 @@ def test_a_branch_of_this_repository_whose_merge_changes_one_project_takes_it(tm
             assert (pull.checkout / path).read_text() == text
     assert "This pull request lists 1 project that merging removes or leaves as on the base branch: not counted." in summary
     assert "Not an enrollment" not in log + summary
+
+
+@pytest.mark.parametrize("files, removed", [
+    (ENROLLMENT, ()), ({**ENROLLMENT, "tools/notes.txt": "a maintainer's change\n"}, ()),
+    (ENROLLMENT, ("projects/other",))],
+    ids=["the project alone", "with a file outside projects/", "removing another project"])
+def test_outside_counts_each_path_the_merge_changes_but_the_taken_projects_files(tmp_path, files, removed):
+    """review.yml judges these files by review-change.md: another project's files, a removed one's too, are outside
+    the taken project, though the build counts no project but the one it takes."""
+    pull = PullRequest(tmp_path, files, removed=removed)
+    code, log, values, _ = pull.run(REPO)
+    assert code == 0, log
+    want = [path for path in pull.paths if not re.fullmatch(r"projects/demo/[^/]+", path)]
+    assert (values["name"], values["outside"]) == ("demo", str(len(want))), pull.paths
+    assert values["outside"] != "0" or not want
 
 
 @pytest.mark.parametrize("head", ["someone/oss-verify", ""])

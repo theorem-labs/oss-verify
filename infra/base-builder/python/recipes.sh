@@ -27,7 +27,11 @@
 # phase only, the malloc allocator, a fixed sys.executable that does not exist, no select.epoll, hash seed 0).
 #
 # From the build recipe of the oss-fuzz-theorems 2026.10 release (tools/python/recipe.sh), in its release mode: the same
-# paths, names, flags and steps. The comments are new, and the stock runtime is left out.
+# paths, names, flags and steps. The comments are new, and the stock runtime is left out. One name differs: the
+# release made each target's scratch directory with mktemp, as $BUILDDIR/py.XXXXXX, with a link $BUILDDIR/py to it, and
+# here it is $BUILDDIR/py itself (oft_py_workdir). The debug information of harness.o names that directory, so with a
+# name of mktemp's no two builds gave the same harness.o, liboft.a, unstripped fuzz target or compile records. The
+# published fuzz target, linked with --strip-all, holds no debug information: its bytes are the same with either name.
 
 OFT_PY_DIR=/usr/local/lib/oss-verify/python
 # The toolchain image's Python: the CPython tarball and a native CPython 3.11.13 built from it.
@@ -108,11 +112,12 @@ oft_py_runtime() {
   OFT_PY_RT=$rt
 }
 
-# oft_py_workdir: a new scratch directory for this target, named by $BUILDDIR/py.
+# oft_py_workdir: the scratch directory of this target, $BUILDDIR/py, made anew. Its name is the same in every build
+# (above): the target's build directory is its own, and one container builds its targets one after another.
 oft_py_workdir() {
-  mkdir -p "$BUILDDIR"
-  OFT_PY_W=$(mktemp -d "$BUILDDIR/py.XXXXXX")
-  ln -sfn "$OFT_PY_W" "$BUILDDIR/py"
+  OFT_PY_W=$BUILDDIR/py
+  rm -rf "$OFT_PY_W"
+  mkdir -p "$OFT_PY_W"
 }
 
 # oft_py_install: the project's own pip install, with no network. PY_INSTALL is pip's arguments in the project's

@@ -22,13 +22,14 @@ import io
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
-import unittest
-from unittest import mock
+
+import pytest
 
 from oss_verify import check_binaries
 from oss_verify import check_checks
@@ -107,9 +108,10 @@ def host_root():
     return data.getvalue(), mounts
 
 
-class CoreDumpFilter(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
+class TestCoreDumpFilter:
+    @pytest.fixture(scope="class", autouse=True)
+    def set_up_class(self, request, tmp_path_factory):
+        cls = request.cls
         needs = (("an x86-64 Linux host (the containers run the host's /usr, and infra/checks/host-calls.c reads "
                   "x86-64 registers)", sys.platform == "linux" and platform.machine() == "x86_64"),
                  ("Docker", docker_answers()),
@@ -119,10 +121,10 @@ class CoreDumpFilter(unittest.TestCase):
             message = "the test needs " + " and ".join(missing)
             if os.environ.get("GITHUB_ACTIONS") == "true":
                 raise AssertionError(message + ", which the runners of tests.yaml have")
-            raise unittest.SkipTest(message)
+            pytest.skip(message)
         archive, mounts = host_root()
-        # Class cleanups run when setUpClass fails too, so a failure after import removes this process's image as well.
-        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
+        # A finalizer runs when this fixture fails too, so a failure after import removes this process's image as well.
+        request.addfinalizer(lambda: subprocess.run(["docker", "image", "rm", TAG], capture_output=True))
         imported = subprocess.run(["docker", "import", "-", TAG], input=archive, capture_output=True)
         if imported.returncode != 0:
             raise AssertionError(f"docker import exited {imported.returncode}: "
@@ -132,19 +134,18 @@ class CoreDumpFilter(unittest.TestCase):
         cls.labels = ["--pull=never", *(arg for host in mounts for arg in ("-v", f"{host}:{host}:ro"))]
         cls.control = subprocess.run(["docker", "run", "--rm", "--init", "--network=none", *cls.labels, "--entrypoint",
                                       "/bin/sh", TAG, "-c", CONTROL], capture_output=True, text=True)
-        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-core-dump-filter.")
-        cls.addClassCleanup(cls.scratch.cleanup)
-        cls.work = pathlib.Path(cls.scratch.name)
+        cls.work = tmp_path_factory.mktemp("ov-test-core-dump-filter")
         cls.stand_in = cls.work / "qemu"
         cls.stand_in.write_text(STAND_IN)
         cls.stand_in.chmod(0o755)
 
-    def setUp(self):
+    @pytest.fixture(autouse=True)
+    def set_up(self):
         if self.control.returncode != 0:
-            self.fail(f"the control's docker run exited {self.control.returncode}: {self.control.stderr}")
+            pytest.fail(f"the control's docker run exited {self.control.returncode}: {self.control.stderr}")
         start = self.control.stdout.strip()
-        self.assertRegex(start, r"^[0-9a-f]{8}$", "the control printed no coredump_filter")
-        self.assertNotEqual(start, ZERO, NO_FAULT)
+        assert re.search(r"^[0-9a-f]{8}$", start), "the control printed no coredump_filter"
+        assert start != ZERO, NO_FAULT
 
     # run_all and run_job drop the container's own output (check_build.run(..., quiet=True)), and raise Failed when
     # the script exits with a status other than 0. The test reads what each run of the stand-in wrote.
@@ -155,12 +156,13 @@ class CoreDumpFilter(unittest.TestCase):
         (bins / "target").write_bytes(b"")
         for n in range(4):
             (inputs / "target" / str(n)).write_bytes(check_checks.HEADER + bytes([n]))
-        with mock.patch.object(check_checks, "qemu", return_value=self.stand_in):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_checks, "qemu", lambda *args, **kwargs: self.stand_in)
             runs = check_checks.run_all(TAG, bins, inputs, {"target": [f"input {n}" for n in range(4)]}, "stand-in",
                                         results, labels=self.labels)
         found = {run.index: ((results / "target" / f"{run.index}.filter").read_text().strip(), run.status)
                  for run in runs}
-        self.assertEqual(found, {n: (ZERO, 0) for n in range(4)}, "each run's (coredump_filter, exit status)")
+        assert found == {n: (ZERO, 0) for n in range(4)}, "each run's (coredump_filter, exit status)"
 
     def test_each_run_of_run_binaries_has_a_coredump_filter_of_0(self):
         job_dir = self.work / "binary-job"
@@ -173,8 +175,4 @@ class CoreDumpFilter(unittest.TestCase):
         results = check_binaries.run_job(job_dir, TAG, self.stand_in, self.labels, 120)
         found = {n: ((results / f"l{n}.trace").read_text().strip(), (results / f"l{n}.status").read_text().strip())
                  for n in range(2)}
-        self.assertEqual(found, {n: (ZERO, "0") for n in range(2)}, "each run's (coredump_filter, exit status)")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert found == {n: (ZERO, "0") for n in range(2)}, "each run's (coredump_filter, exit status)"

@@ -1,0 +1,44 @@
+[
+  {
+    "id": 6066731380,
+    "node_id": "PRR_kwDOVTV78s8AAAABaZr5dA",
+    "user": {
+      "login": "sjawhar",
+      "id": 5074378,
+      "node_id": "MDQ6VXNlcjUwNzQzNzg=",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5074378?u=633bc1fa3be7bc2d460dd0797a9149b0e47195be&v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/sjawhar",
+      "html_url": "https://github.com/sjawhar",
+      "followers_url": "https://api.github.com/users/sjawhar/followers",
+      "following_url": "https://api.github.com/users/sjawhar/following{/other_user}",
+      "gists_url": "https://api.github.com/users/sjawhar/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/sjawhar/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/sjawhar/subscriptions",
+      "organizations_url": "https://api.github.com/users/sjawhar/orgs",
+      "repos_url": "https://api.github.com/users/sjawhar/repos",
+      "events_url": "https://api.github.com/users/sjawhar/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/sjawhar/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "",
+    "state": "APPROVED",
+    "html_url": "https://github.com/theorem-labs/oss-verify/pull/315#pullrequestreview-6066731380",
+    "pull_request_url": "https://api.github.com/repos/theorem-labs/oss-verify/pulls/315",
+    "author_association": "MEMBER",
+    "is_copilot_code_review": false,
+    "copilot_code_review_effort": null,
+    "_links": {
+      "html": {
+        "href": "https://github.com/theorem-labs/oss-verify/pull/315#pullrequestreview-6066731380"
+      },
+      "pull_request": {
+        "href": "https://api.github.com/repos/theorem-labs/oss-verify/pulls/315"
+      }
+    },
+    "submitted_at": "2026-11-26T00:04:25Z",
+    "commit_id": "c4582ddc3db499ee2b85350adbe6923d74a48d92"
+  }
+]

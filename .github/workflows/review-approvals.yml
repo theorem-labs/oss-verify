@@ -1,0 +1,35 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "Review approvals"
+# Runs when a review of a pull request is submitted as an approval or a request for changes, or when a review is
+# dismissed. review.yml's route acts on its completion only when the account that started it is a User with write access
+# or an App, the only accounts whose review or dismissal can change a person's approval: any other account's review
+# starts no job that reads the App's key. Its only work is to complete: review.yml runs on its completion
+# (workflow_run), and its comment job posts the check run review of the pull request's head again from the record of the
+# newest one, with the approvals read then (.github/scripts/review-check). That check passes the choices that
+# review-change.md reserves for a person only once a User with write access who is not the author approved the exact
+# head (.github/scripts/approval.py), so an approval given after the review makes it pass, and a dismissal or a later
+# request for changes makes it fail again, with no new review by the model. A review that only comments changes no
+# decision, and runs nothing.
+#
+# This workflow holds no permission, checks out nothing, and runs no code of the pull request. pull_request_review: the
+# workflow file comes from the merge commit, so a pull request that changes it controls this run. That gives it no
+# credential and no verdict: review.yml's route reads this run's file, event, conclusion and the account that started
+# it, then the pull request from the API, and its comment job decides from main's scripts alone. A pull request that
+# stops this run only keeps its own check run review as it was. A run of a pull request's own copy changes nothing that
+# any other pull request reads.
+on:
+  pull_request_review:
+    types: [submitted, dismissed]
+permissions: {}
+# It reads and writes no Actions cache.
+cache-mode: none
+jobs:
+  decided:
+    if: >-
+      github.event.action == 'dismissed'
+      || github.event.review.state == 'approved' || github.event.review.state == 'changes_requested'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - run: echo "A review of this pull request decided; review.yml posts its check run review again when this run completes."

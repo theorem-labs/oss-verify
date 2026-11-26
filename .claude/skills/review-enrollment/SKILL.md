@@ -67,6 +67,7 @@ In the review job (Claude Code, through `anthropics/claude-code-action`), these 
 | whether the project is seeded (F3, F4) | `primary_contact` in the `project.yaml` of `DIR`, which is `n/a` for a seeded project. F3 and F4 report nothing for a seeded project (`review.md`) |
 | the review comments of other reviewers (G5) | `$IN/review-comments.txt`, and `.reviews` in `$IN/pr.json` |
 | the changes since the last review (a later push) | `$IN/since-last-review.diff` |
+| the files outside `projects/<name>/`, which a branch of this repository can change too: judged by `review-change.md`, as `change`, on the whole diff (`$IN/pr.diff`) on every push, not only on the diff since the last review | `$IN/outside.txt` (their names) and `$IN/head/<path>` (each at the head) |
 
 For a setup pull request, the pull request on an owner's repository that adds `.theorem/`, `check.yml`'s review job runs `.github/scripts/review-gather` with `KIND=setup` on the folder of its fetch job. That run reads no network, and `$IN` holds these files:
 

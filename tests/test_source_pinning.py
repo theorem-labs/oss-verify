@@ -4,13 +4,10 @@
 import contextlib
 import io
 import os
-import pathlib
 import subprocess
 import sys
-import tempfile
-import unittest
-from unittest import mock
 
+import pytest
 import yaml
 
 from oss_verify import check as check_tool
@@ -22,21 +19,22 @@ REPO = "https://example.org/demo"
 PIN = {"file": "demo_fuzzer.plain", "bytes": 1, "sha256": "1" * 64}
 
 
-class GitRepository(unittest.TestCase):
-    def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(self.scratch.cleanup)
-        self.root = pathlib.Path(self.scratch.name)
+class GitRepository:
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path, monkeypatch):
+        self.root = tmp_path
         # git with no configuration from this machine: its hooks, signing and URL rewrites stay out of the fixture,
         # for the fixture's own commits and for the real git ls-remote that resolve() runs.
         home = self.root / "home"
         home.mkdir()
-        environment = mock.patch.dict(os.environ, {
+        environment = {
             "PATH": os.environ["PATH"], "HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / "gitconfig"),
             "GIT_CONFIG_NOSYSTEM": "1",
-        }, clear=True)
-        environment.start()
-        self.addCleanup(environment.stop)
+        }
+        for name in os.environ.keys() - environment.keys():
+            monkeypatch.delenv(name)
+        for name, value in environment.items():
+            monkeypatch.setenv(name, value)
         self.remote = self.root / "remote"
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.remote)], check=True, capture_output=True)
         self.git("commit", "-q", "--allow-empty", "-m", "first")
@@ -47,9 +45,7 @@ class GitRepository(unittest.TestCase):
         self.git("commit", "-q", "--allow-empty", "-m", "second")
         self.latest = self.git("rev-parse", "HEAD")
         # Only the transport is redirected: resolve() still runs real git ls-remote.
-        transport = mock.patch.object(check_build, "git", self.local_transport)
-        transport.start()
-        self.addCleanup(transport.stop)
+        monkeypatch.setattr(check_build, "git", self.local_transport)
 
     def git(self, *args):
         return subprocess.check_output(
@@ -63,40 +59,39 @@ class GitRepository(unittest.TestCase):
                 *(self.remote.as_uri() if arg == REPO else arg for arg in args)]
 
 
-class Resolve(GitRepository):
+class TestResolve(GitRepository):
     def test_annotated_tag(self):
-        self.assertEqual(check_build.resolve(REPO, "v1"), self.commit)
-        self.assertEqual(check_build.resolve(REPO, "refs/tags/v1"), self.commit)
+        assert check_build.resolve(REPO, "v1") == self.commit
+        assert check_build.resolve(REPO, "refs/tags/v1") == self.commit
 
     def test_nested_annotated_tag(self):
         self.git("tag", "-a", "nested", "v1", "-m", "tag of a tag")
-        self.assertEqual(check_build.resolve(REPO, "nested"), self.commit)
-        self.assertEqual(check_build.resolve(REPO, "refs/tags/nested"), self.commit)
+        assert check_build.resolve(REPO, "nested") == self.commit
+        assert check_build.resolve(REPO, "refs/tags/nested") == self.commit
 
     def test_lightweight_tag(self):
-        self.assertEqual(check_build.resolve(REPO, "v1-light"), self.commit)
-        self.assertEqual(check_build.resolve(REPO, "refs/tags/v1-light"), self.commit)
+        assert check_build.resolve(REPO, "v1-light") == self.commit
+        assert check_build.resolve(REPO, "refs/tags/v1-light") == self.commit
 
     def test_explicit_refs_disambiguate_branch_and_tag(self):
         self.git("branch", "v1", self.latest)
-        self.assertEqual(check_build.resolve(REPO, "refs/heads/v1"), self.latest)
-        self.assertEqual(check_build.resolve(REPO, "refs/tags/v1"), self.commit)
-        with self.assertRaisesRegex(check_build.Failed, "both a branch and a tag"):
+        assert check_build.resolve(REPO, "refs/heads/v1") == self.latest
+        assert check_build.resolve(REPO, "refs/tags/v1") == self.commit
+        with pytest.raises(check_build.Failed, match="both a branch and a tag"):
             check_build.resolve(REPO, "v1")
 
-    def test_branch_and_default(self):
-        for ref in ("", "main", "refs/heads/main"):
-            with self.subTest(ref=ref):
-                self.assertEqual(check_build.resolve(REPO, ref), self.latest)
+    @pytest.mark.parametrize("ref", [pytest.param("", id="default"), "main", "refs/heads/main"])
+    def test_branch_and_default(self, ref):
+        assert check_build.resolve(REPO, ref) == self.latest
 
     def test_missing_ref(self):
-        with self.assertRaisesRegex(check_build.Failed, "no branch or tag"):
+        with pytest.raises(check_build.Failed, match="no branch or tag"):
             check_build.resolve(REPO, "missing")
 
 
-class LockedBuild(GitRepository):
-    def setUp(self):
-        super().setUp()
+class TestLockedBuild(GitRepository):
+    @pytest.fixture(autouse=True)
+    def set_up_project(self, set_up):
         self.project = self.root / "demo"
         self.project.mkdir()
         (self.project / "project.yaml").write_text(yaml.safe_dump({
@@ -126,11 +121,12 @@ class LockedBuild(GitRepository):
             return "builder", "project", ["demo_fuzzer"], {"demo_fuzzer": {"plain": dict(PIN)}}
 
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(sys, "argv", argv))
-            stack.enter_context(mock.patch.object(check_tool, "build_all", build_all))
-            stack.enter_context(mock.patch.object(check_build, "image_id", return_value="sha256:test"))
-            stack.enter_context(mock.patch.object(check_build, "sources", return_value={}))
-            stack.enter_context(mock.patch.object(check_build, "oss_verify_state", return_value=None))
+            patch = stack.enter_context(pytest.MonkeyPatch.context())
+            patch.setattr(sys, "argv", argv)
+            patch.setattr(check_tool, "build_all", build_all)
+            patch.setattr(check_build, "image_id", lambda *args, **kwargs: "sha256:test")
+            patch.setattr(check_build, "sources", lambda *args, **kwargs: {})
+            patch.setattr(check_build, "oss_verify_state", lambda *args, **kwargs: None)
             stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             code = check_tool.main()
         path = self.work / "manifest.yaml"
@@ -139,47 +135,43 @@ class LockedBuild(GitRepository):
 
     def test_lock_survives_deleted_ref(self):
         self.git("branch", "-D", "release")
-        self.assertEqual(self.git("cat-file", "-t", self.commit), "commit")
+        assert self.git("cat-file", "-t", self.commit) == "commit"
         code, built, data = self.run_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(built, [self.commit])
-        self.assertEqual(data["commit"], self.commit)
+        assert code == 0
+        assert built == [self.commit]
+        assert data["commit"] == self.commit
 
     def test_lock_survives_ambiguous_ref(self):
         self.git("tag", "release", self.latest)
         code, built, data = self.run_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(built, [self.commit])
-        self.assertEqual(data["commit"], self.commit)
+        assert code == 0
+        assert built == [self.commit]
+        assert data["commit"] == self.commit
 
     def test_lock_pins_original_commit_after_ref_moves(self):
         self.git("branch", "-f", "release", self.latest)
         code, built, data = self.run_check()
-        self.assertEqual(code, 0)
-        self.assertEqual(built, [self.commit])
-        self.assertEqual(data["commit"], self.commit)
+        assert code == 0
+        assert built == [self.commit]
+        assert data["commit"] == self.commit
 
     def test_lock_without_commit_resolves_live_ref(self):
         self.git("branch", "-f", "release", self.latest)
         code, built, data = self.run_check(pin_commit=False)
-        self.assertEqual(code, 0)
-        self.assertEqual(built, [self.latest])
-        self.assertEqual(data["commit"], self.latest)
+        assert code == 0
+        assert built == [self.latest]
+        assert data["commit"] == self.latest
 
     def test_unlocked_build_follows_live_ref(self):
         self.git("branch", "-f", "release", self.latest)
         code, built, data = self.run_check(use_lock=False)
-        self.assertEqual(code, 0)
-        self.assertEqual(built, [self.latest])
-        self.assertEqual(data["commit"], self.latest)
+        assert code == 0
+        assert built == [self.latest]
+        assert data["commit"] == self.latest
 
     def test_unlocked_build_rejects_deleted_ref(self):
         self.git("branch", "-D", "release")
         code, built, data = self.run_check(use_lock=False)
-        self.assertEqual(code, 1)
-        self.assertEqual(built, [])
-        self.assertIsNone(data)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert code == 1
+        assert built == []
+        assert data is None

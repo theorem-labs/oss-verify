@@ -13,7 +13,8 @@ import pathlib
 import re
 import subprocess
 import sys
-import unittest
+
+import pytest
 
 FRAMES = pathlib.Path(__file__).resolve().parents[1] / ".github" / "scripts" / "frame-pointers" / "frames.py"
 PREFIX = "fp_probe_"  # the functions that probe reads
@@ -186,7 +187,7 @@ def frames(text, *arguments):
                           env={**os.environ, "PATH": ""}, timeout=60)
 
 
-class Probe(unittest.TestCase):
+class TestProbe:
     """frames.py probe --expect fp|base on the disassembly of a probe binary."""
 
     def probe(self, expect, *functions):
@@ -195,82 +196,76 @@ class Probe(unittest.TestCase):
         writes there only when it stops with status 2, and an exception, which exits 1 as a failed rule does, writes
         its traceback there."""
         done = frames(disassembly(BINARY, *functions), "probe", "--expect", expect, "--objdump-output", "-", BINARY)
-        self.assertEqual(done.stderr, "")
+        assert done.stderr == ""
         lines = done.stdout.splitlines()
-        self.assertTrue(lines)
+        assert lines
         return done.returncode, [line.split(":", 1)[0] for line in lines if line.startswith(PREFIX)], lines[-1]
 
     def test_a_calling_function_that_sets_s0_from_sp_before_its_call_keeps_a_frame_record(self):
         status, named, verdict = self.probe("fp", LEAF, FRAMED)
-        self.assertEqual(status, 0, verdict)
-        self.assertEqual(named, ["fp_probe_leaf", "fp_probe_framed"])
+        assert status == 0, verdict
+        assert named == ["fp_probe_leaf", "fp_probe_framed"]
         status, _, verdict = self.probe("base", LEAF, FRAMED)
-        self.assertEqual(status, 1, verdict)
+        assert status == 1, verdict
 
     def test_a_calling_function_that_moves_a_value_into_s0_keeps_no_frame_record(self):
         status, _, verdict = self.probe("fp", LEAF, FRAMED, KEEPS_A_VALUE)
-        self.assertEqual(status, 1, verdict)
-        self.assertIn("fp_probe_keeps_a_value", verdict)
-        self.assertNotIn("fp_probe_framed", verdict)
+        assert status == 1, verdict
+        assert "fp_probe_keeps_a_value" in verdict
+        assert "fp_probe_framed" not in verdict
         status, _, verdict = self.probe("base", LEAF, FRAMED, KEEPS_A_VALUE)
-        self.assertEqual(status, 0, verdict)
-        self.assertIn("fp_probe_keeps_a_value", verdict)
-        self.assertNotIn("fp_probe_framed", verdict)
+        assert status == 0, verdict
+        assert "fp_probe_keeps_a_value" in verdict
+        assert "fp_probe_framed" not in verdict
 
     def test_a_tail_call_is_no_call_and_does_not_fail_expect_fp(self):
         status, named, verdict = self.probe("fp", LEAF, FRAMED, TAIL_CALL)
-        self.assertEqual(status, 0, verdict)
-        self.assertEqual(named, ["fp_probe_leaf", "fp_probe_framed", "fp_probe_tail_call"])
-        self.assertNotIn("fp_probe_tail_call", verdict)
+        assert status == 0, verdict
+        assert named == ["fp_probe_leaf", "fp_probe_framed", "fp_probe_tail_call"]
+        assert "fp_probe_tail_call" not in verdict
 
-    def test_with_only_a_tail_call_no_function_calls_and_the_probe_fails(self):
-        for expect in ("fp", "base"):
-            with self.subTest(expect=expect):
-                status, named, verdict = self.probe(expect, LEAF, TAIL_CALL)
-                self.assertEqual(status, 1, verdict)
-                self.assertEqual(named, ["fp_probe_leaf", "fp_probe_tail_call"])
-                # The verdict is about the binary, which has no calling function, and names neither function as one
-                # that keeps no frame record.
-                self.assertIn(BINARY, verdict)
-                self.assertNotIn("fp_probe_tail_call", verdict)
-                self.assertNotIn("fp_probe_leaf", verdict)
+    @pytest.mark.parametrize("expect", ["fp", "base"])
+    def test_with_only_a_tail_call_no_function_calls_and_the_probe_fails(self, expect):
+        status, named, verdict = self.probe(expect, LEAF, TAIL_CALL)
+        assert status == 1, verdict
+        assert named == ["fp_probe_leaf", "fp_probe_tail_call"]
+        # The verdict is about the binary, which has no calling function, and names neither function as one that
+        # keeps no frame record.
+        assert BINARY in verdict
+        assert "fp_probe_tail_call" not in verdict
+        assert "fp_probe_leaf" not in verdict
 
     def test_an_addi_s0_sp_after_the_first_call_does_not_count(self):
         status, _, verdict = self.probe("fp", LEAF, FRAMED, LATE_FRAME)
-        self.assertEqual(status, 1, verdict)
-        self.assertIn("fp_probe_late_frame", verdict)
-        self.assertNotIn("fp_probe_framed", verdict)
+        assert status == 1, verdict
+        assert "fp_probe_late_frame" in verdict
+        assert "fp_probe_framed" not in verdict
         status, _, verdict = self.probe("base", LEAF, FRAMED, LATE_FRAME)
-        self.assertEqual(status, 0, verdict)
-        self.assertIn("fp_probe_late_frame", verdict)
+        assert status == 0, verdict
+        assert "fp_probe_late_frame" in verdict
 
     def test_a_local_label_inside_a_function_does_not_start_a_new_function(self):
         # Were .Ltmp0 a function of its own, fp_probe_branches would make no call, and no probe function would.
         status, named, verdict = self.probe("fp", LEAF, BRANCHES)
-        self.assertEqual(status, 0, verdict)
-        self.assertEqual(named, ["fp_probe_leaf", "fp_probe_branches"])
+        assert status == 0, verdict
+        assert named == ["fp_probe_leaf", "fp_probe_branches"]
 
-    def test_a_binary_with_no_fp_probe_function_fails_the_probe(self):
-        for expect in ("fp", "base"):
-            with self.subTest(expect=expect):
-                status, named, verdict = self.probe(expect, MAIN)
-                self.assertEqual((status, named), (1, []), verdict)
-                self.assertIn(BINARY, verdict)
+    @pytest.mark.parametrize("expect", ["fp", "base"])
+    def test_a_binary_with_no_fp_probe_function_fails_the_probe(self, expect):
+        status, named, verdict = self.probe(expect, MAIN)
+        assert (status, named) == (1, []), verdict
+        assert BINARY in verdict
 
 
-class Count(unittest.TestCase):
+class TestCount:
     """frames.py count on the disassembly of an archive."""
 
     def test_an_archive_member_heading_ends_the_function_before_it(self):
         done = frames(ARCHIVE_TEXT, "count", "--objdump-output", "-", ARCHIVE)
-        self.assertEqual((done.returncode, done.stderr), (0, ""))
+        assert (done.returncode, done.stderr) == (0, "")
         lines = done.stdout.splitlines()
-        self.assertEqual(len(lines), 1, done.stdout)
+        assert len(lines) == 1, done.stdout
         path, _, numbers = lines[0].partition(": ")
-        self.assertEqual(path, ARCHIVE)
+        assert path == ARCHIVE
         # N of M: the calling functions that keep a frame record, of the calling functions (ARCHIVE_TEXT says which).
-        self.assertEqual(re.findall(r"\d+", numbers), ["1", "3"])
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert re.findall(r"\d+", numbers) == ["1", "3"]

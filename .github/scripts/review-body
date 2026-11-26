@@ -7,13 +7,16 @@
 #
 #   HEAD_SHA=<reviewed commit> REVIEW=<the review's comment> CHECKS=<the checks' report, or empty> \
 #     RULES=<review.md or review-change.md> [CONCLUSION=<success, failure or action_required>] \
-#     [SCREENED=<the screen's checks that ran, comma-separated>] .github/scripts/review-body
+#     [TITLE=<the title of the check run review>] [SCREENED=<the screen's checks that ran, comma-separated>] \
+#     .github/scripts/review-body
 #
 # Line 1 is the marker <!-- oss-verify-review -->, by which the comment job finds its comment again; the last line is
 # <!-- oss-verify-review-head <commit> -->, the whole reviewed commit, which the comment job reads before it holds a
 # change pull request. For an enrollment (RULES review.md), line 2 is the first sentence: the fixed sentence of
 # CONCLUSION, the conclusion of the check run Enrollment review that the same step records from the same verdicts
-# (.github/scripts/review-verdict --sentence). A change review has none. Then the footer that names the commit and the
+# (.github/scripts/review-verdict --sentence). For a change (RULES review-change.md), line 2 is TITLE when it is given:
+# the title of the check run review that the same step posts (.github/scripts/review-check), a fixed sentence of check
+# numbers, which says whether anything blocks the merge. Then the footer that names the commit and the
 # rules file, the review's first 50,000 characters and, when CHECKS is not empty, the first 12,000 of the checks'
 # report folded under it: GitHub refuses a comment over 65,536 characters. The review and the report are what a pull
 # request can steer, so each goes through .github/scripts/review-neutralize first: no mention, no reference to an issue
@@ -33,6 +36,11 @@ sentence=""
 if [ "$RULES" = review.md ]; then
   # Its own assignment, so that a CONCLUSION review-verdict refuses fails this script (set -e).
   sentence=$("$here/review-verdict" --sentence "${CONCLUSION:-}")
+elif [ -n "${TITLE:-}" ]; then
+  # review-check's words alone: a sentence of letters, digits and punctuation, on one line.
+  [[ $TITLE =~ ^[A-Za-z0-9\ \(\)\:\;\,\'\./_-]+$ ]] \
+    || { echo "review-body: TITLE is not a title of review-check" >&2; exit 2; }
+  sentence=$TITLE
 fi
 printf '<!-- oss-verify-review -->\n'
 if [ -n "$sentence" ]; then printf '%s\n\n' "$sentence"; fi

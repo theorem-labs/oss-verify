@@ -222,14 +222,15 @@ def test_builds_route_fails_when_it_cannot_read_the_files(tmp_path):
 
 def route_review(tmp_path, files, changed=None, actor="someone", event="workflow_run",
                  run_path=".github/workflows/build.yaml", run_event="pull_request", conclusion="success", pulls=None,
-                 held=(), builds=(), fail=False):
+                 held=(), builds=(), fail=False, run_actor=("a-maintainer", "User"), permission="write"):
     """Run review.yml's route step on main, started by `actor`, with a fake gh that applies the step's --jq filter as
     gh does. On workflow_run, after run 900 of `run_path` on `run_event` that ended `conclusion`, at the head a*40 of
     mallory/libx's branch main; on workflow_dispatch, a run by hand of pull request 8. The gh gives as the open pull
     requests of that head `pulls` (by default pull request 8 into main), pull request 8 and its `files` (or fails to
     list them when `fail`), the runs GitHub holds at its head (`held`, their ids), and the completed Build runs of the
     head in `builds`, each a pair (the run, the artifacts named build-results that it lists), by default none.
-    Return its exit status, its outputs (one line each), and the gh calls."""
+    `run_actor` is the run's triggering account and its type, and `permission` that account's collaborator permission
+    (None: the read fails). Return its exit status, its outputs (one line each), and the gh calls."""
     bin = tmp_path / "bin"
     bin.mkdir()
     pull = pull_request(files, changed)
@@ -239,6 +240,8 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
                                            "head_sha": "a" * 40, "head_branch": "main",
                                            "head_repository": {"full_name": "mallory/libx"}} for i in held]}}
     answers.update({f"artifacts-{run['id']}": {"artifacts": list(artifacts)} for run, artifacts in builds})
+    if permission is not None:
+        answers["permission"] = {"permission": permission}
     if not fail:
         answers["files"] = files_of(files)
     for name, answer in answers.items():
@@ -250,6 +253,7 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
                             f'  jq -r "$filter" {tmp_path}/$1.json\n}}\n'
                             f'case " $*" in {USERS_GH}'
                             '  *"/pulls?"*) serve pulls ;;\n'
+                            '  *"/collaborators/"*) serve permission ;;\n'
                             '  *"/files"*) serve files ;;\n'
                             '  *"/pulls/"*) serve pull ;;\n'
                             '  *"status=action_required"*) serve held ;;\n'
@@ -267,7 +271,8 @@ def route_review(tmp_path, files, changed=None, actor="someone", event="workflow
            "GITHUB_OUTPUT": str(written), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary")}
     if event == "workflow_run":
         env.update(RUN_ID="900", RUN_EVENT=run_event, RUN_PATH=run_path, RUN_CONCLUSION=conclusion,
-                   RUN_HEAD_SHA="a" * 40, RUN_HEAD_REPOSITORY="mallory/libx", RUN_HEAD_BRANCH="main")
+                   RUN_HEAD_SHA="a" * 40, RUN_HEAD_REPOSITORY="mallory/libx", RUN_HEAD_BRANCH="main",
+                   RUN_ACTOR=run_actor[0], RUN_ACTOR_TYPE=run_actor[1])
     else:
         env["PR"] = "8"
     run = subprocess.run(["bash", "-e", "-c", decide["run"]], capture_output=True, text=True, cwd=ROOT, env=env)
@@ -301,13 +306,28 @@ def test_reviews_route_reviews_a_pull_request_with_no_file_under_projects_as_a_c
 
 @pytest.mark.parametrize("actor, want", [
     ("someone", ["kind=change"]), ("sjawhar-agent[bot]", ["kind=change"]), ("oss-verify[bot]", ["kind=change"]),
+    # Dependabot, whose pull requests bump the pinned actions: admitted, so its change gets the change review.
+    ("dependabot[bot]", ["kind=change"]),
     # An App the action refuses (src/github/validation/actor.ts) would fail the review, and so the check review jobs:
     # by its account type, so Copilot, whose login has no [bot] and which the Users API does not find, too.
-    ("dependabot[bot]", ENROLLMENT), ("oss-verify[bot]x[bot]", ENROLLMENT), ("Copilot", ENROLLMENT),
+    # route says so (refused), so that the gather job gives it no kind when take-project takes no project.
+    ("oss-verify[bot]x[bot]", ENROLLMENT + ["refused=true"]), ("Copilot", ENROLLMENT + ["refused=true"]),
 ])
 def test_a_change_that_an_app_the_review_refuses_started_is_an_enrollment_as_before(tmp_path, actor, want):
     code, outputs, _ = route_review(tmp_path, [".github/workflows/build.yaml"], actor=actor)
     assert (code, outputs) == (0, PULL + want)
+
+
+def test_a_refused_apps_pull_request_is_marked_refused_whatever_it_changes(tmp_path):
+    """The refusal does not depend on the files: a change of two projects (which take-project takes no project from)
+    is marked too, so that the gather job gives it no kind."""
+    for files in (["projects/p/project.yaml", "projects/q/project.yaml"], ["projects/p/project.yaml"]):
+        (tmp_path / str(len(files))).mkdir()
+        code, outputs, _ = route_review(tmp_path / str(len(files)), files, actor="Copilot")
+        assert (code, outputs) == (0, PULL + ENROLLMENT + ["refused=true"]), files
+    (tmp_path / "writer").mkdir()
+    code, outputs, _ = route_review(tmp_path / "writer", ["projects/p/project.yaml", "projects/q/project.yaml"])
+    assert (code, outputs) == (0, PULL + ENROLLMENT)
 
 
 def merged(base, change):
@@ -356,6 +376,14 @@ def test_reviews_route_reads_the_open_pull_request_at_the_runs_head(tmp_path, ch
     (".github/workflows/other.yml", "pull_request", "success", []),
     (".github/workflows/build.yaml", "pull_request_target", "success", []),
     (".github/workflows/build.yaml", "push", "success", []),
+    # A Review approvals run on pull_request_review that ended success: route asks for the comment job's refresh of
+    # the pull request's check run review alone, with no kind. On another event, or ended otherwise: nothing.
+    (".github/workflows/review-approvals.yml", "pull_request_review", "success", PULL + ["refresh=true"]),
+    (".github/workflows/review-approvals.yml", "pull_request", "success", []),
+    (".github/workflows/review-approvals.yml", "pull_request_review", "skipped", []),
+    (".github/workflows/review-approvals.yml", "pull_request_review", "failure", []),
+    (".github/workflows/review-approvals.yml", "pull_request_review", "", []),
+    (".github/workflows/build.yaml", "pull_request_review", "success", []),
 ])
 def test_reviews_route_reads_only_a_build_or_triage_run_of_a_pull_request_that_ended_so(tmp_path, run_path, run_event,
                                                                                         conclusion, want):
@@ -364,6 +392,35 @@ def test_reviews_route_reads_only_a_build_or_triage_run_of_a_pull_request_that_e
     assert (code, outputs) == (0, want)
     # A run it does not read stops route before any read of GitHub.
     assert bool(calls) == bool(want), calls
+
+
+@pytest.mark.parametrize("run_actor, permission, want", [
+    (("a-maintainer", "User"), "write", PULL + ["refresh=true"]),
+    (("a-maintainer", "User"), "admin", PULL + ["refresh=true"]),
+    # An App: only its installation on this repository lets it review or dismiss here.
+    (("sjawhar-agent[bot]", "Bot"), None, PULL + ["refresh=true"]),
+    # Any other account's review changes no person's approval: nothing runs, and no job that reads the App's key.
+    (("someone", "User"), "read", []),
+    (("someone", "User"), "triage", []),
+    (("someone", "User"), None, []),
+    (("some-org", "Organization"), None, []),
+    (("", ""), None, []),
+    (("someone;id", "User"), "write", []),
+], ids=["a writer", "an admin", "an App", "a reader", "a triager", "an unreadable permission", "an organization",
+        "no account", "a login of another shape"])
+def test_a_review_approvals_run_refreshes_only_for_a_writer_or_an_app(tmp_path, run_actor, permission, want):
+    code, outputs, calls = route_review(tmp_path, ["projects/p/project.yaml"],
+                                        run_path=".github/workflows/review-approvals.yml",
+                                        run_event="pull_request_review", run_actor=run_actor, permission=permission)
+    assert (code, outputs) == (0, want), calls
+    if not want:
+        # It stops before it reads the pull request, and asks for no job: the comment job, which signs in, does not
+        # run (its if needs route's refresh, kind, replay or a held head).
+        assert [c for c in calls if "/pulls" in c] == [], calls
+        comment_if = workflow("review.yml")["jobs"]["comment"]["if"]
+        context = {"github.event_name": "workflow_run", "github.ref": "refs/heads/main",
+                   "needs.route.result": "success"}
+        assert not evaluate(comment_if, context)
 
 
 def actor_kind(tmp_path, login, allowed="sjawhar-agent[bot],oss-verify[bot]", answer=None):
@@ -520,8 +577,10 @@ FORK_STEP = "A fork's change to projects/ runs no code here"
 BEFORE_FORK_STEP = {"suite": ["The pull request targets the default branch", "actions/checkout",
                               "The checkout is the merge into the base branch"],
                     "docker": ["actions/checkout"]}
-# A class of the Docker tests: it skips unless OV_DOCKER_TESTS is 1.
-DOCKER_CLASS = re.compile(r'@unittest\.skipUnless\(os\.environ\.get\("OV_DOCKER_TESTS"\) == "1"')
+# A class of the Docker tests: it skips unless OV_DOCKER_TESTS is 1, by unittest's skipUnless or by pytest's skipif. The
+# unittest form goes when the last test file that is a unittest.TestCase is converted to pytest.
+DOCKER_CLASS = re.compile(r'@unittest\.skipUnless\(os\.environ\.get\("OV_DOCKER_TESTS"\) == "1"'
+                          r'|@pytest\.mark\.skipif\(os\.environ\.get\("OV_DOCKER_TESTS"\) != "1"')
 
 
 # A stand-in gh: it logs its arguments, one call to a line, and answers the compare API's status with $STATUS, or fails
@@ -859,23 +918,49 @@ IMAGES_DOCKER = ('#!/bin/bash\ncase "$1 $2" in\n'
                  '  *) exit 1 ;;\nesac\n')
 IMAGES_CRANE = ('#!/bin/bash\nwhile [ $# -gt 0 ]; do [ "$1" = -t ] && tag=$2; shift; done\n'
                 'echo "${tag%:*}@sha256:$(printf %064d 0)"\n')
-# Run with the node ids of the Docker tests' classes, or their files: for each class (each TestCase of a file), a line
-# "<class node id>\t<why the class, or a test of it, skips>", empty where none skips. Importing a file evaluates its
-# classes' skipUnless.
+# Run with the node ids of the Docker tests' classes, or their files: for each class that pytest collects there, a line
+# "<class node id>\t<why the class, or a test of it, skips>", empty where none skips. Collecting imports each file,
+# which evaluates its skip conditions. A test's skips are the skip and skipif marks that pytest finds on it (its module,
+# its class and the class's bases, the test), read as pytest's skipping plugin reads them, except that a condition given
+# as a string counts as true: write it as a value; and, for a test of a unittest.TestCase, unittest's own
+# (__unittest_skip__). The unittest branch goes when the last test file that is a unittest.TestCase is converted.
 SKIPS = r"""
-import importlib, pathlib, sys, unittest
-for spec in sys.argv[1:]:
-    path, _, name = spec.partition("::")
-    module = importlib.import_module(pathlib.Path(path).stem)
-    classes = [getattr(module, name)] if name else [
-        found for found in vars(module).values()
-        if isinstance(found, type) and issubclass(found, unittest.TestCase) and found.__module__ == module.__name__]
-    for cls in classes:
-        reasons = [cls.__unittest_skip_why__] if getattr(cls, "__unittest_skip__", False) else []
-        for test in unittest.TestLoader().getTestCaseNames(cls):
-            if getattr(getattr(cls, test), "__unittest_skip__", False):
-                reasons.append(f"{test}: {getattr(cls, test).__unittest_skip_why__}")
-        print(f"{path}::{cls.__name__}\t{'; '.join(reasons)}")
+import sys, unittest
+import pytest
+
+
+def marked(item):
+    for mark in item.iter_markers("skip"):
+        return mark.kwargs.get("reason") or (mark.args[0] if mark.args else "") or "skip"
+    for mark in item.iter_markers("skipif"):
+        conditions = (mark.kwargs["condition"],) if "condition" in mark.kwargs else mark.args
+        if not conditions or any(conditions):
+            return mark.kwargs.get("reason") or "skipif"
+    return ""
+
+
+class Collected:
+    def pytest_collection_finish(self, session):
+        self.items = session.items
+
+
+collected = Collected()
+code = pytest.main(["--collect-only", "-p", "no:terminal", "-p", "no:cacheprovider", "-c", "pyproject.toml",
+                    *sys.argv[1:]], plugins=[collected])
+if code != 0:
+    sys.exit(f"pytest collected {sys.argv[1:]} with exit status {code}")
+reasons = {}
+for item in collected.items:
+    found = reasons.setdefault("::".join(item.nodeid.split("::")[:2]), [])
+    if isinstance(item.cls, type) and issubclass(item.cls, unittest.TestCase):
+        if getattr(item.cls, "__unittest_skip__", False) and item.cls.__unittest_skip_why__ not in found:
+            found.insert(0, item.cls.__unittest_skip_why__)
+        if getattr(item.obj, "__unittest_skip__", False):
+            found.append(f"{item.name}: {item.obj.__unittest_skip_why__}")
+    if why := marked(item):
+        found.append(f"{item.name}: {why}")
+for name, found in reasons.items():
+    print(f"{name}\t{'; '.join(found)}")
 """
 
 
@@ -920,9 +1005,9 @@ def shard_skips(tmp_path, shard, edit=lambda text: text, **change):
 def test_each_class_of_a_docker_shard_finds_the_images_it_needs_there(tmp_path):
     """Each shard of docker pulls the toolchain images, and makes the frame-pointer images, that its classes need: where
     Docker has only the images that the shard's IMAGES_STEP pulled, with its TESTS_STEP's env, no class of the shard,
-    and no test of one, skips. Each class asks Docker for the images it needs in its own skipUnless, so this reads its
-    need from there. The classes read are all that pytest collects of the shard. Controls: the shard python without
-    the Python image, and the shard c without its frame-pointer row, are found, and so is a step that makes a
+    and no test of one, skips. Each class asks Docker for the images it needs in its own skipUnless or skipif, so this
+    reads its need from there. The classes read are all that pytest collects of the shard. Controls: the shard python
+    without the Python image, and the shard c without its frame-pointer row, are found, and so is a step that makes a
     frame-pointer image and does not pull it."""
     for shard, _, tests in shards():
         skips = shard_skips(tmp_path / shard, shard)
@@ -937,6 +1022,44 @@ def test_each_class_of_a_docker_shard_finds_the_images_it_needs_there(tmp_path):
     with pytest.raises(AssertionError, match="a frame-pointer image not pulled"):
         shard_skips(tmp_path / "rust-made-not-pulled", "rust",
                     edit=lambda text: text.replace('docker pull --quiet "$ref" > /dev/null\n', ""))
+
+
+def test_the_skip_reader_finds_each_form_of_skip(tmp_path):
+    """SKIPS, on made-up test files: each skip of a pytest test is found, whatever its form and wherever pytest finds
+    it (the module, a base class, the class, the test), with its reason or a stand-in for an empty one; and so is each
+    skip of a unittest.TestCase, unittest's or pytest's. A skipif whose conditions are all false is not."""
+    test = "    def test_a(self):\n        pass\n"
+    (tmp_path / "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
+    (tmp_path / "test_marks.py").write_text(
+        "import pytest\n\n\n"
+        f"@pytest.mark.skip\nclass TestBare:\n{test}\n\n"
+        f"@pytest.mark.skip('positional')\nclass TestPositional:\n{test}\n\n"
+        f"@pytest.mark.skipif(True, reason='')\nclass TestEmpty:\n{test}\n\n"
+        f"@pytest.mark.skipif(condition=True, reason='by keyword')\nclass TestKeyword:\n{test}\n\n"
+        f"@pytest.mark.skipif(False, True, reason='second')\nclass TestSecond:\n{test}\n\n"
+        "@pytest.mark.skipif(True, reason='base')\nclass Base:\n    pass\n\n\n"
+        f"@pytest.mark.usefixtures()\nclass TestInherited(Base):\n{test}\n\n"
+        f"class TestMethod:\n    @pytest.mark.skipif(True, reason='method')\n{test}\n    def test_b(self):\n"
+        "        pass\n\n\n"
+        f"@pytest.mark.skipif(False, reason='false')\nclass TestRuns:\n{test}")
+    (tmp_path / "test_module.py").write_text(
+        f"import pytest\n\npytestmark = pytest.mark.skipif(True, reason='module')\n\n\nclass TestA:\n{test}")
+    (tmp_path / "test_case.py").write_text(
+        f"import pytest\nimport unittest\n\n\n@unittest.skipUnless(False, 'class')\nclass Case(unittest.TestCase):\n"
+        f"{test}\n\nclass Method(unittest.TestCase):\n    @unittest.skipIf(True, 'method')\n{test}\n\n"
+        f"@pytest.mark.skipif(True, reason='a pytest mark')\nclass Marked(unittest.TestCase):\n{test}")
+    run = subprocess.run([sys.executable, "-P", "-c", SKIPS, "test_marks.py", "test_module.py", "test_case.py"],
+                         cwd=tmp_path, capture_output=True, text=True, timeout=300)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert dict(line.split("\t", 1) for line in run.stdout.splitlines()) == {
+        "test_marks.py::TestBare": "test_a: skip", "test_marks.py::TestPositional": "test_a: positional",
+        "test_marks.py::TestEmpty": "test_a: skipif", "test_marks.py::TestKeyword": "test_a: by keyword",
+        "test_marks.py::TestSecond": "test_a: second", "test_marks.py::TestInherited": "test_a: base",
+        "test_marks.py::TestMethod": "test_a: method", "test_marks.py::TestRuns": "",
+        "test_module.py::TestA": "test_a: module",
+        "test_case.py::Case": "class", "test_case.py::Method": "test_a: method",
+        "test_case.py::Marked": "test_a: a pytest mark",
+    }
 
 
 def selection(tmp_path, job):
@@ -965,7 +1088,7 @@ def test_every_test_runs_in_suite_or_in_docker(tmp_path):
     suite, docker = selection(tmp_path, "suite"), selection(tmp_path, "docker")
     everything, in_docker = collected(), collected(*docker)
     assert everything - collected(*suite) - in_docker == set()
-    left_out = "tests/test_no_frame_pointer_image.py::NoFramePointerImage"
+    left_out = "tests/test_no_frame_pointer_image.py::TestNoFramePointerImage"
     found = everything - collected(*suite, "--deselect", left_out) - in_docker
     assert found == {f"{left_out}::test_frame_pointers_skips_when_no_frame_pointer_image_is_named"}, found
 
