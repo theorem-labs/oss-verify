@@ -187,9 +187,11 @@ class World:
                             "conclusion": conclusion, "head_sha": self.sha, "external_id": str(pr),
                             "details_url": f"https://github.com/{REPO}/pull/{pr}#issuecomment-1"})
 
-    def run(self, run_id, path, event, head_sha=SHA, branch="add-plugin-hostd", head_repo="FreeREAC/oss-verify"):
+    def run(self, run_id, path, event, head_sha=SHA, branch="add-plugin-hostd", head_repo="FreeREAC/oss-verify",
+            **fields):
+        """A run, in its first attempt; `fields` gives it more of the API's fields (status, conclusion, created_at)."""
         self.runs[run_id] = {"id": run_id, "path": path, "event": event, "head_sha": head_sha, "head_branch": branch,
-                             "head_repository": {"full_name": head_repo}}
+                             "head_repository": {"full_name": head_repo}, "run_attempt": 1, **fields}
 
     def review_run(self, title, run_id=REVIEW_RUN, event="workflow_run", path=".github/workflows/review.yml",
                    branch="main", head_repo=REPO):
@@ -245,10 +247,103 @@ class World:
             if rec is not None:
                 table[f"repos/{REPO}/actions/artifacts/{run_id * 10}/zip"] = \
                     rec if isinstance(rec, bytes) else zipped({"record.json": json.dumps(rec)})
+        # GitHub's list of each required check's runs at a commit, by its file and event, as runs_at reads it: every
+        # run of the file on the event at that commit, from any head.
+        for path, events in dispatch.REQUIRED_SOURCES.values():
+            for event in events:
+                for sha in {self.sha} | {run["head_sha"] for run in self.runs.values()}:
+                    table[f"repos/{REPO}/actions/workflows/{path.rsplit('/', 1)[1]}/runs?event={event}&head_sha={sha}"
+                          "&per_page=100"] = [{"workflow_runs": [run for run in self.runs.values()
+                                                                 if (run["path"], run["event"], run["head_sha"])
+                                                                 == (path, event, sha)]}]
         return FakeApi(table)
 
     def decide(self, event="pull_request", run_id=104, sha=None):
         return dispatch.decide(self.api(), REPO, run_id, event, self.sha if sha is None else sha)
+
+
+@pytest.mark.parametrize("name", REQUIRED)
+def test_newest_bound_workflow_run_wins_over_check_run_creation_order(name):
+    # Control: these same inputs otherwise send the enrollment.
+    control = World().decide()
+    assert control["decision"] == "dispatch", control["reason"]
+    older_run, path, event = RUNS[name]
+    for older_conclusion, newer_conclusion in (("success", "failure"), ("failure", "success")):
+        world = World()
+        world.checks = [check for check in world.checks if check["name"] != name]
+        # The check ids are the reversed order seen on #317: the older workflow's job can be created later.
+        world.check(139894978761, name, older_run, conclusion=older_conclusion)
+        world.run(206, path, event)
+        world.check(139894966949, name, 206, conclusion=newer_conclusion)
+        world.artifacts[206] = record()
+        got = world.decide()
+        assert got["decision"] == ("dispatch" if newer_conclusion == "success" else "none"), got["reason"]
+        if newer_conclusion == "failure":
+            assert f"{name} (failure)" in got["reason"], got["reason"]
+        # Within the newest workflow run, the latest attempt's check still decides, in both directions.
+        for check_id, conclusion in ((139894966950, "failure"), (139894966951, "success")):
+            world.check(check_id, name, 206, conclusion=conclusion)
+            got = world.decide()
+            assert got["decision"] == ("dispatch" if conclusion == "success" else "none"), got["reason"]
+
+
+# The second in which #317's two Terms runs, 45815765408 and 45815765694, were both created; and two seconds later.
+SECOND, LATER = "2026-11-26T12:01:15Z", "2026-11-26T12:01:17Z"
+
+
+@pytest.mark.parametrize("name", REQUIRED)
+@pytest.mark.parametrize("older, newer_created, sends", [
+    # #317: GitHub cancelled the newer run and kept the older, created in the same second, which passed.
+    ({}, SECOND, True),
+    # Two seconds apart, or the older cancelled too, or a run of another event: the cancelled newest run stands.
+    ({}, LATER, False),
+    ({"conclusion": "cancelled"}, SECOND, False),
+    ({"event": "pull_request_target"}, SECOND, False),
+])
+def test_a_run_github_cancelled_gives_way_to_the_run_of_its_second_it_kept(name, older, newer_created, sends):
+    world = World()
+    older_run, path, event = RUNS[name]
+    world.runs[older_run].update({"status": "completed", "conclusion": "success", "created_at": SECOND, **older})
+    if older.get("conclusion") == "cancelled":
+        next(c for c in world.checks if c["name"] == name)["conclusion"] = "cancelled"
+    world.run(206, path, event, status="completed", conclusion="cancelled", created_at=newer_created)
+    world.check(139894966949, name, 206, conclusion="cancelled")
+    # The run whose end started this is another check's, which this test leaves as it is.
+    got = world.decide(run_id=104 if name != "tests" else 101)
+    assert got["decision"] == ("dispatch" if sends else "none"), got["reason"]
+    if not sends:
+        assert f"{name} (cancelled)" in got["reason"], got["reason"]
+
+
+@pytest.mark.parametrize("name", REQUIRED)
+@pytest.mark.parametrize("newer_check", [True, False])
+def test_a_newer_run_decides_whether_or_not_its_job_made_a_check_run(name, newer_check):
+    # A newer run that GitHub cancelled before its job started has no check run, as one queued has none yet: the
+    # older run's pass does not stand for it, as required-check would not take the older run either.
+    world = World()
+    older_run, path, event = RUNS[name]
+    world.runs[older_run].update(status="completed", conclusion="success", created_at=SECOND)
+    world.run(206, path, event, status="completed", conclusion="cancelled", created_at=LATER)
+    if newer_check:
+        world.check(139894966949, name, 206, conclusion="cancelled")
+    got = world.decide(run_id=104 if name != "tests" else 101)
+    assert got["decision"] == "none", got["reason"]
+    assert (f"{name} (cancelled)" if newer_check else f"{name} (no check run of run 206)") in got["reason"]
+
+
+def test_the_bound_runs_come_from_the_list_of_runs_alone():
+    # An older run whose own read would fail, and a listed run with no id, decide nothing and stop nothing: the runs
+    # are read from GitHub's list of the workflow's runs at the commit, not one by one.
+    world = World()
+    world.run(206, ".github/workflows/terms.yaml", "pull_request")
+    world.check(607, "terms-accepted", 206)
+    api = world.api()
+    del api.table[f"repos/{REPO}/actions/runs/103"]
+    listing = f"repos/{REPO}/actions/workflows/terms.yaml/runs?event=pull_request&head_sha={SHA}&per_page=100"
+    api.table[listing][0]["workflow_runs"].append({**world.runs[206], "id": None})
+    got = dispatch.decide(api, REPO, 104, "pull_request", SHA)
+    assert got["decision"] == "dispatch", got["reason"]
+    assert f"repos/{REPO}/actions/runs/103" not in api.calls
 
 
 class Sends(unittest.TestCase):
@@ -342,8 +437,8 @@ class ForgedChecks(unittest.TestCase):
         world.run(203, ".github/workflows/validate.yaml", "workflow_dispatch", branch="main",
                   head_repo=REPO)
         world.check(604, "enrollment", 203)
-        self.assertNotSent(world, "enrollment (not run by .github/workflows/validate.yaml on pull_request or "
-                                  "pull_request_target)")
+        # The pull request's own run 102 has no enrollment check now, and the run by hand's does not stand for it.
+        self.assertNotSent(world, "enrollment (no check run of run 102)")
 
     def test_the_record_of_a_forged_run_is_never_read(self):
         world = World()
@@ -366,7 +461,7 @@ class ForgedChecks(unittest.TestCase):
         world = World()
         world.required = []                          # the ruleset is off, or lists nothing
         world.checks = [c for c in world.checks if c["name"] != "tests"]
-        self.assertNotSent(world, "tests (not run")
+        self.assertNotSent(world, "tests (no check run of run 104)")
 
     def test_the_four_are_read_from_github_actions_when_the_ruleset_requires_them_from_the_app(self):
         # main's ruleset requires the four from the oss-verify App, whose copies .github/workflows/required-checks.yml
@@ -393,7 +488,7 @@ class ForgedChecks(unittest.TestCase):
             else:
                 world.checks[3]["conclusion"] = "failure"
             world.check(611, "tests", 104, app=OSS_VERIFY)
-            self.assertNotSent(world, "tests (not run" if actions == "missing" else "tests (failure)")
+            self.assertNotSent(world, "tests (no check run of run 104)" if actions == "missing" else "tests (failure)")
 
     def test_a_check_with_no_known_source_keeps_the_app_the_ruleset_names(self):
         world = World()
@@ -426,7 +521,7 @@ class ForgedChecks(unittest.TestCase):
             self.assertNotSent(world, "terms-accepted")
         world = World()
         world.checks = [c for c in world.checks if c["name"] != "tests"]
-        self.assertNotSent(world, "tests (not run")
+        self.assertNotSent(world, "tests (no check run of run 104)")
 
 
 class ThePullRequest(unittest.TestCase):

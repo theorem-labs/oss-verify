@@ -1,7 +1,8 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 """The read of one file of an artifact of a Build run (read_member), the exceptions that read_member does not catch
-(UNREADABLE), the class that reads GitHub's REST API (Api), and the check of a whole number of JSON (whole).
+(UNREADABLE), the class that reads GitHub's REST API (Api), the check of a whole number of JSON (whole), and the runs
+of a workflow file at a head (runs_at) and the one of them that gives its check (deciding_run).
 take-build-results, enroll-dispatch and required-check import them from this directory, as they import steering.py:
 
     sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -20,6 +21,7 @@ import json
 import subprocess
 import zipfile
 import zlib
+from urllib.parse import quote
 
 # The exceptions that read_member does not catch, for a zip, or a file in it, that zipfile cannot read:
 # zipfile.BadZipFile (for example, a file whose bytes do not match its header), EOFError (a cut file), zlib.error (a
@@ -48,6 +50,38 @@ class Api:
 def whole(value: object) -> bool:
     """Whether `value` is a whole number of JSON: an int that is not a bool."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def deciding_run(runs: list[dict]) -> dict | None:
+    """Of the runs of a required check's workflow file at one head commit of one pull request's head, the run whose job
+    gives the check: the newest (by id), or None for no run. But when GitHub cancelled the newest, and another run of
+    the same file, event and head commit was created in the same second and ended otherwise, the newest such run. Of
+    two runs that start in the same second in one concurrency group, GitHub can cancel the newer and keep the older (on
+    #317, Terms runs 45815765694 and 45815765408), and runs of one head created in the same second judge one merge
+    commit. A run created in an earlier second never stands in for a cancelled newer one: it can have read an older
+    input, such as a Terms run the description before an edit. required-check and enroll-dispatch both decide by it,
+    so they agree."""
+    newest = max(runs, key=lambda r: r["id"], default=None)
+    if newest is None or (newest.get("status"), newest.get("conclusion")) != ("completed", "cancelled"):
+        return newest
+    twin = (newest.get("path"), newest.get("event"), newest.get("head_sha"), newest.get("created_at"))
+    kept = [r for r in runs if isinstance(twin[3], str) and twin[3]
+            and (r.get("path"), r.get("event"), r.get("head_sha"), r.get("created_at")) == twin
+            and r.get("status") == "completed" and r.get("conclusion") != "cancelled"]
+    return max(kept, key=lambda r: r["id"], default=newest)
+
+
+def runs_at(api: Api, repo: str, path: str, event: str, sha: str, head: tuple[object, object]) -> list[dict]:
+    """The runs of the workflow file `path` on `event` at the head commit `sha`, of a pull request from `head` (its
+    repository and branch), as GitHub lists them, each with a whole id and run_attempt. A run of another file that
+    GitHub lists under the same workflow does not count."""
+    workflow = quote(path.rsplit("/", 1)[1], safe="")
+    return [r for page in api.pages(f"repos/{repo}/actions/workflows/{workflow}/runs?event={event}&head_sha={sha}"
+                                    "&per_page=100")
+            for r in page.get("workflow_runs") or []
+            if r.get("path") == path and r.get("event") == event and r.get("head_sha") == sha
+            and ((r.get("head_repository") or {}).get("full_name"), r.get("head_branch")) == head
+            and whole(r.get("id")) and whole(r.get("run_attempt"))]
 
 
 def read_member(api: Api, repo: str, run: int, name: str, member: str, limit: int) -> tuple[bytes | None, str]:

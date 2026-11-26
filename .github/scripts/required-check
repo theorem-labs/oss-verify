@@ -33,7 +33,9 @@ Then, for each of the four checks, not only the one of the run that started it, 
 what a lost or failed run of the workflow did not:
 
   - The newest run (by id) of the check's file, on pull_request, at HEAD_SHA, from the same head repository and branch.
-    A run of another file with the same workflow name, or of another head at the same commit, does not count.
+    A run of another file with the same workflow name, or of another head at the same commit, does not count. But when
+    GitHub cancelled the newest run and another of those runs was created in the same second and ended otherwise, the
+    newest such run counts instead (deciding_run of artifact.py says why). enroll-dispatch decides by the same rule.
   - In that run's latest attempt, the job whose name is the check's name. Its conclusion is the check's conclusion, as
     GitHub Actions reports it today: the job's, not the run's (a run whose other job failed can still pass the check).
     A completed run with no such job posts failure (cancelled for a cancelled run), but for a run GitHub holds for a
@@ -59,9 +61,9 @@ import re
 import sys
 from urllib.parse import quote
 
-# artifact.py's Api, which reads GitHub's REST API through gh.
+# artifact.py's Api, which reads GitHub's REST API through gh, and runs_at and deciding_run, the run that gives a check.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from artifact import Api, whole  # noqa: E402
+from artifact import Api, deciding_run, runs_at, whole  # noqa: E402
 
 # The oss-verify App (gh api apps/oss-verify), whose checks a theorem-labs/agent-infra change makes main's ruleset
 # require.
@@ -103,14 +105,9 @@ def open_pull(api: Api, repo: str, sha: str, head: tuple[str, str]) -> int | Non
 
 
 def newest_run(api: Api, repo: str, path: str, sha: str, head: tuple[str, str]) -> dict | None:
-    """The newest run of the workflow file `path` on pull_request at `sha` from `head`, or None."""
-    workflow = quote(path.rsplit("/", 1)[1], safe="")
-    runs = [r for page in api.pages(f"repos/{repo}/actions/workflows/{workflow}/runs?event=pull_request"
-                                    f"&head_sha={sha}&per_page=100")
-            for r in page.get("workflow_runs") or []
-            if r.get("path") == path and r.get("event") == "pull_request" and r.get("head_sha") == sha
-            and head_of(r) == head and whole(r.get("id")) and whole(r.get("run_attempt"))]
-    return max(runs, key=lambda r: r["id"], default=None)
+    """The run of the workflow file `path` on pull_request at `sha` from `head` that gives its check (deciding_run), or
+    None."""
+    return deciding_run(runs_at(api, repo, path, "pull_request", sha, head))
 
 
 def page_of(url: object, run_page: str) -> str:

@@ -160,14 +160,15 @@ import yaml
 
 # triage.py's maintainer check, the one the triage table shows as "Opened by an active maintainer". steering.py's list
 # of steering files, for the steering-file gate. artifact.py's read of one file of a Build run's artifact for the record
-# (read_member), the errors that this read does not catch (UNREADABLE), Api, and the check of a whole number (whole).
+# (read_member), the errors that this read does not catch (UNREADABLE), Api, the check of a whole number (whole), and
+# the runs of a required check's workflow at a head (runs_at) and the one that gives the check (deciding_run).
 # approval.py's person approval of a commit (person_approval), the one rule that review-check reads too, with the
 # write access, the login's shape and the time that it reads.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
 import triage  # noqa: E402
 from approval import LOGIN, person_approval, time_of, write_access  # noqa: E402
-from artifact import UNREADABLE, Api, read_member, whole  # noqa: E402
+from artifact import UNREADABLE, Api, deciding_run, read_member, runs_at, whole  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
@@ -303,12 +304,15 @@ def head_of_pull(pull: dict) -> tuple[object, object]:
     return (at.get("repo") or {}).get("full_name"), at.get("ref")
 
 
-def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tuple[list[str], int | None]:
+def bound_checks(api: Api, repo: str, sha: str, head: tuple) -> tuple[list[str], int | None]:
     """The required checks that have not passed at `sha` from their bound source, and the Actions run of the bound
-    project-builds check (None if it has not passed). A check counts only from a run of its workflow file, on one of its
-    events, at `sha`, of the pull request whose head is `head` (repository, branch): another pull request at the same
-    commit from another head neither blocks this one nor speaks for it. A pull request from the same head (the same
-    branch into another base) has the same runs, so its newest run decides for both. Of those, the newest decides."""
+    project-builds check (None if it has not passed). A check counts only from one run of its workflow file, on one of
+    its events, at `sha`, of the pull request whose head is `head` (repository, branch): another pull request at the
+    same commit from another head neither blocks this one nor speaks for it. A pull request from the same head (the same
+    branch into another base) has the same runs. Of the runs GitHub lists, whether or not a run's job has started, the
+    one that deciding_run of artifact.py takes decides for both, as it does for required-check's copy of the check: a
+    job can start, and get its check run's id, in another order than the runs. Within that run, the newest check run of
+    the name, its latest attempt's, decides; a run with none has not passed."""
     check_runs = [c for page in api.pages(f"repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100")
                   for c in page.get("check_runs") or []]
     waiting, build_run = [], None
@@ -319,24 +323,19 @@ def bound_checks(api: Api, runs: Runs, repo: str, sha: str, head: tuple) -> tupl
         if source is None:
             waiting.append(f"{context} (no known source)")
             continue
-        found = None
-        for check in sorted(check_runs, key=lambda c: c["id"], reverse=True):
-            if check.get("name") != context or (app is not None and (check.get("app") or {}).get("id") != app):
-                continue
-            run_id = run_id_of(repo, check.get("details_url"))
-            if run_id is None:
-                continue
-            run = runs.get(run_id)
-            if run.get("path") == source[0] and run.get("event") in source[1] and run.get("head_sha") == sha \
-                    and head_of(run) == head:
-                found = (check, run_id)
-                break
-        if found is None:
+        run = deciding_run([r for event in sorted(source[1]) for r in runs_at(api, repo, source[0], event, sha, head)])
+        if run is None:
             waiting.append(f"{context} (not run by {source[0]} on {' or '.join(sorted(source[1]))})")
-        elif found[0].get("status") != "completed" or found[0].get("conclusion") != "success":
-            waiting.append(f"{context} ({found[0].get('conclusion') or found[0].get('status')})")
+            continue
+        check = max((c for c in check_runs if c.get("name") == context
+                     and (app is None or (c.get("app") or {}).get("id") == app)
+                     and run_id_of(repo, c.get("details_url")) == run["id"]), key=lambda c: c["id"], default=None)
+        if check is None:
+            waiting.append(f"{context} (no check run of run {run['id']})")
+        elif check.get("status") != "completed" or check.get("conclusion") != "success":
+            waiting.append(f"{context} ({check.get('conclusion') or check.get('status')})")
         elif context == "project-builds":
-            build_run = found[1]
+            build_run = run["id"]
     return waiting, build_run
 
 
@@ -823,7 +822,7 @@ def merged_decision(api: Api, repo: str, runs: Runs, run: dict, number: int, pul
     why, approval = steering_gate(api, repo, number, pull, files, sha)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
-    waiting, build_run = bound_checks(api, runs, repo, sha, head)
+    waiting, build_run = bound_checks(api, repo, sha, head)
     waiting += pull_checks(api, repo, sha, number)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}{approval}: {', '.join(waiting)}; once they "
@@ -906,7 +905,7 @@ def decision(api: Api, repo: str, runs: Runs, run_id: int, run_event: str, head_
         bound.update(sha=sha, head=head, pull=pull)
     else:
         return outcome("none", f"the run that completed was started by {run_event}, not by a pull request")
-    waiting, build_run = bound_checks(api, runs, repo, sha, head)
+    waiting, build_run = bound_checks(api, repo, sha, head)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}: {', '.join(waiting)}", sha=sha)
     record, why = build_record(api, repo, build_run)

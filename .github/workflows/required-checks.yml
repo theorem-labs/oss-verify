@@ -6,7 +6,9 @@ name: Required checks
 # any workflow file of a pull request can post a check named tests under GitHub Actions. A theorem-labs/agent-infra
 # change (github/main.go) makes main's ruleset require each of the four from the oss-verify App instead of GitHub
 # Actions, and this workflow is what posts the App's copy. It copies, for each check, the conclusion of the job of that
-# name in the newest pull_request run of the check's own workflow file at the pull request's head:
+# name in the newest pull_request run of the check's own workflow file at the pull request's head (or, when GitHub
+# cancelled that run and kept another created in the same second, in that one: deciding_run of
+# .github/scripts/artifact.py):
 #
 #   project-builds   build.yaml       enrollment       validate.yaml
 #   tests            tests.yaml       terms-accepted   terms.yaml

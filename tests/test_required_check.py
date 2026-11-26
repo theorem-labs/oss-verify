@@ -4,9 +4,10 @@
 uv run pytest tests/test_required_check.py
 
 The workflow posts main's four required checks as the oss-verify App, each with the conclusion of the job of that name
-in the newest pull_request run of the check's own workflow file at the pull request's head. These test what the script
-decides from the API's answers, for a run of a head and for a run by hand with a head_sha, the read job's condition
-on the event, what each job holds, and the steps that read, check and post, run with a stand-in gh.
+in the newest pull_request run of the check's own workflow file at the pull request's head, or in the run GitHub kept
+when it cancelled that one for a run created in the same second. These test what the script decides from the API's
+answers, for a run of a head and for a run by hand with a head_sha, the read job's condition on the event, what each
+job holds, and the steps that read, check and post, run with a stand-in gh.
 """
 import copy
 import importlib.machinery
@@ -76,13 +77,15 @@ class World:
                 "base": {"ref": base, "repo": {"full_name": REPO}}}
 
     def run(self, run_id, path, status="completed", conclusion: str | None = "success", event="pull_request", sha=None,
-            head_repo=FORK, branch=None, attempt=1, listed_under=None):
+            head_repo=FORK, branch=None, attempt=1, listed_under=None, created=None):
         """A run of `path`, listed in the answer for the file `listed_under` (`path` unless given): GitHub lists the runs
-        of one workflow, and a test gives an answer that holds a run of another file too."""
+        of one workflow, and a test gives an answer that holds a run of another file too. `created` is its created_at,
+        which GitHub gives to the second; a run with none has none."""
         self.runs.setdefault(listed_under or path, []).append(
             {"id": run_id, "path": path, "event": event, "head_sha": sha or self.sha,
              "head_branch": branch or self.branch, "head_repository": {"full_name": head_repo},
-             "run_attempt": attempt, "status": status, "conclusion": conclusion})
+             "run_attempt": attempt, "status": status, "conclusion": conclusion,
+             **({"created_at": created} if created else {})})
         self.jobs.setdefault(run_id, [])
 
     def job(self, run_id, job_id, name, status="completed", conclusion="success", url=None):
@@ -140,6 +143,63 @@ def step(name):
     found = [s for job in (READ, POST) for s in job["steps"] if s.get("name") == name]
     assert len(found) == 1, (name, len(found))
     return found[0]
+
+
+# The second in which #317's two Terms runs, 45815765408 and 45815765694, were both created; and two seconds later.
+SECOND, LATER = "2026-11-26T12:01:15Z", "2026-11-26T12:01:17Z"
+
+
+def two_runs(name, older, newer, newer_created=SECOND, **older_run):
+    """World, where the check `name`'s file lists its run 101 + i (job 1001 + i), created at SECOND, ended `older`
+    (in_progress: not ended), and its newer run 201 (job 3001), created at `newer_created`, ended `newer`. Each
+    conclusion is its run's and its job's. `older_run` changes the older run (its event or path, say)."""
+    world = World()
+    i = CHECKS.index(name)
+    ended = older != "in_progress"
+    world.runs[FILES[name]][0].update(created_at=SECOND, status="completed" if ended else "in_progress",
+                                      conclusion=older if ended else None, **older_run)
+    world.jobs[101 + i][0].update(status="completed" if ended else "in_progress", conclusion=older if ended else None)
+    world.run(201, FILES[name], conclusion=newer, created=newer_created)
+    world.job(201, 3001, name, conclusion=newer)
+    return world, f"job {1001 + i}"
+
+
+@pytest.mark.parametrize("name", CHECKS)
+def test_of_two_runs_created_in_one_second_the_one_github_kept_gives_the_check(name):
+    # #317: GitHub cancelled the newer run and kept the older, which passed.
+    world, older_job = two_runs(name, "success", "cancelled")
+    got = by_name(world.decide()[0])[name]
+    assert (got["conclusion"], got["external_id"]) == ("success", older_job)
+    # #303 (Tests runs 45289626179 and 45289627860, both created at 23:32:03Z): GitHub cancelled the older, and the
+    # newer failed.
+    world, _ = two_runs(name, "cancelled", "failure")
+    got = by_name(world.decide()[0])[name]
+    assert (got["conclusion"], got["external_id"]) == ("failure", "job 3001")
+
+
+@pytest.mark.parametrize("name", CHECKS)
+@pytest.mark.parametrize("older, newer_created, older_run", [
+    # Created two seconds apart: the older can have read an older input.
+    ("success", LATER, {}),
+    # Created in one second, but the older was cancelled too, or has not ended.
+    ("cancelled", SECOND, {}),
+    ("in_progress", SECOND, {}),
+    # Created in one second, but the older is a run of another event, or of another file with the check's workflow
+    # name, that GitHub lists under the check's file.
+    ("success", SECOND, {"event": "pull_request_target"}),
+    ("success", SECOND, {"path": ".github/workflows/other.yaml"}),
+])
+def test_a_cancelled_newest_run_stands_without_a_twin_that_ended_otherwise(name, older, newer_created, older_run):
+    world, _ = two_runs(name, older, "cancelled", newer_created, **older_run)
+    got = by_name(world.decide()[0])[name]
+    assert (got["conclusion"], got["external_id"]) == ("cancelled", "job 3001")
+
+
+def test_runs_with_no_creation_time_are_no_twins():
+    world, _ = two_runs("tests", "success", "cancelled", newer_created=None)
+    world.runs[FILES["tests"]][0].pop("created_at")
+    got = by_name(world.decide()[0])["tests"]
+    assert (got["conclusion"], got["external_id"]) == ("cancelled", "job 3001")
 
 
 class TestPosts:
