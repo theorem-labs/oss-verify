@@ -2200,8 +2200,11 @@ class RunWiring(unittest.TestCase):
         going in its group; an issue's event waits for it."""
         on = BUILD.get("on", BUILD.get(True))
         self.assertFalse({"labeled", "unlabeled"} & set(on["pull_request"]["types"]), on)
-        pr = {"github.event_name": "pull_request", "github.event.pull_request.number": 7}
-        for action in ("opened", "reopened", "synchronize", "ready_for_review"):
+        # A pull_request event always has the head: a group that took it for a push would differ from the one below.
+        pr = {"github.event_name": "pull_request", "github.event.pull_request.number": 7,
+              "github.event.pull_request.head.sha": "a" * 40}
+        # A reopen's and ready_for_review's groups, by the action and the head: tests/test_routed_workflows.py.
+        for action in ("opened", "synchronize"):
             with self.subTest(action=action):
                 ctx = dict(pr, **{"github.event.action": action})
                 self.assertEqual((self.group(ctx, BUILD), self.cancels(ctx, BUILD)), ("build-pull_request-7", True))

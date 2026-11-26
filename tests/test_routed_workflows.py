@@ -12,7 +12,9 @@ route may skip reports a required check), and the routes' own steps, run on made
 job, which reports its required check and runs on every event. tests.yaml has the jobs suite and docker, which run on
 every event, and the job tests, which reports the required check after both. These also run the steps of tests.yaml's
 jobs: the checks of a pull request's base, the step that keeps a fork's change to projects/ from running any code, the
-steps that run the tests, and the step of the job tests.
+steps that run the tests, and the step of the job tests. And the concurrency of the four workflows of the required
+checks, terms.yaml's included: two runs at one head from two actions cancel neither, and a push cancels the run of the
+older head, but in a workflow of one job of seconds, which cancels no run.
 """
 import importlib.util
 import itertools
@@ -26,6 +28,7 @@ import sys
 import pytest
 
 from test_outside_screen import evaluate, interpolated, read_workflow as workflow
+from test_required_check import required as required_check
 from test_take_project import git, isolated_git_env
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -1108,22 +1111,121 @@ def test_the_tests_step_fails_when_a_test_skips(tmp_path, job, last_line, status
     assert ("::error::A test skipped here" in out) == (fails and status == 0), out
 
 
-def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():
-    concurrency = workflow("tests.yaml")["concurrency"]
-    assert concurrency["cancel-in-progress"] is True
+# The workflow files of main's four required checks, as .github/scripts/required-check names them (its CHECKS).
+CHECK_WORKFLOWS = tuple(path.removeprefix(".github/workflows/") for path in required_check.CHECKS)
+# opened and synchronize share the group that cancels an older push. Every other documented pull_request action is
+# kept apart, including actions that the workflows do not currently take.
+# https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request
+PUSHES = ("opened", "synchronize")
+SAME_HEAD = ("assigned", "unassigned", "labeled", "unlabeled", "edited", "closed", "reopened", "converted_to_draft",
+             "locked", "unlocked", "enqueued", "dequeued", "milestoned", "demilestoned", "ready_for_review",
+             "review_requested", "review_request_removed", "auto_merge_enabled", "auto_merge_disabled")
+# The workflows of one job of seconds, which have no concurrency group and so cancel no run (each file says why).
+NO_CANCEL = {"validate.yaml", "terms.yaml"}
 
-    def group(event, ref, sha, number=None):
-        return interpolated(concurrency["group"], {"github.event_name": event, "github.ref": ref, "github.sha": sha,
-                                                   "github.event.pull_request.number": number})
+
+def group_of(flow, action, head, number=7, run_id=101, merge_sha="c" * 40):
+    """The pull request's concurrency group, or None when the workflow has none. Even cancel-in-progress: false can
+    cancel a pending run, so sharing any group counts as a conflict here."""
+    concurrency = flow.get("concurrency")
+    if concurrency is None:
+        return None
+    return interpolated(concurrency["group"], {
+        "github.event_name": "pull_request", "github.event.action": action, "github.ref": f"refs/pull/{number}/merge",
+        "github.run_id": run_id, "github.sha": merge_sha,
+        "github.event.pull_request.number": number, "github.event.pull_request.head.sha": head})
+
+
+def assert_independent_groups(groups):
+    # GitHub compares group names without case. An empty enumeration is no evidence of independence.
+    assert groups
+    assert set(groups) == {None} or len({g.lower() for g in groups}) == len(groups), groups
+
+
+def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():
+    # The pushes of a pull request: test_a_push_cancels_the_run_of_the_older_head.
+    flow = workflow("tests.yaml")
+    assert flow["concurrency"]["cancel-in-progress"] is True
+
+    def main(sha, run_id):
+        # A push has neither an action nor a pull_request object.
+        return interpolated(flow["concurrency"]["group"],
+                            {"github.event_name": "push", "github.ref": "refs/heads/main", "github.sha": sha,
+                             "github.run_id": run_id})
 
     older, newer = "a" * 40, "b" * 40
-    # Two pushes to main share one group, as do two pushes of one pull request.
-    assert group("push", "refs/heads/main", older) == group("push", "refs/heads/main", newer)
-    assert group("pull_request", "refs/pull/7/merge", older, 7) == group("pull_request", "refs/pull/7/merge", newer, 7)
-    # Another pull request cancels neither.
-    groups = {group("push", "refs/heads/main", older), group("pull_request", "refs/pull/7/merge", older, 7),
-              group("pull_request", "refs/pull/8/merge", older, 8)}
-    assert len(groups) == 3, groups
+    assert main(older, 101) == main(newer, 102)
+    for action in PUSHES + SAME_HEAD:
+        assert main(older, 101) != group_of(flow, action, older, run_id=103), action
+
+
+@pytest.mark.parametrize("name", CHECK_WORKFLOWS)
+def test_two_runs_at_one_head_from_two_actions_cancel_neither(name):
+    # On #317 a push and an edit of the description in one second started two Terms runs at 003eaa4 in one group, and
+    # GitHub cancelled the newer, 45815765694, and kept the older, 45815765408. required-check posts the job of the
+    # newest run, so the App posted terms-accepted cancelled. A push, an edit, a reopen or a draft marked ready at one
+    # head are in no shared group.
+    flow = workflow(name)
+    on = flow.get("on", flow.get(True))
+    actions = set(on["pull_request"]["types"])
+    assert {"opened", "reopened", "synchronize"} <= actions <= set(PUSHES + SAME_HEAD), on
+    if name == "terms.yaml":
+        assert "edited" in actions, on
+    if name == "build.yaml":
+        assert "ready_for_review" in actions, on
+    # group_of reads the workflow's group only: a job's own group would cancel that job of a run at the same head.
+    assert [job for job, body in flow["jobs"].items() if "concurrency" in body] == [], name
+    # The incident's original Terms group must fail this same assertion before the changed workflows can pass it. The
+    # groups are evaluated outside pytest.raises, so that an AssertionError of the evaluator cannot stand in for one.
+    shared = {"concurrency": {"group": "terms-${{ github.event_name }}-${{ github.event.pull_request.number }}"}}
+    incident = [group_of(shared, action, "a" * 40) for action in ("synchronize", "edited")]
+    with pytest.raises(AssertionError):
+        assert_independent_groups(incident)
+    # A missing head or action evaluates to an empty string, not an unevaluated expression. Neither removes the
+    # action's separation from the pushes. Missing and empty values have the same GitHub string representation.
+    for head, push in itertools.product(("a" * 40, None, ""), PUSHES):
+        groups = [group_of(flow, action, head, run_id=run_id)
+                  for run_id, action in enumerate((push, *SAME_HEAD, None), 101)]
+        assert_independent_groups(groups)
+
+
+@pytest.mark.parametrize("name", sorted(set(CHECK_WORKFLOWS) - NO_CANCEL))
+def test_two_runs_at_one_head_keep_other_actions_apart_at_different_heads(name):
+    # Dropping head.sha from the non-push suffix must not let a late reopen cancel the run at a different head.
+    flow = workflow(name)
+    for action in SAME_HEAD:
+        groups = [group_of(flow, action, head) for head in ("a" * 40, "b" * 40)]
+        assert groups[0] != groups[1], (action, groups)
+        assert group_of(flow, action, "a" * 40, number=8) not in groups, action
+
+
+@pytest.mark.parametrize("name", sorted(set(CHECK_WORKFLOWS) - NO_CANCEL))
+def test_a_push_cancels_the_run_of_the_older_head(name):
+    # R6 of dispatch://INFRA-5359/spec: no run for a replaced push.
+    flow = workflow(name)
+    assert flow["concurrency"]["cancel-in-progress"] is True
+    older, newer = "a" * 40, "b" * 40
+    runs = [(action, head, run_id) for run_id, (action, head)
+            in enumerate(itertools.product(PUSHES, (older, newer)), 101)]
+
+    def groups(current):
+        return {group_of(current, action, head, run_id=run_id, merge_sha=f"{run_id:040x}")
+                for action, head, run_id in runs}
+
+    # A group keyed by the run id cannot cancel an older head. This control would pass if the contexts omitted it.
+    distinct_runs = {"concurrency": {"group": flow["concurrency"]["group"] + "-${{ github.run_id }}"}}
+    assert len(groups(distinct_runs)) == 4
+    shared = groups(flow)
+    assert len(shared) == 1, shared
+    # Another pull request's push cancels neither.
+    assert group_of(flow, "synchronize", newer, number=8, run_id=105, merge_sha="d" * 40) not in shared
+
+
+def test_only_a_workflow_of_one_job_cancels_no_run():
+    assert set(CHECK_WORKFLOWS) == {"build.yaml", "tests.yaml", "validate.yaml", "terms.yaml"}
+    assert {name for name in CHECK_WORKFLOWS if "concurrency" not in workflow(name)} == NO_CANCEL
+    for name in NO_CANCEL:
+        assert len(workflow(name)["jobs"]) == 1, name
 
 
 def test_the_required_check_tests_passes_only_when_suite_and_docker_passed(tmp_path):

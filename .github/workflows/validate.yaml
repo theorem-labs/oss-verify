@@ -61,10 +61,13 @@ permissions: {}
 # No job reads or writes the Actions cache (the top of this file).
 cache-mode: none
 
-concurrency:
-  # By event too, so that a run started by hand never cancels the pull request's own run of the required check.
-  group: validate-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr }}
-  cancel-in-progress: true
+# No concurrency group: no run of this file cancels another, a run by hand included. Here a push and a reopen can start
+# two runs at one head, and in a group that cancels, two runs that start in the same second can end with the newer
+# cancelled, and .github/scripts/required-check, which posts the job of the newest run at the head, then posts
+# enrollment cancelled (Terms on #317: terms.yaml's comment on concurrency). The run is one job, of 7 to 12 seconds in
+# each of the last 20 runs on pull_request (created 2026-11-25 11:47Z to 2026-11-26 12:40Z). So the run of a replaced
+# push ends within seconds, and required-check, which reads only the runs at the pull request's head, posts nothing
+# from it.
 
 jobs:
   validate:

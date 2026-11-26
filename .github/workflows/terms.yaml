@@ -68,12 +68,16 @@ on:
 
 permissions: {}
 
-concurrency:
-  # One run per pull request: an edit or a push while a run is going supersedes it, so the newest description is
-  # the one this check reports on. By event too, so that the runs of this file's copy from before the move to
-  # pull_request (on pull_request_target) and the runs of this copy never cancel each other.
-  group: terms-${{ github.event_name }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# No concurrency group: no run of this file cancels another, so each edit and each push gets the result of its own run.
+# In a group that cancels, two runs that start in the same second can end with the newer cancelled and the older kept:
+# on #317 a push and an edit of the description at 003eaa4 started runs 45815765408 and 45815765694 at 12:01:15Z, and
+# GitHub cancelled 45815765694, the newer. .github/scripts/required-check posts the job of the newest run at the head,
+# so the App posted terms-accepted cancelled (check run 139895200042), and main's ruleset held the pull request although
+# the run that ran passed. required-check keeps to the newest run, and takes another in its place only when GitHub
+# cancelled it for a run created in the same second (deciding_run of .github/scripts/artifact.py): a run of an earlier
+# second can have read an older description. The run is one job, of 6 to 10 seconds in each of the 18 runs that ran it
+# of the last 20 (created 2026-11-25 20:27Z to 2026-11-26 12:40Z). So the run of a replaced push ends within seconds,
+# and required-check, which reads only the runs at the pull request's head, posts nothing from it.
 
 jobs:
   terms-accepted:

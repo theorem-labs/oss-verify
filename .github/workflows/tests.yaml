@@ -144,10 +144,21 @@ env:
   CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
 
 concurrency:
-  # One group for each pull request, and one for the pushes to main (github.ref is then refs/heads/main): a newer run
-  # cancels the older one. That loses nothing, since each run tests the whole tree of its commit, never the changes
-  # since an earlier one, and the newer commit holds the older one's changes.
-  group: tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # One group for the pushes of each pull request (opened, synchronize), and one for the pushes to main (github.ref is
+  # then refs/heads/main): a newer run cancels the older one. That loses nothing, since each run tests the whole tree of
+  # its commit, never the changes since an earlier one, and the newer commit holds the older one's changes.
+  # A run on any other action (reopened) has a group of its own, by the action and the head, so it never cancels, nor
+  # is cancelled by, a push's run at its head: in a group that cancels, GitHub can cancel the newer of two runs that
+  # start in the same second (Terms on #317: terms.yaml's comment on concurrency). Two runs of the pushes at one head
+  # still share the group (GitHub started two for each of five pushes of #303); when GitHub cancels the newer of two
+  # created in the same second, .github/scripts/required-check takes the other (deciding_run of
+  # .github/scripts/artifact.py). The cost: a later push does not cancel the run of a reopen. A run here is three jobs
+  # (suite, the shards of docker, tests), of 6.6 to 10.3 minutes in each of the last 20 runs on pull_request (to
+  # 2026-11-26 12:40Z), so it keeps a group that cancels, where Terms and Validate, one job of seconds, have none.
+  group: >-
+    tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}${{
+    github.event_name == 'pull_request' && github.event.action != 'opened' && github.event.action != 'synchronize'
+    && format('-{0}-{1}', github.event.action, github.event.pull_request.head.sha) || '' }}
   cancel-in-progress: true
 
 jobs:

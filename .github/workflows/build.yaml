@@ -126,10 +126,22 @@ permissions: {}
 cache-mode: none
 
 concurrency:
-  # One run for each pull request: a push cancels the run of the older head. By event too, so that the runs of this
-  # file's copy from before the move to pull_request (on pull_request_target) and the runs of this copy never cancel
-  # each other.
-  group: build-${{ github.event_name }}-${{ github.event.pull_request.number }}
+  # One group for the pushes of each pull request (opened, synchronize): a push cancels the run of the older head. A
+  # run on any other action (reopened, ready_for_review) has a group of its own, by the action and the head, so it
+  # never cancels, nor is cancelled by, a run of a push or of another action at its head: in a group that cancels,
+  # GitHub can cancel the newer of two runs that start in the same second (Terms on #317: terms.yaml's comment on
+  # concurrency). Two runs of the pushes at one head still share the group; when GitHub cancels the newer of two
+  # created in the same second, .github/scripts/required-check takes the other (deciding_run of
+  # .github/scripts/artifact.py). The cost: a later push does not cancel the run of a reopen or of a draft marked ready.
+  # A run here is five jobs, and an enrollment's build takes from minutes to hours (23 of the last 100 runs on
+  # pull_request, to 2026-11-26 12:40Z, took over a minute; the two longest, of Enroll projects/racket, 138 and 181
+  # minutes), so it keeps a group that cancels, where Terms and Validate, one job of seconds, have none. By event too,
+  # so that the runs of this file's copy from before the move to pull_request (on pull_request_target) and the runs of
+  # this copy never cancel each other.
+  group: >-
+    build-${{ github.event_name }}-${{ github.event.pull_request.number }}${{
+    github.event.action != 'opened' && github.event.action != 'synchronize'
+    && format('-{0}-{1}', github.event.action, github.event.pull_request.head.sha) || '' }}
   cancel-in-progress: true
 
 jobs:
