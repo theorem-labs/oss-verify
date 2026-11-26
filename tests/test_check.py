@@ -2,19 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for oss-verify check that need no Docker, with the builds replaced:  uv run pytest"""
 import contextlib
+import functools
 import io
+import itertools
 import os
 import pathlib
+import re
 import select
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
-import unittest
-from unittest import mock
 
+import pytest
 import yaml
 
 from oss_verify import check as check_tool
@@ -53,7 +54,16 @@ def binaries(out, collected, segments=(PT_LOAD,), data=None):
             path.write_bytes(data)
 
 
-class Rebuild(unittest.TestCase):
+def raises(error):
+    """A stand-in for a function that raises `error`, whatever it is called with."""
+
+    def stand_in(*args, **kwargs):
+        raise error
+
+    return stand_in
+
+
+class TestRebuild:
     """manifest.rebuild: the block that oss-verify check --twice adds to the manifest."""
 
     def block(self, second):
@@ -63,65 +73,64 @@ class Rebuild(unittest.TestCase):
 
     def test_identical(self):
         block, differences, matched = self.block(entries(["1" * 64, "2" * 64, "3" * 64, "4" * 64]))
-        self.assertEqual((differences, matched), ([], 4))
-        self.assertEqual(block, {
+        assert (differences, matched) == ([], 4)
+        assert block == {
             "kind": "same-host", "host": "host", "at": "2026-10-19T00:00:00Z",
             "builder": {"toolchain": TOOLCHAIN, "image": "sha256:b", "project_image": "sha256:p"},
             "builds": BUILDS, "targets": {"demo_fuzzer": {"builds": FIRST["demo_fuzzer"]}}, "result": "identical",
-        })
+        }
 
     def test_differs(self):
         block, differences, matched = self.block(entries(["1" * 64, "2" * 64, "f" * 64, "4" * 64]))
-        self.assertEqual(block["result"], "differs")
-        self.assertEqual(matched, 3)
-        self.assertEqual(len(differences), 1)
-        self.assertIn("demo_fuzzer.asan: sha256 " + "f" * 64, differences[0])
+        assert block["result"] == "differs"
+        assert matched == 3
+        assert len(differences) == 1
+        assert "demo_fuzzer.asan: sha256 " + "f" * 64 in differences[0]
         # Its own SHA-256 for every binary, not the first build's.
-        self.assertEqual(block["targets"]["demo_fuzzer"]["builds"]["asan"]["sha256"], "f" * 64)
+        assert block["targets"]["demo_fuzzer"]["builds"]["asan"]["sha256"] == "f" * 64
 
     def test_a_different_set_of_binaries_differs(self):
         second = entries(["1" * 64, "2" * 64, "3" * 64, "4" * 64])
         second["other_fuzzer"] = {"plain": {"file": "other_fuzzer.plain", "bytes": 1, "sha256": "5" * 64}}
         del second["demo_fuzzer"]["ubsan"]
         block, differences, _ = self.block(second)
-        self.assertEqual(block["result"], "differs")
-        self.assertEqual(differences, ["demo_fuzzer.ubsan: in the lock, not in this build",
-                                       "other_fuzzer.plain: in this build, not in the lock"])
+        assert block["result"] == "differs"
+        assert differences == ["demo_fuzzer.ubsan: in the lock, not in this build",
+                               "other_fuzzer.plain: in this build, not in the lock"]
 
 
-class Project(unittest.TestCase):
+class Project:
     """A project to give oss-verify check, whose builds are replaced."""
 
-    def setUp(self):
-        self.scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(self.scratch.cleanup)
-        root = pathlib.Path(self.scratch.name)
-        self.project = root / "demo"
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.project = tmp_path / "demo"
         self.project.mkdir()
         (self.project / "project.yaml").write_text(
             "repo: https://example.org/demo\nprimary_contact: security@example.org\nlanguage: c\n")
         (self.project / "Dockerfile").write_text("FROM x\n")
         (self.project / "build.sh").write_text("#!/bin/bash\n")
-        self.work = root / "work"
+        self.work = tmp_path / "work"
 
     def main(self, options, build_all):
         """Run oss-verify check with these options and build_all in place of the builds: (exit code, output, errors)."""
         argv = ["oss-verify", "--no-shell", "--toolchain", TOOLCHAIN, "--dir", str(self.work), *options,
                 str(self.project)]
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.object(sys, "argv", argv))
-            stack.enter_context(mock.patch.object(check_tool, "build_all", build_all))
-            stack.enter_context(mock.patch.object(check_build, "resolve", lambda repo, ref, token=None: COMMIT))
-            stack.enter_context(mock.patch.object(check_build, "image_id", lambda tag: f"sha256:{tag}"))
-            stack.enter_context(mock.patch.object(check_build, "sources", lambda tag, *, labels: {}))
-            stack.enter_context(mock.patch.object(check_build, "oss_verify_state", lambda job: None))
+            patch = stack.enter_context(pytest.MonkeyPatch.context())
+            patch.setattr(sys, "argv", argv)
+            patch.setattr(check_tool, "build_all", build_all)
+            patch.setattr(check_build, "resolve", lambda repo, ref, token=None: COMMIT)
+            patch.setattr(check_build, "image_id", lambda tag: f"sha256:{tag}")
+            patch.setattr(check_build, "sources", lambda tag, *, labels: {})
+            patch.setattr(check_build, "oss_verify_state", lambda job: None)
             output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             errors = stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
             code = check_tool.main()
         return code, output.getvalue(), errors.getvalue()
 
 
-class Twice(Project):
+class TestTwice(Project):
     """oss-verify check --twice writes the rebuild block after its comparison, identical or not, and exits 3 if the
     builds differ."""
 
@@ -138,46 +147,46 @@ class Twice(Project):
 
         code, _, _ = self.main(["--twice"], build_all)
         # While the second build ran, the manifest had no rebuild block yet.
-        self.assertEqual(len(calls), 2)
-        self.assertNotIn("rebuild", calls[1])
+        assert len(calls) == 2
+        assert "rebuild" not in calls[1]
         data = yaml.safe_load((self.work / "manifest.yaml").read_text())
         return code, data
 
     def test_identical(self):
         code, data = self.check(entries(["1" * 64, "2" * 64, "3" * 64, "4" * 64]))
-        self.assertEqual(code, 0)
-        self.assertEqual(list(data)[-1], "rebuild")
+        assert code == 0
+        assert list(data)[-1] == "rebuild"
         rebuild = data["rebuild"]
-        self.assertEqual(rebuild["result"], "identical")
-        self.assertEqual(rebuild["kind"], "same-host")
-        self.assertEqual(rebuild["builder"], {"toolchain": TOOLCHAIN, "image": "sha256:builder-twice",
-                                              "project_image": "sha256:project-twice"})
-        self.assertEqual(rebuild["builds"], BUILDS)
-        self.assertEqual(rebuild["targets"], data["targets"])
-        self.assertRegex(rebuild["at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        assert rebuild["result"] == "identical"
+        assert rebuild["kind"] == "same-host"
+        assert rebuild["builder"] == {"toolchain": TOOLCHAIN, "image": "sha256:builder-twice",
+                                      "project_image": "sha256:project-twice"}
+        assert rebuild["builds"] == BUILDS
+        assert rebuild["targets"] == data["targets"]
+        assert re.search(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$", rebuild["at"])
         # The first build's fields are as they are without --twice.
-        self.assertEqual(data["builder"],
-                         {"toolchain": TOOLCHAIN, "image": "sha256:builder", "project_image": "sha256:project"})
-        self.assertEqual(data["targets"], {"demo_fuzzer": {"builds": FIRST["demo_fuzzer"]}})
-        self.assertEqual(manifest.load_lock(self.work / "manifest.yaml")[0], COMMIT)
+        assert data["builder"] == {"toolchain": TOOLCHAIN, "image": "sha256:builder",
+                                   "project_image": "sha256:project"}
+        assert data["targets"] == {"demo_fuzzer": {"builds": FIRST["demo_fuzzer"]}}
+        assert manifest.load_lock(self.work / "manifest.yaml")[0] == COMMIT
 
-    def test_a_language_with_no_builder_yet(self):
+    def test_a_language_with_no_builder_yet(self, monkeypatch):
         text = (self.project / "project.yaml").read_text().replace("language: c", "language: javascript")
         (self.project / "project.yaml").write_text(text)
-        with mock.patch.object(sys, "argv", ["oss-verify", "--no-shell", str(self.project)]), \
-                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
+        monkeypatch.setattr(sys, "argv", ["oss-verify", "--no-shell", str(self.project)])
+        with contextlib.redirect_stdout(io.StringIO()), pytest.raises(SystemExit) as stop:
             check_tool.main()
-        self.assertIn("which the builder cannot build yet", str(stop.exception.code))
+        assert "which the builder cannot build yet" in str(stop.value.code)
 
     def test_differs(self):
         code, data = self.check(entries(["1" * 64, "e" * 64, "3" * 64, "4" * 64]))
-        self.assertEqual(code, check_tool.DIFFERENT)
-        self.assertEqual(data["rebuild"]["result"], "differs")
-        self.assertEqual(data["rebuild"]["targets"]["demo_fuzzer"]["builds"]["ubsan"]["sha256"], "e" * 64)
-        self.assertEqual(data["targets"]["demo_fuzzer"]["builds"]["ubsan"]["sha256"], "2" * 64)
+        assert code == check_tool.DIFFERENT
+        assert data["rebuild"]["result"] == "differs"
+        assert data["rebuild"]["targets"]["demo_fuzzer"]["builds"]["ubsan"]["sha256"] == "e" * 64
+        assert data["targets"]["demo_fuzzer"]["builds"]["ubsan"]["sha256"] == "2" * 64
 
 
-class Binaries(Project):
+class TestBinaries(Project):
     """oss-verify check lists each binary's .text size and linkage, writes them as a Markdown table with --summary,
     records them in the manifest, and refuses a binary that is not statically linked."""
 
@@ -195,40 +204,39 @@ class Binaries(Project):
 
     def test_a_static_binary(self):
         code, output, errors, rows, data = self.check([PT_LOAD])
-        self.assertEqual(code, 0)
-        self.assertEqual(errors, "")
-        self.assertEqual(rows, [["`demo_fuzzer`", build, f"{1000 + i:,}", "1,234", "yes"]
-                                for i, build in enumerate(BUILDS)])
-        self.assertEqual(data["layout"], {"demo_fuzzer": {build: {"text_bytes": 1234, "static": True}
-                                                          for build in BUILDS}})
+        assert code == 0
+        assert errors == ""
+        assert rows == [["`demo_fuzzer`", build, f"{1000 + i:,}", "1,234", "yes"]
+                        for i, build in enumerate(BUILDS)]
+        assert data["layout"] == {"demo_fuzzer": {build: {"text_bytes": 1234, "static": True}
+                                                  for build in BUILDS}}
         for build in BUILDS:
-            self.assertIn(f"demo_fuzzer.{build}", output)
+            assert f"demo_fuzzer.{build}" in output
 
-    def test_a_dynamic_binary_breaks_the_enrollment_rules(self):
-        for segment in (PT_INTERP, PT_DYNAMIC):
-            with self.subTest(segment=segment):
-                code, _, errors, rows, data = self.check([PT_LOAD, segment])
-                self.assertEqual(code, 2)
-                self.assertEqual(len(errors.splitlines()), len(BUILDS))
-                self.assertEqual([row[4] for row in rows], ["no"] * len(BUILDS))
-                self.assertEqual({entry["static"] for entry in data["layout"]["demo_fuzzer"].values()}, {False})
+    @pytest.mark.parametrize("segment", [PT_INTERP, PT_DYNAMIC], ids=["PT_INTERP", "PT_DYNAMIC"])
+    def test_a_dynamic_binary_breaks_the_enrollment_rules(self, segment):
+        code, _, errors, rows, data = self.check([PT_LOAD, segment])
+        assert code == 2
+        assert len(errors.splitlines()) == len(BUILDS)
+        assert [row[4] for row in rows] == ["no"] * len(BUILDS)
+        assert {entry["static"] for entry in data["layout"]["demo_fuzzer"].values()} == {False}
 
     def test_an_unreadable_binary_breaks_the_enrollment_rules(self):
         code, _, errors, rows, data = self.check([], b"\x7fELF")
-        self.assertEqual(code, 2)
-        self.assertEqual(len(errors.splitlines()), len(BUILDS))
-        self.assertEqual([row[3:] for row in rows], [["unknown", "unknown"]] * len(BUILDS))
-        self.assertEqual(data["layout"]["demo_fuzzer"]["plain"], {"text_bytes": None, "static": None})
+        assert code == 2
+        assert len(errors.splitlines()) == len(BUILDS)
+        assert [row[3:] for row in rows] == [["unknown", "unknown"]] * len(BUILDS)
+        assert data["layout"]["demo_fuzzer"]["plain"] == {"text_bytes": None, "static": None}
 
     def test_target_names_are_escaped_in_the_summary(self):
         name = "a|b`c\n<d>@e"
         table = check_tool.summary_table([name], ["plain"], {name: {"plain": {"bytes": 1}}},
                                          {name: {"plain": {"text_bytes": 1, "static": True}}})
         lines = table.splitlines()
-        self.assertEqual(len(lines), 3)
-        self.assertEqual(lines[-1].count("|"), 6)
-        self.assertEqual(lines[-1].count("`"), 2)
-        self.assertFalse(any(character in lines[-1] for character in "<>@"))
+        assert len(lines) == 3
+        assert lines[-1].count("|") == 6
+        assert lines[-1].count("`") == 2
+        assert not any(character in lines[-1] for character in "<>@")
 
 
 def tree_files(root):
@@ -236,12 +244,12 @@ def tree_files(root):
     return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-class LayoutOptions(Project):
+class TestLayoutOptions(Project):
     """oss-verify check --layout-out writes the layout tree of the first build (infra/base-builder/layout.py
     collect), and --base-layout, which needs it, makes each build, the second of --twice too, an append build."""
 
-    def setUp(self):
-        super().setUp()
+    @pytest.fixture(autouse=True)
+    def set_up_layout(self, set_up):
         self.tree = self.work.parent / "layout"
         self.base = self.work.parent / "base"
         self.base.mkdir()
@@ -276,43 +284,43 @@ class LayoutOptions(Project):
     def collected(self):
         """The files that layout.py collect writes for the first build's raw/."""
         expected = self.work.parent / "expected"
-        self.assertEqual(layout_script.main(["collect", str(self.work / "raw"), str(expected)]), 0)
+        assert layout_script.main(["collect", str(self.work / "raw"), str(expected)]) == 0
         return tree_files(expected)
 
     def test_layout_out_records_the_links_and_writes_the_layout_tree(self):
         code, output, calls, _ = self.check(["--layout-out", str(self.tree)])
-        self.assertEqual(code, 0, output)
-        # layout=True records the links too: compile_build gives such a build OV_RECORD=1 (CompileBuild).
-        self.assertEqual(calls, [{"record": False, "layout": True, "base_layout": None}])
-        self.assertEqual(sorted(path.name for path in (self.tree / "plain" / "fuzz_shim").iterdir()),
-                         ["binary.sha256", "calls.tsv", "map", "output.tsv", "sections.tsv", "wraps"])
-        self.assertEqual(tree_files(self.tree), self.collected())
-        self.assertIn(f"layout tree: {self.tree}", output)
+        assert code == 0, output
+        # layout=True records the links too: compile_build gives such a build OV_RECORD=1 (TestCompileBuild).
+        assert calls == [{"record": False, "layout": True, "base_layout": None}]
+        assert sorted(path.name for path in (self.tree / "plain" / "fuzz_shim").iterdir()) == \
+            ["binary.sha256", "calls.tsv", "map", "output.tsv", "sections.tsv", "wraps"]
+        assert tree_files(self.tree) == self.collected()
+        assert f"layout tree: {self.tree}" in output
 
     def test_base_layout_makes_each_build_an_append_build_and_the_layout_tree_is_the_first_build_s(self):
         code, output, calls, seen = self.check(["--twice", "--layout-out", str(self.tree), "--base-layout",
                                                 str(self.base)])
-        self.assertEqual(code, 0, output)
-        self.assertEqual(calls, [{"record": False, "layout": True, "base_layout": self.base.resolve()}] * 2)
+        assert code == 0, output
+        assert calls == [{"record": False, "layout": True, "base_layout": self.base.resolve()}] * 2
         # Written from the first build's raw/, before the second build ran; the second one's is twice/raw/.
-        self.assertEqual(seen, [self.collected()])
-        self.assertEqual(tree_files(self.tree), self.collected())
+        assert seen == [self.collected()]
+        assert tree_files(self.tree) == self.collected()
 
     def test_without_the_options_nothing_changes(self):
         code, output, calls, _ = self.check(["--twice"])
-        self.assertEqual(code, 0, output)
-        self.assertEqual(calls, [{"record": False, "layout": False, "base_layout": None}] * 2)
-        self.assertNotIn("layout tree", output)
-        self.assertFalse(self.tree.exists())
+        assert code == 0, output
+        assert calls == [{"record": False, "layout": False, "base_layout": None}] * 2
+        assert "layout tree" not in output
+        assert not self.tree.exists()
 
     def test_a_record_with_no_wraps_stops_the_run_with_exit_1(self):
         code, output, _, _ = self.check(["--layout-out", str(self.tree)], lambda record: (record / "wraps").unlink())
-        self.assertEqual(code, 1)
+        assert code == 1
         failure = [line for line in output.splitlines() if "LAYOUT TREE WAS NOT WRITTEN" in line]
-        self.assertEqual(len(failure), 1, output)
-        self.assertIn("plain/fuzz_shim", failure[0])
-        self.assertIn("wraps", failure[0])
-        self.assertFalse(self.tree.exists())
+        assert len(failure) == 1, output
+        assert "plain/fuzz_shim" in failure[0]
+        assert "wraps" in failure[0]
+        assert not self.tree.exists()
 
     def test_a_build_directory_that_another_run_left_is_not_read(self):
         # An earlier run's asan build, whose record has no wraps: a collect of each directory of raw/ stops on it.
@@ -321,71 +329,75 @@ class LayoutOptions(Project):
         for wraps in (self.work / "raw" / "asan" / ".records").glob("*/wraps"):
             wraps.unlink()
         code, output, _, _ = self.check(["--build", "plain", "--layout-out", str(self.tree)])
-        self.assertEqual(code, 0, output)
-        self.assertEqual([path.relative_to(self.tree).as_posix() for path in sorted(self.tree.glob("*/*"))],
-                         ["plain/fuzz_shim"])
+        assert code == 0, output
+        assert [path.relative_to(self.tree).as_posix() for path in sorted(self.tree.glob("*/*"))] == \
+            ["plain/fuzz_shim"]
         with contextlib.redirect_stderr(io.StringIO()) as errors:
-            self.assertEqual(layout_script.main(["collect", str(self.work / "raw"), str(self.work.parent / "all")]), 2)
-        self.assertIn("asan/fuzz_shim", errors.getvalue())
-        self.assertIn("wraps", errors.getvalue())
+            assert layout_script.main(["collect", str(self.work / "raw"), str(self.work.parent / "all")]) == 2
+        assert "asan/fuzz_shim" in errors.getvalue()
+        assert "wraps" in errors.getvalue()
 
     def test_layout_out_may_be_an_empty_directory(self):
         self.tree.mkdir()
         code, output, _, _ = self.check(["--layout-out", str(self.tree)])
-        self.assertEqual(code, 0, output)
-        self.assertEqual(tree_files(self.tree), self.collected())
+        assert code == 0, output
+        assert tree_files(self.tree) == self.collected()
 
     def refused(self, options):
         """Run oss-verify check with `options`, which it must refuse as argparse does: the line of the error it prints
         after the usage, which names every option."""
         built = []
-        with mock.patch.object(check_tool, "build_all", lambda *args, **kwargs: built.append(args)), \
-                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as errors, \
-                self.assertRaises(SystemExit) as stop:
+        with pytest.MonkeyPatch.context() as patch, contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()) as errors, pytest.raises(SystemExit) as stop:
+            patch.setattr(check_tool, "build_all", lambda *args, **kwargs: built.append(args))
             check_tool.main(["--no-shell", "--toolchain", TOOLCHAIN, "--dir", str(self.work), *options,
                              str(self.project)])
-        self.assertEqual(stop.exception.code, 2)
+        assert stop.value.code == 2
         # Before anything is built: no build, and not even the work directory.
-        self.assertEqual(built, [])
-        self.assertFalse(self.work.exists())
+        assert built == []
+        assert not self.work.exists()
         return errors.getvalue().splitlines()[-1]
 
     def test_base_layout_without_layout_out_is_refused(self):
         errors = self.refused(["--base-layout", str(self.base)])
-        self.assertIn("--base-layout", errors)
-        self.assertIn("--layout-out", errors)
+        assert "--base-layout" in errors
+        assert "--layout-out" in errors
 
-    def test_base_layout_must_be_a_directory(self):
+    @pytest.mark.parametrize("name", ["file", "missing"])
+    def test_base_layout_must_be_a_directory(self, name):
         (self.work.parent / "file").write_text("")
-        for path in (self.work.parent / "file", self.work.parent / "missing"):
-            with self.subTest(path=path.name):
-                errors = self.refused(["--layout-out", str(self.tree), "--base-layout", str(path)])
-                self.assertIn(f"--base-layout {path.resolve()}", errors)
+        path = self.work.parent / name
+        errors = self.refused(["--layout-out", str(self.tree), "--base-layout", str(path)])
+        assert f"--base-layout {path.resolve()}" in errors
 
-    def test_layout_out_that_is_there_and_not_an_empty_directory_is_refused(self):
+    @pytest.mark.parametrize("name", ["layout", "file"])
+    def test_layout_out_that_is_there_and_not_an_empty_directory_is_refused(self, name):
         (self.tree / "plain" / "fuzz_shim").mkdir(parents=True)
         (self.work.parent / "file").write_text("")
-        for path in (self.tree, self.work.parent / "file"):
-            with self.subTest(path=path.name):
-                errors = self.refused(["--layout-out", str(path)])
-                self.assertIn(f"--layout-out {path}", errors)
+        path = self.work.parent / name  # self.tree, or the file
+        errors = self.refused(["--layout-out", str(path)])
+        assert f"--layout-out {path}" in errors
 
-    def test_layout_out_in_the_base_layout_is_refused(self):
+    @pytest.mark.parametrize("name, filled", [("base", False), ("base", True), ("new", True)])
+    def test_layout_out_in_the_base_layout_is_refused(self, name, filled):
         # The base layout directory itself, even while it is empty, and a directory in it.
-        for path, filled in ((self.base, False), (self.base, True), (self.base / "new", True)):
-            with self.subTest(path=path.name, filled=filled):
-                if filled:
-                    (self.base / "plain" / "fuzz_shim").mkdir(parents=True, exist_ok=True)
-                errors = self.refused(["--layout-out", str(path), "--base-layout", str(self.base)])
-                self.assertIn(f"--layout-out {path}", errors)
-                self.assertIn("--base-layout", errors)
+        path = self.base if name == "base" else self.base / name
+        if filled:
+            (self.base / "plain" / "fuzz_shim").mkdir(parents=True, exist_ok=True)
+        errors = self.refused(["--layout-out", str(path), "--base-layout", str(self.base)])
+        assert f"--layout-out {path}" in errors
+        assert "--base-layout" in errors
 
 
-class CompileBuild(unittest.TestCase):
+class TestCompileBuild:
     """The docker run command of compile_build: with a base layout tree, the tree mounted read-only and named by
     OV_BASE_LAYOUT, with the records and OV_LAYOUT; with neither a layout nor a base layout, today's command."""
 
     LABELS = ["--label", "work=/w"]
+
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.scratch, self.count = tmp_path, itertools.count()  # a new directory for each call of command()
 
     def command(self, **options):
         """(the one docker run command of compile_build for an asan build into a new directory, that directory)."""
@@ -395,47 +407,46 @@ class CompileBuild(unittest.TestCase):
             commands.append(list(argv))
             return 0
 
-        with tempfile.TemporaryDirectory() as scratch, mock.patch.object(check_build, "run", run), \
-                mock.patch.dict(os.environ), contextlib.redirect_stdout(io.StringIO()):
-            os.environ.pop("OFT_MAKE_JOBS", None)
-            out = pathlib.Path(scratch) / "out"
+        with pytest.MonkeyPatch.context() as patch, contextlib.redirect_stdout(io.StringIO()):
+            patch.setattr(check_build, "run", run)
+            patch.delenv("OFT_MAKE_JOBS", raising=False)
+            out = self.scratch / f"call{next(self.count)}" / "out"
             check_build.compile_build("tag", "asan", "address", out, labels=self.LABELS, **options)
-        self.assertEqual(len(commands), 1)
+        assert len(commands) == 1
         return commands[0], out
 
     def test_without_a_layout_the_command_is_today_s(self):
         owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
         command, out = self.command()
-        self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
-                                   "-e", "SANITIZER=address", "-e", owner, "-v", f"{out}:/out", "tag", "compile"])
+        assert command == ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                           "-e", "SANITIZER=address", "-e", owner, "-v", f"{out}:/out", "tag", "compile"]
         command, out = self.command(record=True)
-        self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
-                                   "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1", "-v", f"{out}:/out",
-                                   "tag", "compile"])
+        assert command == ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1", "-v", f"{out}:/out",
+                           "tag", "compile"]
 
-    def test_a_layout_records_the_links_with_ov_layout(self):
+    @pytest.mark.parametrize("options", [{"layout": True}, {"layout": True, "record": True}],
+                             ids=["layout", "layout-record"])
+    def test_a_layout_records_the_links_with_ov_layout(self, options):
         owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
-        for options in ({"layout": True}, {"layout": True, "record": True}):
-            with self.subTest(**options):
-                command, out = self.command(**options)
-                self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
-                                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
-                                           "-e", "OV_LAYOUT=1", "-v", f"{out}:/out", "tag", "compile"])
+        command, out = self.command(**options)
+        assert command == ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
+                           "-e", "OV_LAYOUT=1", "-v", f"{out}:/out", "tag", "compile"]
 
-    def test_a_base_layout_is_mounted_read_only(self):
+    @pytest.mark.parametrize("options", [{}, {"layout": True, "record": True}],
+                             ids=["no-options", "layout-record"])
+    def test_a_base_layout_is_mounted_read_only(self, options):
         owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
         base = pathlib.Path("/layouts/base")
-        for options in ({}, {"layout": True, "record": True}):
-            with self.subTest(**options):
-                command, out = self.command(base_layout=base, **options)
-                self.assertEqual(command, ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
-                                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
-                                           "-e", "OV_LAYOUT=1", "-v", "/layouts/base:/ov-base-layout:ro",
-                                           "-e", "OV_BASE_LAYOUT=/ov-base-layout", "-v", f"{out}:/out", "tag",
-                                           "compile"])
+        command, out = self.command(base_layout=base, **options)
+        assert command == ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                           "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
+                           "-e", "OV_LAYOUT=1", "-v", "/layouts/base:/ov-base-layout:ro",
+                           "-e", "OV_BASE_LAYOUT=/ov-base-layout", "-v", f"{out}:/out", "tag", "compile"]
 
 
-class UbsanSettings(unittest.TestCase):
+class TestUbsanSettings:
     """The UBSan checks that oss-verify check gives compile, by the toolchain's row in infra/toolchains.tsv."""
 
     def job(self, checks=None, language="c"):
@@ -444,38 +455,44 @@ class UbsanSettings(unittest.TestCase):
                                language=language)
 
     def test_a_fixed_toolchain_keeps_its_flags(self):
-        with mock.patch.object(check_build, "ubsan_mode", return_value="fixed"):
-            self.assertIsNone(check_tool.ubsan_settings(self.job(), TOOLCHAIN))
-            with contextlib.redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit) as stop:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "ubsan_mode", lambda *args, **kwargs: "fixed")
+            assert check_tool.ubsan_settings(self.job(), TOOLCHAIN) is None
+            with contextlib.redirect_stderr(io.StringIO()) as error, pytest.raises(SystemExit) as stop:
                 check_tool.ubsan_settings(self.job(["null"]), TOOLCHAIN)
-        self.assertEqual(stop.exception.code, 2)
-        self.assertIn("keeps the release's fixed UBSan flags", error.getvalue())
+        assert stop.value.code == 2
+        assert "keeps the release's fixed UBSan flags" in error.getvalue()
 
     def test_a_toolchain_that_applies_the_checks(self):
-        with mock.patch.object(check_build, "ubsan_mode", return_value="checks"):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "ubsan_mode", lambda *args, **kwargs: "checks")
             # C's default has no function; C++'s has it, but its C compiles leave it out, as OSS-Fuzz's do.
-            self.assertEqual(check_tool.ubsan_settings(self.job(), TOOLCHAIN), (validate.DEFAULT_UBSAN_CHECKS["c"],
-                                                                                ["vptr"], []))
+            assert check_tool.ubsan_settings(self.job(), TOOLCHAIN) == \
+                (validate.DEFAULT_UBSAN_CHECKS["c"], ["vptr"], [])
             # C++'s default has vptr, which the toolchain makes through its handler, so nothing is left out.
-            self.assertEqual(check_tool.ubsan_settings(self.job(language="c++"), TOOLCHAIN),
-                             (validate.DEFAULT_UBSAN_CHECKS["c++"], [], ["function"]))
-            self.assertEqual(check_tool.ubsan_settings(self.job(language="python"), TOOLCHAIN)[0],
-                             validate.DEFAULT_UBSAN_CHECKS["c"])
+            assert check_tool.ubsan_settings(self.job(language="c++"), TOOLCHAIN) == \
+                (validate.DEFAULT_UBSAN_CHECKS["c++"], [], ["function"])
+            assert check_tool.ubsan_settings(self.job(language="python"), TOOLCHAIN)[0] == \
+                validate.DEFAULT_UBSAN_CHECKS["c"]
             # A project's checks in effect (the default, changed). vptr stays when they name it.
-            self.assertEqual(check_tool.ubsan_settings(self.job(["null", "alignment", "vptr"]), TOOLCHAIN),
-                             (["null", "alignment", "vptr"], [], []))
-            self.assertEqual(check_tool.ubsan_settings(self.job(["null", "libcxx-hardening"], "c++"), TOOLCHAIN),
-                             (["null", "libcxx-hardening"], ["vptr"], []))
+            assert check_tool.ubsan_settings(self.job(["null", "alignment", "vptr"]), TOOLCHAIN) == \
+                (["null", "alignment", "vptr"], [], [])
+            assert check_tool.ubsan_settings(self.job(["null", "libcxx-hardening"], "c++"), TOOLCHAIN) == \
+                (["null", "libcxx-hardening"], ["vptr"], [])
 
     def test_an_unlisted_toolchain_keeps_the_fixed_flags(self):
-        self.assertEqual(check_build.ubsan_mode(TOOLCHAIN), "fixed")
+        assert check_build.ubsan_mode(TOOLCHAIN) == "fixed"
 
 
-class Buildkit(unittest.TestCase):
+class TestBuildkit:
     """oss-verify check refuses, with the fix, a `docker build` that refuses --progress (the legacy builder of Docker 23
     and later), before it builds anything."""
 
     PROBE = ("docker", "build", "--progress=plain", "--help")
+
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.cache = tmp_path
 
     def builds(self, probe_status):
         self.calls = []
@@ -484,36 +501,43 @@ class Buildkit(unittest.TestCase):
             self.calls.append(argv)
             return probe_status if argv == self.PROBE else 0
 
-        with tempfile.TemporaryDirectory() as cache, mock.patch.object(check_build, "CACHE", pathlib.Path(cache)), \
-                mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"), \
-                mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "CACHE", self.cache)
+            patch.setattr(check_build, "run", run)
+            patch.setattr(check_build, "step", lambda text: None)
+            patch.setattr(check_build.shutil, "which", lambda name: f"/usr/bin/{name}")
             check_build.build_builder(TOOLCHAIN)
 
-    def test_no_docker_command_stops_with_a_message_not_a_traceback(self):
-        with tempfile.TemporaryDirectory() as empty, mock.patch.dict(os.environ, {"PATH": empty}), \
-                mock.patch.object(check_build, "step"):
-            with self.assertRaises(check_build.Failed) as failed:
+    def test_no_docker_command_stops_with_a_message_not_a_traceback(self, tmp_path):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setenv("PATH", str(tmp_path))  # an empty directory
+            patch.setattr(check_build, "step", lambda text: None)
+            with pytest.raises(check_build.Failed) as failed:
                 check_build.build_builder(TOOLCHAIN)
-        self.assertIn("no docker command on PATH", str(failed.exception))
+        assert "no docker command on PATH" in str(failed.value)
 
     def test_a_legacy_builder_stops_before_the_builder_is_built(self):
-        with self.assertRaises(check_build.Failed) as failed:
+        with pytest.raises(check_build.Failed) as failed:
             self.builds(125)
-        self.assertIn("apt install docker-buildx", str(failed.exception))
-        self.assertIn("unset DOCKER_BUILDKIT", str(failed.exception))
-        self.assertEqual(self.calls, [self.PROBE])
+        assert "apt install docker-buildx" in str(failed.value)
+        assert "unset DOCKER_BUILDKIT" in str(failed.value)
+        assert self.calls == [self.PROBE]
 
     def test_with_buildkit_the_builder_is_built(self):
         self.builds(0)
-        self.assertEqual(self.calls[0], self.PROBE)
-        self.assertEqual(self.calls[1][:3], ("docker", "build", "--progress=plain"))
-        self.assertNotIn("--help", self.calls[1])
+        assert self.calls[0] == self.PROBE
+        assert self.calls[1][:3] == ("docker", "build", "--progress=plain")
+        assert "--help" not in self.calls[1]
 
 
-class BuilderTurns(unittest.TestCase):
+class TestBuilderTurns:
     """build_builder: two runs that build the same builder at once take turns. Two BuildKit builds that export one tag
     together fail the second with "image ... already exists" (Docker 29's containerd image store), as two pytest-xdist
     workers of the Docker tests did on the C builder (INFRA-5359)."""
+
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.scratch, self.count = tmp_path, itertools.count()  # a new cache for each call of most_at_once()
 
     def most_at_once(self, toolchains, turn, lock=check_build.cache_lock):
         """The most `docker build`s of a builder that ran at once, with build_builder called for each of `toolchains`
@@ -539,15 +563,19 @@ class BuilderTurns(unittest.TestCase):
                 started[0] += 1
                 most[0] = max(most[0], active[0])
                 changed.notify_all()
-                self.assertTrue(changed.wait_for(lambda: asked[0] == len(toolchains), timeout=60), "a call never asked")
+                assert changed.wait_for(lambda: asked[0] == len(toolchains), timeout=60), "a call never asked"
                 changed.wait_for(lambda: started[0] == len(toolchains), timeout=turn)
                 active[0] -= 1
             return 0
 
-        with tempfile.TemporaryDirectory() as cache, mock.patch.object(check_build, "CACHE", pathlib.Path(cache)), \
-                mock.patch.object(check_build, "run", run), mock.patch.object(check_build, "step"), \
-                mock.patch.object(check_build, "cache_lock", asking), \
-                mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
+        cache = self.scratch / f"cache{next(self.count)}"
+        cache.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "CACHE", cache)
+            patch.setattr(check_build, "run", run)
+            patch.setattr(check_build, "step", lambda text: None)
+            patch.setattr(check_build, "cache_lock", asking)
+            patch.setattr(check_build.shutil, "which", lambda name: f"/usr/bin/{name}")
             tags = check_build.in_threads(check_build.build_builder, toolchains, len(toolchains))
         for tag in tags:
             if isinstance(tag, BaseException):
@@ -556,15 +584,15 @@ class BuilderTurns(unittest.TestCase):
 
     def test_two_builds_of_one_builder_take_turns(self):
         most, tags = self.most_at_once([TOOLCHAIN, TOOLCHAIN], turn=1)
-        self.assertEqual((most, len(set(tags))), (1, 1), tags)
+        assert (most, len(set(tags))) == (1, 1), tags
         # The control: without the turns, the two builds are in `docker build` at once, and this finds it. Both start
         # one at once, so the long bound costs no time.
         most, _ = self.most_at_once([TOOLCHAIN, TOOLCHAIN], turn=60, lock=lambda entry: contextlib.nullcontext())
-        self.assertEqual(most, 2)
+        assert most == 2
 
     def test_two_builders_build_at_once(self):
         most, tags = self.most_at_once([TOOLCHAIN, check_build.newest_toolchain("rust")], turn=60)
-        self.assertEqual((most, len(set(tags))), (2, 2), tags)
+        assert (most, len(set(tags))) == (2, 2), tags
 
     def test_a_cache_that_cannot_hold_the_lock_still_builds(self):
         """The lock is a courtesy to a second run: a run whose cache directory cannot be written (a read-only home,
@@ -575,19 +603,21 @@ class BuilderTurns(unittest.TestCase):
             calls.append(argv)
             return 0
 
-        with tempfile.TemporaryDirectory() as scratch, mock.patch.object(check_build, "run", run), \
-                mock.patch.object(check_build, "step"), mock.patch.object(check_build, "say"), \
-                mock.patch.object(check_build.shutil, "which", lambda name: f"/usr/bin/{name}"):
-            blocked = pathlib.Path(scratch) / "a-file"
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "run", run)
+            patch.setattr(check_build, "step", lambda text: None)
+            patch.setattr(check_build, "say", lambda text="": None)
+            patch.setattr(check_build.shutil, "which", lambda name: f"/usr/bin/{name}")
+            blocked = self.scratch / "a-file"
             blocked.write_text("")
-            with mock.patch.object(check_build, "CACHE", blocked):
-                check_build.build_builder(TOOLCHAIN, no_cache=True)
+            patch.setattr(check_build, "CACHE", blocked)
+            check_build.build_builder(TOOLCHAIN, no_cache=True)
         builds = [argv for argv in calls if "--help" not in argv]
-        self.assertEqual(len(builds), 1, calls)
-        self.assertIn("--no-cache", builds[0])
+        assert len(builds) == 1, calls
+        assert "--no-cache" in builds[0]
 
 
-class ProjectTag(unittest.TestCase):
+class TestProjectTag:
     """The project image's tag names the oss-verify tree that builds it and the run's work directory, so two trees, or
     two runs, on one Docker host keep two images."""
 
@@ -595,53 +625,59 @@ class ProjectTag(unittest.TestCase):
     BUILDER = "oss-verify-base-builder:0123456789abcdef-toolchain"
     HOME = pathlib.Path("/work/demo")
 
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.scratch, self.count = tmp_path, itertools.count()  # a new directory for each call of tag()
+
     def tag(self, files, builder=BUILDER, suffix="", home=HOME):
-        with tempfile.TemporaryDirectory() as scratch:
-            directory = pathlib.Path(scratch) / "demo"
-            directory.mkdir()
-            for name, text in files.items():
-                (directory / name).write_text(text)
-            job = check_build.Job(name="demo", directory=directory, repo="https://example.org/demo", ref="",
-                                  dockerfile="", builds=BUILDS, fuzz_targets=None, ubsan_checks=None, language="c")
-            return check_build.project_tag(job, self.COMMIT, builder, home, suffix)
+        directory = self.scratch / f"call{next(self.count)}" / "demo"
+        directory.mkdir(parents=True)
+        for name, text in files.items():
+            (directory / name).write_text(text)
+        job = check_build.Job(name="demo", directory=directory, repo="https://example.org/demo", ref="",
+                              dockerfile="", builds=BUILDS, fuzz_targets=None, ubsan_checks=None, language="c")
+        return check_build.project_tag(job, self.COMMIT, builder, home, suffix)
 
     def test_identical_trees_give_the_same_tag(self):
         files = {"project.yaml": "repo: x\n", "Dockerfile": "FROM a\n"}
-        self.assertEqual(self.tag(files), self.tag(dict(files)))
-        self.assertTrue(self.tag(files).startswith(f"oss-verify-check/demo:{self.COMMIT[:12]}-"))
+        assert self.tag(files) == self.tag(dict(files))
+        assert self.tag(files).startswith(f"oss-verify-check/demo:{self.COMMIT[:12]}-")
 
     def test_a_different_project_directory_gives_a_different_tag(self):
-        self.assertNotEqual(self.tag({"project.yaml": "repo: x\n", "Dockerfile": "FROM a\n"}),
-                            self.tag({"project.yaml": "repo: x\n", "Dockerfile": "FROM b\n"}))
-        self.assertNotEqual(self.tag({"project.yaml": "repo: x\n"}),
-                            self.tag({"project.yaml": "repo: x\n", "build.sh": "true\n"}))
+        assert self.tag({"project.yaml": "repo: x\n", "Dockerfile": "FROM a\n"}) != \
+            self.tag({"project.yaml": "repo: x\n", "Dockerfile": "FROM b\n"})
+        assert self.tag({"project.yaml": "repo: x\n"}) != \
+            self.tag({"project.yaml": "repo: x\n", "build.sh": "true\n"})
 
     def test_a_different_builder_gives_a_different_tag(self):
         files = {"project.yaml": "repo: x\n"}
-        self.assertNotEqual(self.tag(files), self.tag(files, builder=self.BUILDER + "-other"))
+        assert self.tag(files) != self.tag(files, builder=self.BUILDER + "-other")
 
     def test_a_different_work_directory_gives_a_different_tag(self):
         files = {"project.yaml": "repo: x\n"}
-        self.assertNotEqual(self.tag(files), self.tag(files, home=pathlib.Path("/work/other")))
+        assert self.tag(files) != self.tag(files, home=pathlib.Path("/work/other"))
 
     def test_build_all_records_the_tag_before_the_build(self):
-        with tempfile.TemporaryDirectory() as scratch, tempfile.TemporaryDirectory() as project:
-            home = pathlib.Path(scratch)
-            record = home / check_build.IMAGES
-            seen = []
+        home = self.scratch / "home"
+        home.mkdir()
+        project = self.scratch / "project"
+        project.mkdir()
+        record = home / check_build.IMAGES
+        seen = []
 
-            def build_project(job, commit, builder, tag, work, no_cache=False, token=None):
-                seen.append(check_build.recorded_images(record))
-                raise check_build.Failed("stop here")
+        def build_project(job, commit, builder, tag, work, no_cache=False, token=None):
+            seen.append(check_build.recorded_images(record))
+            raise check_build.Failed("stop here")
 
-            job = check_build.Job(name="demo", directory=pathlib.Path(project), repo="https://example.org/demo",
-                                  ref="", dockerfile="", builds=BUILDS, fuzz_targets=None, ubsan_checks=None,
-                                  language="c")
-            with mock.patch.object(check_build, "build_builder", lambda *args: self.BUILDER), \
-                    mock.patch.object(check_build, "build_project", build_project):
-                with self.assertRaises(check_build.Failed):
-                    check_tool.build_all(job, self.COMMIT, home / "twice", TOOLCHAIN, home, "-twice")
-            self.assertEqual(seen, [[check_build.project_tag(job, self.COMMIT, self.BUILDER, home, "-twice")]])
+        job = check_build.Job(name="demo", directory=project, repo="https://example.org/demo",
+                              ref="", dockerfile="", builds=BUILDS, fuzz_targets=None, ubsan_checks=None,
+                              language="c")
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "build_builder", lambda *args: self.BUILDER)
+            patch.setattr(check_build, "build_project", build_project)
+            with pytest.raises(check_build.Failed):
+                check_tool.build_all(job, self.COMMIT, home / "twice", TOOLCHAIN, home, "-twice")
+        assert seen == [[check_build.project_tag(job, self.COMMIT, self.BUILDER, home, "-twice")]]
 
     def test_every_container_carries_the_work_label(self):
         label = check_build.work_label(self.HOME)
@@ -653,75 +689,77 @@ class ProjectTag(unittest.TestCase):
                 out.rmdir()
             return 0
 
-        with tempfile.TemporaryDirectory() as scratch, \
-                mock.patch.object(check_build, "run", run), \
-                mock.patch.object(check_build, "output", lambda *argv: commands.append(argv) or ""), \
-                mock.patch.object(check_build.shutil, "rmtree", mock.Mock(side_effect=PermissionError)), \
-                contextlib.redirect_stdout(io.StringIO()):
-            out = pathlib.Path(scratch) / "out"
+        with pytest.MonkeyPatch.context() as patch, contextlib.redirect_stdout(io.StringIO()):
+            patch.setattr(check_build, "run", run)
+            patch.setattr(check_build, "output", lambda *argv: commands.append(argv) or "")
+            patch.setattr(check_build.shutil, "rmtree", raises(PermissionError))
+            out = self.scratch / "out"
             out.mkdir()
             check_build.compile_build("t", "plain", "none", out, None, labels=label)  # empty_directory's rm, then compile
             check_build.sources("t", labels=label)
         docker_runs = [argv for argv in commands if argv[:2] == ("docker", "run")]
-        self.assertEqual(len(docker_runs), 3)
+        assert len(docker_runs) == 3
         for argv in docker_runs:
-            self.assertIn(f"{label[0]} {label[1]}", " ".join(argv))
+            assert f"{label[0]} {label[1]}" in " ".join(argv)
 
     def test_the_suffix_stays_last(self):
-        self.assertTrue(self.tag({"project.yaml": "repo: x\n"}, suffix="-twice").endswith("-twice"))
+        assert self.tag({"project.yaml": "repo: x\n"}, suffix="-twice").endswith("-twice")
 
 
-class TreeHash(unittest.TestCase):
+class TestTreeHash:
     """check_build.tree_hash, which names the builder image and the project image: one tree, one hash."""
 
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.scratch, self.count = tmp_path, itertools.count()  # a new directory for each call of hash_of()
+
     def hash_of(self, files, links=()):
-        with tempfile.TemporaryDirectory() as scratch:
-            root = pathlib.Path(scratch)
-            for name, data in files.items():
-                (root / name).parent.mkdir(parents=True, exist_ok=True)
-                (root / name).write_bytes(data)
-            for name, target in links:
-                (root / name).symlink_to(target)
-            return check_build.tree_hash(root)
+        root = self.scratch / f"call{next(self.count)}"
+        root.mkdir()
+        for name, data in files.items():
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_bytes(data)
+        for name, target in links:
+            (root / name).symlink_to(target)
+        return check_build.tree_hash(root)
 
     def test_a_file_cannot_pass_for_two(self):
         # Without lengths, the stream of a, with these bytes, was the stream of the files a and b.
-        self.assertNotEqual(self.hash_of({"a": b"x", "b": b"y"}), self.hash_of({"a": b"x\0b\x000\0y"}))
+        assert self.hash_of({"a": b"x", "b": b"y"}) != self.hash_of({"a": b"x\0b\x000\0y"})
 
     def test_the_same_tree_gives_the_same_hash(self):
         files = {"Dockerfile": b"FROM a\n", "sub/build.sh": b"true\n"}
-        self.assertEqual(self.hash_of(files), self.hash_of(dict(files)))
-        self.assertNotEqual(self.hash_of(files), self.hash_of({**files, "sub/build.sh": b"false\n"}))
-        self.assertNotEqual(self.hash_of(files), self.hash_of({"Dockerfile": b"FROM a\n", "sub/build.SH": b"true\n"}))
+        assert self.hash_of(files) == self.hash_of(dict(files))
+        assert self.hash_of(files) != self.hash_of({**files, "sub/build.sh": b"false\n"})
+        assert self.hash_of(files) != self.hash_of({"Dockerfile": b"FROM a\n", "sub/build.SH": b"true\n"})
 
     def test_bytecode_caches_are_left_out(self):
         files = {"tool.py": b"print(1)\n"}
-        self.assertEqual(self.hash_of(files), self.hash_of({**files, "__pycache__/tool.pyc": b"\0\0"}))
+        assert self.hash_of(files) == self.hash_of({**files, "__pycache__/tool.pyc": b"\0\0"})
 
     def test_a_link_counts_as_its_text(self):
         # docker build sends a link as a link: the hash is of where it points, never of the file it reaches, and a
         # link to a directory counts too.
         files = {"target": b"data"}
         link = self.hash_of(files, links=[("alias", "target")])
-        self.assertNotEqual(link, self.hash_of({**files, "alias": b"data"}))
-        self.assertNotEqual(link, self.hash_of(files, links=[("alias", "elsewhere")]))
-        self.assertNotEqual(self.hash_of(files), self.hash_of(files, links=[("dir", "/etc")]))
+        assert link != self.hash_of({**files, "alias": b"data"})
+        assert link != self.hash_of(files, links=[("alias", "elsewhere")])
+        assert self.hash_of(files) != self.hash_of(files, links=[("dir", "/etc")])
 
 
-class CacheLock(unittest.TestCase):
+class TestCacheLock:
     """check_build.cache_lock: one run at a time fills a cache entry."""
 
-    def test_a_second_holder_waits(self):
+    def test_a_second_holder_waits(self, tmp_path):
         import fcntl
-        with tempfile.TemporaryDirectory() as scratch:
-            entry = pathlib.Path(scratch) / "model" / COMMIT
-            with check_build.cache_lock(entry):
-                with open(entry.parent / f"{entry.name}.lock", "a") as other:
-                    with self.assertRaises(BlockingIOError):
-                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        entry = tmp_path / "model" / COMMIT
+        with check_build.cache_lock(entry):
             with open(entry.parent / f"{entry.name}.lock", "a") as other:
-                fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released: no wait
-                fcntl.flock(other, fcntl.LOCK_UN)
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with open(entry.parent / f"{entry.name}.lock", "a") as other:
+            fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released: no wait
+            fcntl.flock(other, fcntl.LOCK_UN)
 
     def test_validate_runs_without_fcntl(self):
         """fcntl is POSIX only. oss-verify validate, and the triage preview of CONTRIBUTING.md, import check_build, so
@@ -732,30 +770,30 @@ class CacheLock(unittest.TestCase):
                 " print(problems, bool(summary))")
         done = subprocess.run([sys.executable, "-P", "-c", code], capture_output=True, text=True,
                               env={**os.environ, "PYTHONPATH": str(SRC)})
-        self.assertEqual((done.returncode, done.stdout.strip()), (0, "[] True"), done.stderr)
+        assert (done.returncode, done.stdout.strip()) == (0, "[] True"), done.stderr
 
-    def test_the_model_is_fetched_once_under_the_lock(self):
+    def test_the_model_is_fetched_once_under_the_lock(self, tmp_path):
         import fcntl
         from oss_verify import model_release
         calls = []
-        with tempfile.TemporaryDirectory() as scratch:
-            cache = pathlib.Path(scratch)
-            home = cache / "model" / COMMIT
+        cache = tmp_path
+        home = cache / "model" / COMMIT
 
-            def clone(repository, commit, checkout):
-                with open(home.parent / f"{home.name}.lock", "a") as other:
-                    with self.assertRaises(BlockingIOError):  # fetch() holds the entry's lock while git writes
-                        fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                checkout.mkdir(parents=True, exist_ok=True)
-                calls.append((repository, commit))
+        def clone(repository, commit, checkout):
+            with open(home.parent / f"{home.name}.lock", "a") as other:
+                with pytest.raises(BlockingIOError):  # fetch() holds the entry's lock while git writes
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            checkout.mkdir(parents=True, exist_ok=True)
+            calls.append((repository, commit))
 
-            with mock.patch.object(check_build, "clone", clone):
-                self.assertEqual(model_release.fetch("https://github.com/o/m", COMMIT, cache), home)
-                self.assertEqual(model_release.fetch("https://github.com/o/m", COMMIT, cache), home)
-            self.assertEqual(calls, [("https://github.com/o/m", COMMIT)])
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "clone", clone)
+            assert model_release.fetch("https://github.com/o/m", COMMIT, cache) == home
+            assert model_release.fetch("https://github.com/o/m", COMMIT, cache) == home
+        assert calls == [("https://github.com/o/m", COMMIT)]
 
 
-class ContainerCleanup(unittest.TestCase):
+class TestContainerCleanup:
     """A container outlives its docker run client: oss-verify check removes the containers it started when it ends,
     however it ends, and they keep no log on the Docker host."""
 
@@ -801,8 +839,8 @@ class ContainerCleanup(unittest.TestCase):
 
     def test_every_container_carries_the_run_label_and_keeps_no_log(self):
         options = check_build.work_label(pathlib.Path("/work"))
-        self.assertEqual(options, ["--label", f"{check_build.WORK_LABEL}=/work",
-                                   "--label", f"{check_build.RUN_LABEL}={check_build.RUN}", "--log-driver=none"])
+        assert options == ["--label", f"{check_build.WORK_LABEL}=/work",
+                           "--label", f"{check_build.RUN_LABEL}={check_build.RUN}", "--log-driver=none"]
 
     def test_stop_containers_removes_this_process_containers(self):
         calls = []
@@ -811,10 +849,11 @@ class ContainerCleanup(unittest.TestCase):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, "c1\nc2\n" if argv[1] == "ps" else "", "")
 
-        with mock.patch.object(check_build.subprocess, "run", run):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build.subprocess, "run", run)
             check_build.stop_containers()
         mine = f"label={check_build.RUN_LABEL}={check_build.RUN}"
-        self.assertEqual(calls, [["docker", "ps", "-aq", "--filter", mine], ["docker", "rm", "-f", "c1", "c2"]])
+        assert calls == [["docker", "ps", "-aq", "--filter", mine], ["docker", "rm", "-f", "c1", "c2"]]
 
     def test_stop_containers_with_none_left_or_no_docker_does_nothing(self):
         calls = []
@@ -823,14 +862,18 @@ class ContainerCleanup(unittest.TestCase):
             calls.append(argv)
             return subprocess.CompletedProcess(argv, 0, "", "")
 
-        with mock.patch.object(check_build.subprocess, "run", run):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build.subprocess, "run", run)
             check_build.stop_containers()
-        self.assertEqual([argv[1] for argv in calls], ["ps"])
+        assert [argv[1] for argv in calls] == ["ps"]
         for error in (FileNotFoundError("docker"), subprocess.TimeoutExpired("docker", 60)):
-            with mock.patch.object(check_build.subprocess, "run", mock.Mock(side_effect=error)):
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(check_build.subprocess, "run", raises(error))
                 check_build.stop_containers()  # no error
 
-    def test_containers_are_stopped_however_the_block_ends(self):
+    @pytest.mark.parametrize("error", [None, RuntimeError, KeyboardInterrupt],
+                             ids=["no-error", "RuntimeError", "KeyboardInterrupt"])
+    def test_containers_are_stopped_however_the_block_ends(self, error):
         """At its end, normal or by an error, with no signal able to cut the removal short; then each signal's handler
         is what it was."""
         import signal
@@ -840,15 +883,14 @@ class ContainerCleanup(unittest.TestCase):
         def stop():
             seen.append({number: signal.getsignal(number) for number in before})
 
-        for error in (None, RuntimeError, KeyboardInterrupt):
-            with self.subTest(error=error), mock.patch.object(check_build, "stop_containers", stop):
-                seen.clear()
-                with contextlib.suppress(*([error] if error else [])):
-                    with check_build.containers_stopped():
-                        if error:
-                            raise error()
-                self.assertEqual(seen, [{number: signal.SIG_IGN for number in before}])
-                self.assertEqual({number: signal.getsignal(number) for number in before}, before)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "stop_containers", stop)
+            with contextlib.suppress(*([error] if error else [])):
+                with check_build.containers_stopped():
+                    if error:
+                        raise error()
+            assert seen == [{number: signal.SIG_IGN for number in before}]
+            assert {number: signal.getsignal(number) for number in before} == before
 
     def test_a_signal_ignored_at_the_start_stays_ignored(self):
         """nohup oss-verify check: the SIGHUP that nohup ignores still does not end the run, in the block or after
@@ -856,39 +898,40 @@ class ContainerCleanup(unittest.TestCase):
         import signal
         previous = signal.signal(signal.SIGHUP, signal.SIG_IGN)
         try:
-            with mock.patch.object(check_build, "stop_containers", lambda: None):
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(check_build, "stop_containers", lambda: None)
                 with check_build.containers_stopped():
-                    self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
-                    self.assertNotIn(signal.getsignal(signal.SIGTERM), (signal.SIG_IGN, signal.SIG_DFL))
-            self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+                    assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
+                    assert signal.getsignal(signal.SIGTERM) not in (signal.SIG_IGN, signal.SIG_DFL)
+            assert signal.getsignal(signal.SIGHUP) is signal.SIG_IGN
         finally:
             signal.signal(signal.SIGHUP, previous)
 
-    def test_a_signal_ends_the_run_and_its_containers(self):
+    @pytest.mark.parametrize("signame, code", [("SIGTERM", 143), ("SIGHUP", 129), ("SIGINT", 130)])
+    def test_a_signal_ends_the_run_and_its_containers(self, signame, code, tmp_path, request):
         """SIGTERM, SIGHUP or Ctrl-C while a docker run runs: the run ends with 128 + the signal's number, and removes
         each container that carries its own label."""
         import signal
-        for number, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)):
-            with self.subTest(signal=number.name), tempfile.TemporaryDirectory() as scratch:
-                env, log = self.fake_docker(scratch)
-                # The signal is sent once the docker run has started: the stand-in writes to this FIFO then. It is
-                # opened first, and without waiting for a writer, so that the stand-in's write never waits for it.
-                started = pathlib.Path(scratch) / "started"
-                os.mkfifo(started)
-                reader = os.open(started, os.O_RDONLY | os.O_NONBLOCK)
-                self.addCleanup(os.close, reader)
-                process = subprocess.Popen([sys.executable, "-P", "-c", self.CHILD],
-                                           env={**env, "PYTHONPATH": str(SRC), "DOCKER_STARTED": str(started)},
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                self.addCleanup(process.kill)  # if it does not end, as a test that fails leaves it
-                select.select([reader], [], [], 20)
-                process.send_signal(number)
-                _, errors = process.communicate(timeout=20)
-                self.assertEqual(process.returncode, code, errors)
-                started, listed, removed = log.read_text(encoding="utf-8").splitlines()
-                run = next(arg for arg in started.split() if arg.startswith(f"{check_build.RUN_LABEL}="))
-                self.assertEqual(listed, f"ps -aq --filter label={run}")
-                self.assertEqual(removed, "rm -f c1 c2")
+        number = getattr(signal, signame)
+        env, log = self.fake_docker(tmp_path)
+        # The signal is sent once the docker run has started: the stand-in writes to this FIFO then. It is
+        # opened first, and without waiting for a writer, so that the stand-in's write never waits for it.
+        started = tmp_path / "started"
+        os.mkfifo(started)
+        reader = os.open(started, os.O_RDONLY | os.O_NONBLOCK)
+        request.addfinalizer(functools.partial(os.close, reader))
+        process = subprocess.Popen([sys.executable, "-P", "-c", self.CHILD],
+                                   env={**env, "PYTHONPATH": str(SRC), "DOCKER_STARTED": str(started)},
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        request.addfinalizer(process.kill)  # if it does not end, as a test that fails leaves it
+        select.select([reader], [], [], 20)
+        process.send_signal(number)
+        _, errors = process.communicate(timeout=20)
+        assert process.returncode == code, errors
+        started, listed, removed = log.read_text(encoding="utf-8").splitlines()
+        run = next(arg for arg in started.split() if arg.startswith(f"{check_build.RUN_LABEL}="))
+        assert listed == f"ps -aq --filter label={run}"
+        assert removed == "rm -f c1 c2"
 
     # A run whose main thread is inside a write that a full pipe blocks, which nothing else interrupts, when another
     # thread takes SIGTERM: Python then has the signal, and its handler waits for the main thread.
@@ -914,8 +957,8 @@ class ContainerCleanup(unittest.TestCase):
                                   env={**os.environ, "PYTHONPATH": str(SRC)}, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=20)
         except subprocess.TimeoutExpired:
-            self.fail("the run went on after SIGTERM until it was killed at the deadline")
-        self.assertEqual(done.returncode, 143, done.stderr)
+            pytest.fail("the run went on after SIGTERM until it was killed at the deadline")
+        assert done.returncode == 143, done.stderr
 
     # A run whose Ctrl-C another thread, one that runs already, takes just after containers_stopped() has set its
     # wakeup fd: Python then runs the handler in the main thread, in the setup. The wakeup fd before is a pipe of the
@@ -959,9 +1002,9 @@ class ContainerCleanup(unittest.TestCase):
         done = subprocess.run([sys.executable, "-P", "-c", self.SETTING_UP],
                               env={**os.environ, "PYTHONPATH": str(SRC)}, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=20)
-        self.assertEqual(done.returncode, 0, done.stderr)
-        self.assertEqual(done.stdout.split(), ["interrupted=True", "stopped=1", "wakeup_fd_restored=True",
-                                               "handler_restored=True"], done.stderr)
+        assert done.returncode == 0, done.stderr
+        assert done.stdout.split() == ["interrupted=True", "stopped=1", "wakeup_fd_restored=True",
+                                       "handler_restored=True"], done.stderr
 
     # The run of CHILD, whose unwinding from the first signal waits on a docker that does not answer: `docker stop`.
     STOPPING = ("import signal, subprocess, sys; from oss_verify import check_build\n"
@@ -978,45 +1021,44 @@ class ContainerCleanup(unittest.TestCase):
                 "    except KeyboardInterrupt:\n"
                 "        sys.exit(130)\n")
 
-    def test_a_second_signal_stops_a_wait_for_a_docker_that_does_not_answer(self):
+    @pytest.mark.parametrize("signame, code", [("SIGTERM", 143), ("SIGHUP", 129), ("SIGINT", 130)])
+    def test_a_second_signal_stops_a_wait_for_a_docker_that_does_not_answer(self, signame, code, tmp_path, request):
         """The first SIGTERM, SIGHUP or Ctrl-C ends the run; a second one stops whatever that ending waits for, as a
         command's user expects, and the run still removes its containers and ends with 128 + the signal's number. A
         user whose docker does not answer would otherwise need SIGKILL, which leaves the containers behind."""
         import signal
-        for number, code in ((signal.SIGTERM, 143), (signal.SIGHUP, 129), (signal.SIGINT, 130)):
-            with self.subTest(signal=number.name), tempfile.TemporaryDirectory() as scratch:
-                env, log = self.fake_docker(scratch)
-                fifos = {}
-                for name in ("started", "stopping"):
-                    os.mkfifo(pathlib.Path(scratch) / name)
-                    fifos[name] = os.open(pathlib.Path(scratch) / name, os.O_RDONLY | os.O_NONBLOCK)
-                    self.addCleanup(os.close, fifos[name])
-                process = subprocess.Popen([sys.executable, "-P", "-c", self.STOPPING],
-                                           env={**env, "PYTHONPATH": str(SRC),
-                                                "DOCKER_STARTED": str(pathlib.Path(scratch) / "started"),
-                                                "DOCKER_STOPPING": str(pathlib.Path(scratch) / "stopping")},
-                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                self.addCleanup(process.kill)  # if it does not end, as a test that fails leaves it
-                select.select([fifos["started"]], [], [], 20)
-                process.send_signal(number)
-                select.select([fifos["stopping"]], [], [], 20)
-                process.send_signal(number)
-                # Well before `docker stop` would end by itself, after 30 s.
-                _, errors = process.communicate(timeout=10)
-                self.assertEqual(process.returncode, code, errors)
-                self.assertEqual([line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()],
-                                 ["run", "stop", "ps", "rm"])
+        number = getattr(signal, signame)
+        env, log = self.fake_docker(tmp_path)
+        fifos = {}
+        for name in ("started", "stopping"):
+            os.mkfifo(tmp_path / name)
+            fifos[name] = os.open(tmp_path / name, os.O_RDONLY | os.O_NONBLOCK)
+            request.addfinalizer(functools.partial(os.close, fifos[name]))
+        process = subprocess.Popen([sys.executable, "-P", "-c", self.STOPPING],
+                                   env={**env, "PYTHONPATH": str(SRC),
+                                        "DOCKER_STARTED": str(tmp_path / "started"),
+                                        "DOCKER_STOPPING": str(tmp_path / "stopping")},
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        request.addfinalizer(process.kill)  # if it does not end, as a test that fails leaves it
+        select.select([fifos["started"]], [], [], 20)
+        process.send_signal(number)
+        select.select([fifos["stopping"]], [], [], 20)
+        process.send_signal(number)
+        # Well before `docker stop` would end by itself, after 30 s.
+        _, errors = process.communicate(timeout=10)
+        assert process.returncode == code, errors
+        assert [line.split()[0] for line in log.read_text(encoding="utf-8").splitlines()] == \
+            ["run", "stop", "ps", "rm"]
 
-    def test_the_check_command_removes_its_containers_when_it_ends(self):
+    def test_the_check_command_removes_its_containers_when_it_ends(self, tmp_path):
         """`oss-verify check` runs within containers_stopped(): even a run that starts none asks for its own."""
-        with tempfile.TemporaryDirectory() as scratch:
-            env, log = self.fake_docker(scratch)
-            done = subprocess.run([sys.executable, "-P", "-m", "oss_verify", "check", "--print-toolchain", "bzip2"],
-                                  env={**env, "PYTHONPATH": str(SRC)},
-                                  stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
-            self.assertEqual(done.returncode, 0, done.stderr)
-            self.assertRegex(log.read_text(encoding="utf-8"),
-                             rf"\Aps -aq --filter label={check_build.RUN_LABEL}=[0-9a-f]{{32}}\nrm -f c1 c2\n\Z")
+        env, log = self.fake_docker(tmp_path)
+        done = subprocess.run([sys.executable, "-P", "-m", "oss_verify", "check", "--print-toolchain", "bzip2"],
+                              env={**env, "PYTHONPATH": str(SRC)},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+        assert done.returncode == 0, done.stderr
+        assert re.search(rf"\Aps -aq --filter label={check_build.RUN_LABEL}=[0-9a-f]{{32}}\nrm -f c1 c2\n\Z",
+                         log.read_text(encoding="utf-8"))
 
     def test_in_threads_gives_each_result_or_error_in_order(self):
         def job(n):
@@ -1025,36 +1067,36 @@ class ContainerCleanup(unittest.TestCase):
             return n * 10
 
         first, second, third = check_build.in_threads(job, [0, 1, 2], 2)
-        self.assertEqual((first, third), (0, 20))
-        self.assertIsInstance(second, check_build.Failed)
+        assert (first, third) == (0, 20)
+        assert isinstance(second, check_build.Failed)
 
-    def test_in_threads_abandons_its_calls_when_its_wait_is_stopped(self):
+    @pytest.mark.parametrize("stop", [KeyboardInterrupt(), SystemExit(143)],
+                             ids=["KeyboardInterrupt", "SystemExit"])
+    def test_in_threads_abandons_its_calls_when_its_wait_is_stopped(self, stop):
         """Ctrl-C, or SIGTERM or SIGHUP through containers_stopped(), while in_threads() waits: no queued call starts,
         the containers of the running one are stopped, and the stop is raised again. Both pools of docker runs, the
         binaries' runs (check_binaries) and the breakages (check_checks), run in in_threads()."""
         import threading
-        for stop in (KeyboardInterrupt(), SystemExit(143)):
-            with self.subTest(stop=type(stop).__name__):
-                running, released, started, stopped = threading.Event(), threading.Event(), [], []
+        running, released, started, stopped = threading.Event(), threading.Event(), [], []
 
-                def job(n):
-                    started.append(n)
-                    running.set()
-                    released.wait(20)  # until its container is removed
+        def job(n):
+            started.append(n)
+            running.set()
+            released.wait(20)  # until its container is removed
 
-                def wait(futures, *args, **kwargs):  # stopped once a call runs
-                    self.assertTrue(running.wait(20))
-                    raise stop
+        def wait(futures, *args, **kwargs):  # stopped once a call runs
+            assert running.wait(20)
+            raise stop
 
-                def stop_containers():
-                    stopped.append(True)
-                    released.set()
+        def stop_containers():
+            stopped.append(True)
+            released.set()
 
-                with mock.patch.object(check_build.concurrent.futures, "wait", wait), \
-                        mock.patch.object(check_build, "stop_containers", stop_containers), \
-                        self.assertRaises(type(stop)):
-                    check_build.in_threads(job, range(4), 1)
-                self.assertEqual((started, stopped), ([0], [True]))
+        with pytest.MonkeyPatch.context() as patch, pytest.raises(type(stop)):
+            patch.setattr(check_build.concurrent.futures, "wait", wait)
+            patch.setattr(check_build, "stop_containers", stop_containers)
+            check_build.in_threads(job, range(4), 1)
+        assert (started, stopped) == ([0], [True])
 
     def test_abandon_starts_no_queued_job_and_stops_the_running_one(self):
         import concurrent.futures
@@ -1066,55 +1108,52 @@ class ContainerCleanup(unittest.TestCase):
             running.set()
             released.wait(20)  # until its container is removed
 
-        with mock.patch.object(check_build, "stop_containers", released.set):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "stop_containers", released.set)
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 futures = [pool.submit(job, n) for n in range(4)]
-                self.assertTrue(running.wait(20))
+                assert running.wait(20)
                 check_build.abandon(pool)
-        self.assertEqual(started, [0])
-        self.assertTrue(all(future.cancelled() for future in futures[1:]))
+        assert started == [0]
+        assert all(future.cancelled() for future in futures[1:])
 
 
-class Toolchains(unittest.TestCase):
+class TestToolchains:
     """The toolchain that oss-verify check builds a project with, by its language (infra/toolchains.tsv)."""
 
     def test_the_newest_for_a_language(self):
-        self.assertEqual(check_build.newest_toolchain(), check_build.newest_toolchain("c"))
-        self.assertEqual(check_build.newest_toolchain("c"), check_build.newest_toolchain("c++"))
-        self.assertIn("oss-fuzz-theorems-toolchain-rust@sha256:", check_build.newest_toolchain("rust"))
-        self.assertEqual(check_build.languages_of(check_build.newest_toolchain("rust")), ("rust",))
-        self.assertIn("oss-fuzz-theorems-toolchain-python@sha256:", check_build.newest_toolchain("python"))
-        self.assertEqual(check_build.languages_of(check_build.newest_toolchain("python")), ("python",))
-        self.assertIsNone(check_build.languages_of("example.org/not-listed:1"))
-        with self.assertRaises(check_build.Failed):
+        assert check_build.newest_toolchain() == check_build.newest_toolchain("c")
+        assert check_build.newest_toolchain("c") == check_build.newest_toolchain("c++")
+        assert "oss-fuzz-theorems-toolchain-rust@sha256:" in check_build.newest_toolchain("rust")
+        assert check_build.languages_of(check_build.newest_toolchain("rust")) == ("rust",)
+        assert "oss-fuzz-theorems-toolchain-python@sha256:" in check_build.newest_toolchain("python")
+        assert check_build.languages_of(check_build.newest_toolchain("python")) == ("python",)
+        assert check_build.languages_of("example.org/not-listed:1") is None
+        with pytest.raises(check_build.Failed):
             check_build.newest_toolchain("javascript")
 
-    def test_a_toolchain_for_another_language_is_refused(self):
-        project = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "demo"
+    def test_a_toolchain_for_another_language_is_refused(self, tmp_path, monkeypatch):
+        project = tmp_path / "demo"
         project.mkdir()
         (project / "project.yaml").write_text(
             "repo: https://example.org/demo#" + "a" * 40 + "\nprimary_contact: a@example.org\nlanguage: python\n")
         (project / "Dockerfile").write_text("FROM x\n")
         (project / "build.sh").write_text("#!/bin/bash\n")
         c_toolchain = check_build.newest_toolchain("c")
-        with mock.patch.object(sys, "argv", ["oss-verify", "--no-shell", "--toolchain", c_toolchain, str(project)]), \
-                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
+        monkeypatch.setattr(sys, "argv", ["oss-verify", "--no-shell", "--toolchain", c_toolchain, str(project)])
+        with contextlib.redirect_stdout(io.StringIO()), pytest.raises(SystemExit) as stop:
             check_tool.main()
-        self.assertIn("builds c, c++, not python", str(stop.exception.code))
+        assert "builds c, c++, not python" in str(stop.value.code)
 
-    def test_a_seeded_project_with_no_build_files_is_refused_with_exit_1(self):
+    def test_a_seeded_project_with_no_build_files_is_refused_with_exit_1(self, tmp_path, monkeypatch):
         # oss-verify validate only warns about it (it breaks no enrollment rule, so not exit 2); there is nothing to
         # build
-        project = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "demo"
+        project = tmp_path / "demo"
         project.mkdir()
         (project / "project.yaml").write_text(
             "repo: https://example.org/demo#" + "a" * 40 + "\nprimary_contact: n/a\nlanguage: c\n")
-        with mock.patch.object(sys, "argv", ["oss-verify", "--no-shell", str(project)]), \
-                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as stop:
+        monkeypatch.setattr(sys, "argv", ["oss-verify", "--no-shell", str(project)])
+        with contextlib.redirect_stdout(io.StringIO()), pytest.raises(SystemExit) as stop:
             check_tool.main()
-        self.assertIsInstance(stop.exception.code, str)  # sys.exit(message): exit status 1
-        self.assertIn("has no Dockerfile", stop.exception.code)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert isinstance(stop.value.code, str)  # sys.exit(message): exit status 1
+        assert "has no Dockerfile" in stop.value.code

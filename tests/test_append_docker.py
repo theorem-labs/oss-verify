@@ -12,9 +12,8 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
-import unittest
-from unittest import mock
+
+import pytest
 
 from oss_verify import check
 from oss_verify import check_build
@@ -49,44 +48,46 @@ def remove_images(work):
         subprocess.run(["docker", "image", "rm", *tags], capture_output=True)
 
 
-@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
-                     "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
-class Append(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        # Class cleanups run when setUpClass fails too, unlike tearDownClass: the images of a failed build go as well.
-        # They run last first, so each run's images go before the scratch directory that lists them.
-        scratch = tempfile.TemporaryDirectory(prefix="ov-test-append.")
-        cls.addClassCleanup(scratch.cleanup)
-        root = pathlib.Path(scratch.name)
+@pytest.mark.skipif(os.environ.get("OV_DOCKER_TESTS") != "1" or not docker_ready(),
+                    reason="set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
+class TestAppend:
+    @pytest.fixture(scope="class", autouse=True)
+    def set_up_class(self, request, tmp_path_factory):
+        # A finalizer runs when this fixture fails too, unlike code after a yield: check registers one that removes
+        # the run's images before it runs, so the images of a failed build go as well. tmp_path_factory keeps the work
+        # directory that lists them past the finalizers.
+        cls = request.cls
+        root = tmp_path_factory.mktemp("ov-test-append")
         cls.base, cls.new = root / "base-layout", root / "new-layout"
         changed = root / "example-changed"
         shutil.copytree(FIXTURE, changed)
         source = changed / "example.c"
         text = source.read_text(encoding="utf-8")
         if text.count(CASE_R) != 1:
-            raise cls.failureException(f"{source} has not one line with {CASE_R!r} to add {ADDED.strip()!r} after")
+            pytest.fail(f"{source} has not one line with {CASE_R!r} to add {ADDED.strip()!r} after")
         at = text.index("\n", text.index(CASE_R)) + 1
         source.write_text(text[:at] + ADDED + text[at:], encoding="utf-8")
-        cls.check("the base build", FIXTURE, root / "base-work", "--layout-out", cls.base)
-        cls.check("the append build", changed, root / "new-work", "--layout-out", cls.new, "--base-layout", cls.base)
+        cls.check(request, "the base build", FIXTURE, root / "base-work", "--layout-out", cls.base)
+        cls.check(request, "the append build", changed, root / "new-work",
+                  "--layout-out", cls.new, "--base-layout", cls.base)
 
-    @classmethod
-    def check(cls, step, project, work, *options):
+    @staticmethod
+    def check(request, step, project, work, *options):
         """Run oss-verify check on `project` for BUILDS, in the work directory `work`, with `options`. Fail, naming
-        `step`, unless it exits 0."""
-        cls.addClassCleanup(remove_images, work)
+        `step`, unless it exits 0. The removal of the run's images is a finalizer of `request`."""
+        request.addfinalizer(lambda: remove_images(work))
         argv = ["--no-shell", *(word for build in BUILDS for word in ("--build", build)), "--dir", str(work),
                 *map(str, options), str(project)]
-        with mock.patch.object(validate, "check_project", lambda directory: ([], [], None)), \
-                mock.patch.object(check_build, "resolve", lambda repo, ref, token=None: COMMIT):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(validate, "check_project", lambda directory: ([], [], None))
+            patch.setattr(check_build, "resolve", lambda repo, ref, token=None: COMMIT)
             try:
                 code = check.main(argv)
             except SystemExit as stop:
                 code = stop.code
         if code != 0:
-            raise cls.failureException(f"{step}: oss-verify check {shlex.join(argv)} exited {code}, not 0 (its output "
-                                       "is captured above)")
+            pytest.fail(f"{step}: oss-verify check {shlex.join(argv)} exited {code}, not 0 (its output is captured "
+                        "above)")
 
     def read(self, tree, build):
         return layout.read_layout(tree / build / TARGET)
@@ -94,26 +95,26 @@ class Append(unittest.TestCase):
     def test_the_layout_check_passes_for_every_build_and_target(self):
         done = subprocess.run([sys.executable, str(SCRIPT), "check", str(self.base), str(self.new)],
                               capture_output=True, text=True)
-        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        assert done.returncode == 0, done.stdout + done.stderr
         entries = layout.entries(self.base)
-        self.assertEqual(entries, layout.entries(self.new))
-        self.assertLessEqual({(build, TARGET) for build in BUILDS}, set(entries))
-        self.assertIn(f"layout check: {len(entries)} of {len(entries)} (build, target) pass", done.stdout)
+        assert entries == layout.entries(self.new)
+        assert {(build, TARGET) for build in BUILDS} <= set(entries)
+        assert f"layout check: {len(entries)} of {len(entries)} (build, target) pass" in done.stdout
 
     def test_the_changed_function_moves(self):
         for build in BUILDS:
             base, new = self.read(self.base, build), self.read(self.new, build)
             old, now = ([i for i in tree.inputs if i.section == CHANGED] for tree in (base, new))
-            self.assertEqual((len(old), len(now)), (1, 1), f"{build}: the {CHANGED} input sections of {TARGET}")
+            assert (len(old), len(now)) == (1, 1), f"{build}: the {CHANGED} input sections of {TARGET}"
             old, now = old[0], now[0]
             pairing = layout.pair(base.inputs, new.inputs)
-            self.assertEqual(pairing.partner[now.row], old.row, build)
-            self.assertFalse(pairing.same[now.row], f"{build}: example_run has the bytes it has at the base")
-            self.assertNotEqual(now.address, old.address, f"{build}: example_run is at its base address")
+            assert pairing.partner[now.row] == old.row, build
+            assert not pairing.same[now.row], f"{build}: example_run has the bytes it has at the base"
+            assert now.address != old.address, f"{build}: example_run is at its base address"
 
     def test_each_function_that_did_not_change_keeps_its_address(self):
         base, new = self.read(self.base, "plain"), self.read(self.new, "plain")
-        self.assertTrue(new.placement, f"plain/{TARGET} of the append build has no placement.tsv: no append link")
+        assert new.placement, f"plain/{TARGET} of the append build has no placement.tsv: no append link"
         pairing = layout.pair(base.inputs, new.inputs)
         occurrence = layout.occurrences(new.inputs)
         kept, moved = 0, []
@@ -126,9 +127,5 @@ class Append(unittest.TestCase):
                 continue
             moved.append(f"{layout.function(i)}: address {old.address:#x} -> {i.address:#x}, linked size "
                          f"{old.linked} -> {i.linked}, placement {new.placement.get(i.key + (occurrence[i.row],))}")
-        self.assertEqual(moved, [])
-        self.assertGreater(kept, 0, f"plain/{TARGET} has no .text input section with the bytes it has at the base")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert moved == []
+        assert kept > 0, f"plain/{TARGET} has no .text input section with the bytes it has at the base"

@@ -11,9 +11,8 @@ import io
 import pathlib
 import sys
 import tarfile
-import tempfile
-import unittest
-from unittest import mock
+
+import pytest
 
 TESTS = pathlib.Path(__file__).resolve().parent
 LOADER = importlib.machinery.SourceFileLoader(
@@ -36,34 +35,34 @@ def tar(*members):
     return made.getvalue()
 
 
-class Errors(unittest.TestCase):
-    def setUp(self):
-        d = tempfile.TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        self.top = pathlib.Path(d.name)
+class TestErrors:
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.top = tmp_path
         self.sources = self.top / "sources"
 
     def refused(self, text, data=b""):
         """What lay-out-sources says when it stops on a sources file of `text`, its archive rows downloading
         `data`."""
         self.sources.write_text(text)
-        with (mock.patch.object(lay_out_sources, "download", lambda url, sha256: data),
-              mock.patch.object(sys, "argv", ["lay-out-sources", str(self.sources), str(self.top / "root")]),
-              self.assertRaises(SystemExit) as stopped):
-            lay_out_sources.main()
-        return str(stopped.exception.code)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(lay_out_sources, "download", lambda url, sha256: data)
+            patch.setattr(sys, "argv", ["lay-out-sources", str(self.sources), str(self.top / "root")])
+            with pytest.raises(SystemExit) as stopped:
+                lay_out_sources.main()
+        return str(stopped.value.code)
 
     def test_a_hard_link_to_a_member_the_archive_lacks_is_refused_by_its_line(self):
         data = tar(("top/a", tarfile.LNKTYPE, "top/gone"))
         said = self.refused(f"archive\tvendor\thttps://example.com/a.tar\t{SHA256}\t1\n", data)
-        self.assertEqual(said, f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/gone', which "
-                               "leads to no file in the archive")
+        assert said == (f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/gone', which "
+                        "leads to no file in the archive")
 
     def test_a_hard_link_to_a_directory_is_refused_by_its_line(self):
         data = tar(("top/dir", tarfile.DIRTYPE, ""), ("top/a", tarfile.LNKTYPE, "top/dir"))
         said = self.refused(f"archive\tvendor\thttps://example.com/a.tar\t{SHA256}\t1\n", data)
-        self.assertEqual(said, f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/dir', which "
-                               "leads to no file in the archive")
+        assert said == (f"lay-out-sources: {self.sources}:1: hard link 'top/a' points to 'top/dir', which "
+                        "leads to no file in the archive")
 
     def test_a_hard_link_to_a_file_takes_its_bytes(self):
         made = io.BytesIO()
@@ -74,8 +73,5 @@ class Errors(unittest.TestCase):
             info = tarfile.TarInfo("top/two.c")
             info.type, info.linkname = tarfile.LNKTYPE, "top/one.c"
             archive.addfile(info)
-        self.assertEqual(lay_out_sources.members(made.getvalue(), 1, ()),
-                         [("one.c", "file", b"one\n", False), ("two.c", "file", b"one\n", False)])
-
-if __name__ == "__main__":
-    unittest.main()
+        assert lay_out_sources.members(made.getvalue(), 1, ()) == [("one.c", "file", b"one\n", False),
+                                                                   ("two.c", "file", b"one\n", False)]
