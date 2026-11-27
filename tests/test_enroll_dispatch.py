@@ -719,17 +719,23 @@ class Labels(unittest.TestCase):
         self.assertEqual((got["decision"], got["label"]), ("label", "size-review"))
 
     def test_a_project_yaml_that_cannot_be_read_sends_nothing(self):
-        world = World()
-        api = world.api()
+        for unreadable in (None, b"language: c\nprimary_contact: 2026-02-31\n"):
+            with self.subTest(unreadable=unreadable):
+                world = World()
+                if unreadable is None:
+                    api = world.api()
 
-        def refuse(path, raw=api.raw):
-            if "/contents/" in path:
-                raise subprocess.CalledProcessError(1, ["gh", "api", path])
-            return raw(path)
-        api.raw = refuse
-        got = dispatch.decide(api, REPO, 104, "pull_request", SHA)
-        self.assertEqual(got["decision"], "none")
-        self.assertIn("cannot be read for its language", got["reason"])
+                    def refuse(path, raw=api.raw):
+                        if "/contents/" in path:
+                            raise subprocess.CalledProcessError(1, ["gh", "api", path])
+                        return raw(path)
+                    api.raw = refuse
+                    got = dispatch.decide(api, REPO, 104, "pull_request", SHA)
+                else:
+                    world.project_yaml = unreadable
+                    got = world.decide()
+                self.assertEqual(got["decision"], "none")
+                self.assertIn("cannot be read for its language", got["reason"])
 
     def test_a_paused_language_is_labelled(self):
         for language in ("Python", "go"):
