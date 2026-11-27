@@ -1,8 +1,10 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 """Tests for src/oss_verify/manifest.py:  uv run pytest"""
+import errno
 import hashlib
 import os
+import shutil
 import struct
 
 import pytest
@@ -420,6 +422,30 @@ class TestPrograms(Scratch):
         _, problems = self.collect([self.ENTRY])
         assert problems == ["the link map hello.map of program hello, which project.yaml names, is not in $OUT"]
         assert not (self.dir / "out/hello/hello.map").exists()
+
+    def test_collect_programs_reports_a_link_map_that_it_cannot_copy(self):
+        """A link map that build.sh leaves unreadable is a problem of collect_programs, not a traceback, and leaves no
+        part of a copy. A stand-in for shutil.copyfile refuses to read the map: root can read a file of mode 000."""
+        program = elf([("main", GLOBAL_FUNC, 1)])
+        self.write("raw/plain/hello", program)
+        self.write("raw/plain/hello.map", b"the link map of hello\n", 0o644)
+        copyfile = shutil.copyfile
+
+        def refuse_the_map(source, target):
+            if os.path.basename(source) != "hello.map":
+                return copyfile(source, target)
+            with open(target, "wb") as written:
+                written.write(b"the start of a copy")
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(source))
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(shutil, "copyfile", refuse_the_map)
+            entries, problems = self.collect([self.ENTRY])
+        assert problems == [f"the link map hello.map of program hello cannot be copied from $OUT: "
+                            f"{os.strerror(errno.EACCES)}"]
+        assert not (self.dir / "out/hello/hello.map").exists()
+        assert (self.dir / "out/hello/hello").read_bytes() == program
+        assert list(entries) == ["hello"]
 
     def test_link_maps_records_each_named_map(self):
         maps = {"hello": b"the link map of hello\n", "world": b"the link map of world, a longer one\n"}

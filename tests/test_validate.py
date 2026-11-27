@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 
 import pytest
@@ -120,6 +121,10 @@ class TestValidProjects:
             assert any(f"{address} is a placeholder" in warning for warning in warnings), warnings
         _, warnings, _ = check(MINIMAL + "auto_ccs: [team@example.net]\n")
         assert any("team@example.net is a placeholder" in warning for warning in warnings), warnings
+        # Aliases of one address give one warning, not one for each place.
+        _, warnings, _ = check(MINIMAL + "auto_ccs: [&cc team@example.net" + ", *cc" * 1999 + "]\n")
+        assert warnings == ["team@example.net is a placeholder: its domain is reserved for examples, so no report "
+                            "reaches it"]
         # A real domain that only contains "example" is not one.
         assert check(MINIMAL.replace(CONTACT, "security@myexample.org"))[1] == []
 
@@ -338,6 +343,15 @@ def programs(*entries):
     return MINIMAL + "programs:\n" + "".join(f"  - {entry}\n" for entry in entries)
 
 
+def nested_list(levels):
+    """A YAML flow list of 9 ** (levels + 1) strings, in a few bytes for each level: l0 is a list of 9 strings, and each
+    l<k> is a list of 9 aliases of l<k-1> (the first one defines it)."""
+    text = "[" + ", ".join("abcdefghi") + "]"
+    for level in range(levels):
+        text = f"[&l{level} {text}" + f", *l{level}" * 8 + "]"
+    return text
+
+
 HELLO = programs(f"{{file: hello, sha256: {PIN}, link_map: hello.map}}")
 
 
@@ -431,6 +445,45 @@ class TestPrograms:
     def test_bad_program_entries(self, text, fragment):
         self.refused(text, fragment)
 
+    def test_a_file_that_aliases_make_a_large_list(self):
+        """A value of file that is not a string is named by its type. Its repr would hold each string of the list: for
+        6 levels, 4,782,969 strings in 25 MB, from a project.yaml of 500 bytes."""
+        start = time.monotonic()
+        problems, _, summary = check(programs(f"{{file: {nested_list(6)}, sha256: {PIN}}}"))
+        assert time.monotonic() - start < 10
+        assert sum(len(problem) for problem in problems) < 2000
+        assert summary is None
+        assert any(problem.startswith("programs: ") and "(it is a list)" in problem for problem in problems), problems
+
+    def test_an_entry_that_aliases_repeat_is_checked_once(self):
+        """The keys and values of one entry object are checked at its first place alone. Its file and link map still
+        count at each place, so that the names given twice are found."""
+        unknown = ", ".join(f"k{number}: 1" for number in range(200))
+        text = (MINIMAL + f"programs:\n  - &entry {{file: hello, sha256: {PIN}, link_map: hello.map, {unknown}}}\n"
+                + "  - *entry\n" * 199)
+        problems, _, summary = check(text)
+        assert len(problems) < 1000
+        assert summary is None
+        for number in range(200):
+            assert sum(f"unknown field 'k{number}'" in problem for problem in problems) == 1, number
+        assert "programs names the file 'hello' twice" in problems
+        assert "programs names the link map 'hello.map' twice" in problems
+
+    def test_a_long_string_that_aliases_repeat_is_cut(self):
+        """A problem quotes at most the first 200 characters of a string. Through aliases, the entries of a small
+        project.yaml can each name one long string: here 1,000 entries, with a file name of 20,000 characters."""
+        text = (MINIMAL + f"programs:\n  - {{file: &long {'x' * 20000}, sha256: &pin {PIN}}}\n"
+                + "  - {file: *long, sha256: *pin, *long : 1}\n" * 999)
+        problems, _, summary = check(text)
+        cut = f"'{'x' * 200}'..."
+        assert max(len(problem) for problem in problems) < 500
+        assert summary is None
+        for number in (1, 1000):
+            assert any(problem.startswith(f"programs: entry {number}: file {cut} is not a file name")
+                       for problem in problems), number
+        assert any(problem.startswith(f"programs: entry 1000: unknown field {cut} (allowed: ") for problem in problems)
+        assert f"programs names the file {cut} twice" in problems
+
 
 class TestProblems:
     def expect_problem(self, text, fragment, files=None, name="example"):
@@ -480,6 +533,27 @@ class TestProblems:
         self.expect_problem(MINIMAL + "fuzz_targets: [a, a]\n", "names a fuzz target twice")
         self.expect_problem(MINIMAL + "fuzz_targets: ['../x']\n", "is not a fuzz target name")
         self.expect_problem(MINIMAL + "publish: sometimes\n", "publish must be one of")
+
+    @pytest.mark.parametrize("field", ["fuzz_targets", "sanitizers", "auto_ccs", "ubsan_checks.add",
+                                       "ubsan_checks.remove", "language", "publish", "primary_contact"])
+    def test_a_long_bad_value_gives_short_problems(self, field):
+        """A problem quotes at most the first 200 characters of a value, and check_config gives each distinct problem
+        once. Through YAML aliases, a list of 32 KB of project.yaml can hold one string of 20,000 characters 2,000
+        times: the problems of each item were 40 MB in all."""
+        bad = "x" * 20000
+        items = f"[&bad {bad}" + ", *bad" * 1999 + "]"
+        if field.startswith("ubsan_checks."):
+            text = MINIMAL + f"ubsan_checks: {{{field.split('.')[1]}: {items}, reason: x}}\n"
+        elif field in ("language", "primary_contact"):
+            text = re.sub(rf"^{field}: .*$", f"{field}: {bad}", MINIMAL, flags=re.M)
+        elif field == "publish":
+            text = MINIMAL + f"publish: {bad}\n"
+        else:
+            text = MINIMAL + f"{field}: {items}\n"
+        problems, _, summary = check(text)
+        assert summary is None
+        assert sum(len(problem) for problem in problems) < 2000
+        assert any(f"'{'x' * 200}'..." in problem for problem in problems), problems
 
     def test_budgets(self):
         self.expect_problem(MINIMAL + "budgets: {oom: 1GiB}\n", "unknown field 'oom'")

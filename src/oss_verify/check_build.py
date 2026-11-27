@@ -546,7 +546,8 @@ def toolchain_environment(image):
     of the builder (infra/base-builder/Dockerfile adds SRC, WORK, OUT and SANITIZER=none) and of a port's Dockerfile
     are one merged list there. An image that is not here is pulled first. An image that sets no PATH gets Docker's
     (DOCKER_DEFAULT_PATH) in front, as docker run gives it. Raise Failed for an image that cannot be read, and for an
-    entry with no `=` or with a name that is empty or starts with `-` (which env would read as an option)."""
+    entry with no `=`, with a name that is empty or starts with `-` (which env would read as an option), or with a NUL
+    byte (the file program-env ends each entry with a NUL, so compile-program would read such an entry as two)."""
     inspect = ("docker", "image", "inspect", "--format", "{{json .Config.Env}}", image)
     try:
         printed = output(*inspect)
@@ -568,9 +569,9 @@ def toolchain_environment(image):
         raise Failed(not_a_list)
     for entry in entries:
         name, equals, _ = entry.partition("=") if isinstance(entry, str) else ("", "", "")
-        if not equals or not name or name.startswith("-"):
+        if not equals or not name or name.startswith("-") or "\0" in entry:
             raise Failed(f"the toolchain image {image} has the environment entry {entry!r}, which is not NAME=value "
-                         "with a name that does not start with `-`")
+                         "with a name that does not start with `-` and with no NUL byte")
     if not any(entry.startswith("PATH=") for entry in entries):
         entries = [DOCKER_DEFAULT_PATH, *entries]
     return entries

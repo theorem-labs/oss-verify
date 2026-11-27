@@ -2,7 +2,7 @@
 
 This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory.
 
-Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. We use the same rules when we import a project.
+Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and it quotes at most the first 200 characters of a value. We use the same rules when we import a project.
 
 The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. We made new names only for fields that neither has.
 
@@ -173,6 +173,8 @@ A project can list more than one program. `oss-verify validate` refuses `program
 * `file` and `link_map` are file names in `$OUT`. They use only `A-Z a-z 0-9 . _ + -`, start with a letter or digit, and have at most 100 characters. Thus a name has no `/`.
 * `sha256` has exactly 64 hexadecimal digits, in lower case.
 * No two entries have the same `file`, and no two entries have the same `link_map`. A `link_map` is not the `file` of a program, also not of its own entry.
+
+For a `file` or a `link_map` that is not a string, the problem gives the type of the value, for example `(it is a list)`, and not the value. A YAML alias can put one entry at more than one place of the list. `oss-verify validate` then checks the keys and values of that entry at its first place only. Each place still counts for the rule that no two entries have the same `file` or the same `link_map`.
 
 A project with `programs` has the plain build only, as a `go` or `jvm` project has ([above](#language)). Thus `oss-verify validate` refuses each field and file that is for fuzz targets or for a sanitizer build:
 

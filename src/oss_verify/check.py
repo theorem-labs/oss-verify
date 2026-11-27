@@ -222,8 +222,9 @@ def build_programs(job, tag, work, toolchain, home):
     (check_build.COMPILE_PROGRAM). The build has no record, no layout and no UBSan setting.
 
     Return (targets, entries): the programs' names, in the order of project.yaml, and the entries that
-    manifest.collect_programs gives. Raise Failed if the environment cannot be read, or if collect_programs finds a
-    problem."""
+    manifest.collect_programs gives. Raise Failed if the environment cannot be read, if collect_programs finds a
+    problem, or if a file of $OUT cannot be read or copied (an OSError, for example of a file that build.sh left
+    unreadable, or of a full disk)."""
     work.mkdir(parents=True, exist_ok=True)
     program_env = work / "program-env"
     program_env.write_bytes("".join(f"{entry}\0" for entry in check_build.toolchain_environment(toolchain)).encode())
@@ -231,7 +232,10 @@ def build_programs(job, tag, work, toolchain, home):
     check_build.compile_build(tag, "plain", validate.BUILDS["plain"], raw, labels=check_build.work_label(home),
                               program_env=program_env)
     step("find the programs")
-    entries, problems = manifest.collect_programs(raw, job.programs, work / "out")
+    try:
+        entries, problems = manifest.collect_programs(raw, job.programs, work / "out")
+    except OSError as error:
+        raise Failed(f"the programs cannot be taken from $OUT: {error}") from None
     if problems:
         raise Failed("\n  ".join(["the programs are not right:", *problems]))
     return [program["file"] for program in job.programs], entries
@@ -250,7 +254,8 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     A project that lists programs (job.programs) has one build, which build_programs makes: it takes none of `record`,
     `layout` and `base_layout`, and its targets are the programs.
 
-    Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
+    Return (builder tag, project tag, targets, entries). Raise Failed if any step fails. An OSError of the steps that
+    read $OUT after the compiles, for example of a file that build.sh left unreadable, is Failed too.
     """
     ubsan = ubsan_settings(job, toolchain)
     builder = check_build.build_builder(toolchain, suffix, no_cache)
@@ -268,11 +273,14 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
                                   base_layout=base_layout)
 
     step("find the fuzz targets")
-    found = {build: manifest.discover(directory) for build, directory in raw.items()}
-    targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
-    for build, names in found.items():
-        say(f"{build}: {', '.join(names) or 'no fuzz target'}")
-    entries, missing = manifest.collect(raw, targets, work / "out")
+    try:
+        found = {build: manifest.discover(directory) for build, directory in raw.items()}
+        targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
+        for build, names in found.items():
+            say(f"{build}: {', '.join(names) or 'no fuzz target'}")
+        entries, missing = manifest.collect(raw, targets, work / "out")
+    except OSError as error:
+        raise Failed(f"the fuzz targets cannot be taken from $OUT: {error}") from None
     if problems or missing:
         raise Failed("\n  ".join(["the fuzz targets are not right:", *problems, *missing]))
     return builder, tag, targets, entries

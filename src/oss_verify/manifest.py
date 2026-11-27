@@ -378,7 +378,13 @@ def collect_programs(directory, programs, out):
         if path.is_symlink() or not path.is_file():
             problems.append(f"the link map {link_map} of program {name}, which project.yaml names, is not in $OUT")
             continue
-        shutil.copyfile(path, out / name / link_map)
+        try:
+            shutil.copyfile(path, out / name / link_map)
+        except OSError as error:
+            # For example a map that build.sh left unreadable. Remove each part of the copy.
+            (out / name / link_map).unlink(missing_ok=True)
+            problems.append(f"the link map {link_map} of program {name} cannot be copied from $OUT: {error.strerror}")
+            continue
         os.chmod(out / name / link_map, 0o644)
     return entries, problems
 

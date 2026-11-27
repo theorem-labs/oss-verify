@@ -755,6 +755,13 @@ class TestToolchainEnvironment:
             self.read(self.printed(["PATH=/bin", entry]))
         assert entry in str(failed.value)
 
+    @pytest.mark.parametrize("entry", ["A=x\0B=y", "A\0B=x"], ids=["in-the-value", "in-the-name"])
+    def test_an_entry_with_a_nul_is_refused(self, entry):
+        """program-env ends each entry with a NUL, so compile-program would read an entry that holds one as two."""
+        with pytest.raises(check_build.Failed) as failed:
+            self.read(self.printed(["PATH=/bin", entry]))
+        assert repr(entry) in str(failed.value)
+
     @pytest.mark.parametrize("printed", ["[1]", "[null]", '"PATH=/bin"', '{"PATH": "/bin"}', "not json", ""],
                              ids=["number", "null-entry", "string", "mapping", "not-json", "nothing"])
     def test_what_is_not_a_list_of_strings_is_refused(self, printed):
@@ -1024,7 +1031,7 @@ class TestProjectTag:
 
 
 class TestBuildAll:
-    """check.build_all of a whole program, with the Docker steps of check_build replaced."""
+    """check.build_all, with the Docker steps of check_build replaced."""
 
     @pytest.fixture(autouse=True)
     def set_up(self, tmp_path):
@@ -1093,6 +1100,27 @@ class TestBuildAll:
         assert "program hello, which project.yaml lists, is not in $OUT: build.sh did not write it" in text
         assert "program world, which project.yaml lists, is not in $OUT: build.sh did not write it" in text
         assert "the link map hello.map of program hello, which project.yaml names, is not in $OUT" in text
+
+    @pytest.mark.parametrize("collector", ["collect", "collect_programs"], ids=["fuzz-targets", "programs"])
+    def test_a_file_of_out_that_cannot_be_read_fails_the_build(self, collector):
+        """An OSError of the steps that read $OUT after the compiles, for example for a file that build.sh left
+        unreadable, is Failed: check.main then prints BUILD FAILED and exits 1, with no traceback."""
+        programs = [{"file": "hello", "sha256": "1" * 64}] if collector == "collect_programs" else None
+        job = check_build.Job(name="demo", directory=self.scratch / "project", repo="https://example.org/demo",
+                              ref="", dockerfile="", builds=["plain"], fuzz_targets=None, ubsan_checks=None,
+                              language="c", programs=programs)
+        unreadable = PermissionError(13, "Permission denied", str(self.scratch / "work" / "raw" / "plain" / "hello"))
+        with pytest.MonkeyPatch.context() as patch, contextlib.redirect_stdout(io.StringIO()):
+            patch.setattr(check_build, "build_builder", lambda *args: "builder-tag")
+            patch.setattr(check_build, "project_tag", lambda *args: "project-tag")
+            patch.setattr(check_build, "build_project", lambda *args, **kwargs: None)
+            patch.setattr(check_build, "toolchain_environment", lambda image: TOOLCHAIN_ENV)
+            patch.setattr(check_build, "compile_build", lambda *args, **kwargs: args[3].mkdir(parents=True))
+            patch.setattr(manifest, collector, raises(unreadable))
+            with pytest.raises(check_build.Failed) as failed:
+                check_tool.build_all(job, COMMIT, self.scratch / "work", TOOLCHAIN, self.home)
+        assert str(unreadable) in str(failed.value)
+        assert failed.value.__suppress_context__
 
 
 class TestTreeHash:
