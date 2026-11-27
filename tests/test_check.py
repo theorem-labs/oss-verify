@@ -5,6 +5,7 @@ import contextlib
 import functools
 import io
 import itertools
+import json
 import os
 import pathlib
 import re
@@ -32,6 +33,21 @@ SRC = ROOT / "src"
 BUILDS = ["plain", "ubsan", "asan", "asan-ubsan"]
 COMMIT = "a" * 40
 TOOLCHAIN = "example.org/toolchain@sha256:" + "0" * 64
+# The Config.Env of the newest C toolchain image of 2026-11-27, which is the list that `docker image inspect --format
+# '{{json .Config.Env}}'` prints. It was captured from the registry with this command:
+#   digest=sha256:6a6b4816865c7ec61801ae0fcab6d9c81a599ffcb20616576a9c668abd8b0a7b
+#   go run github.com/google/go-containerregistry/cmd/crane@v0.20.3 config \
+#     ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain@$digest | jq -c .config.Env
+TOOLCHAIN_ENV = [
+    "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "MUSL_SYSROOT=/opt/musl-sysroot",
+    "ASAN_RESOURCE_DIR=/opt/asan-rt/lib/clang/20",
+    "PKG_CONFIG_LIBDIR=/opt/musl-sysroot/usr/lib/pkgconfig",
+    "PKG_CONFIG_PATH=",
+    "OFT_DEP_CC=/opt/oft/bin/riscv64-linux-musl-clang-plain",
+    "OFT_DEP_CFLAGS=-march=rv64g -mabi=lp64d -Os -g -ffunction-sections -fdata-sections -fno-stack-protector -fPIC",
+    "OFT_DEP_CXX=/opt/oft/bin/riscv64-linux-musl-clang++-plain",
+]
 
 
 def entries(sha256s):
@@ -418,7 +434,8 @@ class TestLayoutOptions(Project):
 
 class TestCompileBuild:
     """The docker run command of compile_build: with a base layout tree, the tree mounted read-only and named by
-    OV_BASE_LAYOUT, with the records and OV_LAYOUT; with neither a layout nor a base layout, today's command."""
+    OV_BASE_LAYOUT, with the records and OV_LAYOUT; with a program's environment file, the file mounted read-only and
+    named by OV_PROGRAM_ENV, with none of those; with none of them, today's command."""
 
     LABELS = ["--label", "work=/w"]
 
@@ -426,8 +443,9 @@ class TestCompileBuild:
     def set_up(self, tmp_path):
         self.scratch, self.count = tmp_path, itertools.count()  # a new directory for each call of command()
 
-    def command(self, **options):
-        """(the one docker run command of compile_build for an asan build into a new directory, that directory)."""
+    def command(self, build="asan", sanitizer="address", **options):
+        """(the one docker run command of compile_build for this build, an asan build unless told, into a new
+        directory, that directory)."""
         commands = []
 
         def run(*argv, quiet=False):
@@ -438,7 +456,7 @@ class TestCompileBuild:
             patch.setattr(check_build, "run", run)
             patch.delenv("OFT_MAKE_JOBS", raising=False)
             out = self.scratch / f"call{next(self.count)}" / "out"
-            check_build.compile_build("tag", "asan", "address", out, labels=self.LABELS, **options)
+            check_build.compile_build("tag", build, sanitizer, out, labels=self.LABELS, **options)
         assert len(commands) == 1
         return commands[0], out
 
@@ -471,6 +489,84 @@ class TestCompileBuild:
                            "-e", "SANITIZER=address", "-e", owner, "-e", "OV_RECORD=1",
                            "-e", "OV_LAYOUT=1", "-v", "/layouts/base:/ov-base-layout:ro",
                            "-e", "OV_BASE_LAYOUT=/ov-base-layout", "-v", f"{out}:/out", "tag", "compile"]
+
+    def test_a_program_build_mounts_the_toolchain_environment(self):
+        owner = f"OV_OWNER={os.getuid()}:{os.getgid()}"
+        command, out = self.command("plain", "none", program_env=pathlib.Path("/w/program-env"))
+        assert command == ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
+                           "-e", "SANITIZER=none", "-e", owner, "-v", "/w/program-env:/ov-program-env:ro",
+                           "-e", "OV_PROGRAM_ENV=/ov-program-env", "-v", f"{out}:/out", "tag", "compile"]
+
+
+class TestToolchainEnvironment:
+    """check_build.toolchain_environment: the environment that the toolchain image sets itself, read on the host for
+    the build of a whole program, with `output` replaced by one that answers each command with the next reply."""
+
+    INSPECT = ("docker", "image", "inspect", "--format", "{{json .Config.Env}}", TOOLCHAIN)
+    PULL = ("docker", "pull", "--quiet", TOOLCHAIN)
+    DEFAULT_PATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+    def read(self, *replies):
+        """toolchain_environment(TOOLCHAIN), each command that it runs in `self.commands`. A reply that is an
+        exception is raised by that command, and any other reply is what it prints."""
+        self.commands, answers = [], iter(replies)
+
+        def output(*argv, env=None, token=None):
+            self.commands.append(argv)
+            reply = next(answers)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(check_build, "output", output)
+            return check_build.toolchain_environment(TOOLCHAIN)
+
+    @staticmethod
+    def printed(entries):
+        """What `docker image inspect --format '{{json .Config.Env}}'` prints for these entries."""
+        return json.dumps(entries, separators=(",", ":")) + "\n"
+
+    def test_the_image_s_own_environment(self):
+        environment = self.read(self.printed(TOOLCHAIN_ENV))
+        assert environment == TOOLCHAIN_ENV
+        assert "PKG_CONFIG_PATH=" in environment
+        assert self.commands == [self.INSPECT]
+
+    def test_docker_s_default_path_when_the_image_has_none(self):
+        without = [entry for entry in TOOLCHAIN_ENV if not entry.startswith("PATH=")]
+        assert self.read(self.printed(without)) == [self.DEFAULT_PATH, *without]
+        assert self.read("null\n") == [self.DEFAULT_PATH]
+        # A name that only starts with PATH is not PATH.
+        assert self.read('["PATHEXT=.exe"]\n') == [self.DEFAULT_PATH, "PATHEXT=.exe"]
+
+    def test_an_image_that_is_not_here_is_pulled_first(self):
+        missing = check_build.Failed("docker image inspect ... exited 1: Error: No such image")
+        assert self.read(missing, "sha256:" + "0" * 64 + "\n", self.printed(TOOLCHAIN_ENV)) == TOOLCHAIN_ENV
+        assert self.commands == [self.INSPECT, self.PULL, self.INSPECT]
+
+    @pytest.mark.parametrize("replies, commands", [
+        ((check_build.Failed("no such image"), "", check_build.Failed("no such image")), 3),
+        ((check_build.Failed("no such image"), check_build.Failed("pull access denied")), 2),
+    ], ids=["inspected-twice", "not-pulled"])
+    def test_an_image_that_cannot_be_read_stops_the_build(self, replies, commands):
+        with pytest.raises(check_build.Failed) as failed:
+            self.read(*replies)
+        assert TOOLCHAIN in str(failed.value)
+        assert self.commands == [self.INSPECT, self.PULL, self.INSPECT][:commands]
+
+    @pytest.mark.parametrize("entry", ["NOEQUALS", "=x", "-x=1"])
+    def test_an_entry_with_no_name_is_refused(self, entry):
+        with pytest.raises(check_build.Failed) as failed:
+            self.read(self.printed(["PATH=/bin", entry]))
+        assert entry in str(failed.value)
+
+    @pytest.mark.parametrize("printed", ["[1]", "[null]", '"PATH=/bin"', '{"PATH": "/bin"}', "not json", ""],
+                             ids=["number", "null-entry", "string", "mapping", "not-json", "nothing"])
+    def test_what_is_not_a_list_of_strings_is_refused(self, printed):
+        with pytest.raises(check_build.Failed) as failed:
+            self.read(printed + "\n")
+        assert TOOLCHAIN in str(failed.value)
 
 
 class TestUbsanSettings:

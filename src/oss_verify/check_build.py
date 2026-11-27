@@ -12,6 +12,7 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import hashlib
+import json
 import os
 import pathlib
 import re
@@ -110,6 +111,7 @@ class Job:
     ubsan_checks: list | None = None  # the UBSan checks in effect if the project changes them; None: the default
     language: str = "c"  # project.yaml's language, which chooses the toolchain
     mutants: str | None = None  # project.yaml's mutants: the directory of breakage patches, from the image's WORKDIR
+    programs: list | None = None  # project.yaml's programs, one entry for each whole program; None: fuzz targets
 
 
 _UNSAFE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
@@ -530,6 +532,47 @@ def toolchain_id(image):
 def image_id(tag):
     """The local id of an image."""
     return output("docker", "image", "inspect", "--format", "{{.Id}}", tag).strip()
+
+
+# The PATH that docker run gives a container whose image sets none.
+DOCKER_DEFAULT_PATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+def toolchain_environment(image):
+    """The environment that the toolchain image `image` sets itself (its Config.Env), as the list of NAME=value strings
+    in the image's order. The build of a whole program runs in this environment alone (compile_build, `program_env`).
+
+    It is read on the host: in a container it cannot be told from the rest, because the ENV lines of the toolchain,
+    of the builder (infra/base-builder/Dockerfile adds SRC, WORK, OUT and SANITIZER=none) and of a port's Dockerfile
+    are one merged list there. An image that is not here is pulled first. An image that sets no PATH gets Docker's
+    (DOCKER_DEFAULT_PATH) in front, as docker run gives it. Raise Failed for an image that cannot be read, and for an
+    entry with no `=` or with a name that is empty or starts with `-` (which env would read as an option)."""
+    inspect = ("docker", "image", "inspect", "--format", "{{json .Config.Env}}", image)
+    try:
+        printed = output(*inspect)
+    except Failed:
+        try:
+            output("docker", "pull", "--quiet", image)
+            printed = output(*inspect)
+        except Failed as error:
+            raise Failed(f"cannot read the environment of the toolchain image {image}: {error}") from None
+    try:
+        entries = json.loads(printed)
+    except ValueError:
+        entries = printed
+    if entries is None:  # a `null` list: the image sets no variable
+        entries = []
+    if not isinstance(entries, list):
+        raise Failed(f"docker printed the environment of the toolchain image {image} as {printed.strip()[:200]!r}, "
+                     "which is not a list of NAME=value strings")
+    for entry in entries:
+        name, equals, _ = entry.partition("=") if isinstance(entry, str) else ("", "", "")
+        if not equals or not name or name.startswith("-"):
+            raise Failed(f"the toolchain image {image} has the environment entry {entry!r}, which is not NAME=value "
+                         "with a name that does not start with `-`")
+    if not any(entry.startswith("PATH=") for entry in entries):
+        entries = [DOCKER_DEFAULT_PATH, *entries]
+    return entries
 
 
 def require_buildkit():
@@ -1057,9 +1100,12 @@ def empty_directory(path, tag, *, labels):
 DOCKER_FAILED = 125
 # Where compile_build mounts a base layout tree, read-only, in the container of a development build.
 BASE_LAYOUT_MOUNT = "/ov-base-layout"
+# Where compile_build mounts the file of a program's environment, read-only, in the container of its build.
+PROGRAM_ENV_MOUNT = "/ov-program-env"
 
 
-def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, layout=False, base_layout=None):
+def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, layout=False, base_layout=None,
+                  program_env=None):
     """Run `compile` for one build in a fresh container with no network, its $OUT mounted at `out`. `ubsan`, if given,
     is (checks, left out[, left out of C compiles]): the UBSan checks of the build, those that trap mode leaves out,
     and those that its C compiles leave out. `labels`: docker run arguments for the container, work_label(). With
@@ -1069,24 +1115,31 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
     (OV_LAYOUT=1), as infra/base-builder/layout.py collect needs. `base_layout`, which implies `layout`, is a layout
     tree (layout.py collect), mounted read-only at BASE_LAYOUT_MOUNT and named by OV_BASE_LAYOUT: the build is a
     development build, and each link with an entry there for its build and target is an append link
-    (infra/base-builder/link-fuzz-target), which keeps each function whose code did not change at its base address."""
+    (infra/base-builder/link-fuzz-target), which keeps each function whose code did not change at its base address.
+    `program_env`, a path on the host, makes the build that of a whole program: it is a file of NUL-ended NAME=value
+    entries, the toolchain image's own environment (toolchain_environment), mounted read-only at PROGRAM_ENV_MOUNT and
+    named by OV_PROGRAM_ENV, and compile runs build.sh in that environment, with SRC, WORK, OUT and HOME added. Such a
+    build gets none of the settings above (`ubsan`, `record`, `layout`, `base_layout`)."""
     step(f"compile: the {build} build (SANITIZER={sanitizer}), with no network")
     empty_directory(out, tag, labels=labels)
     owner = f"{os.getuid()}:{os.getgid()}"
     # The number of parallel jobs, if set here, for recipes that read it; it does not change the bytes.
     jobs = ["-e", "OFT_MAKE_JOBS"] if os.environ.get("OFT_MAKE_JOBS") else []
     checks = []
-    if ubsan and "undefined" in sanitizer:
-        checks = ["-e", f"OV_UBSAN_CHECKS={','.join(ubsan[0])}", "-e", f"OV_UBSAN_EXCLUDE={','.join(ubsan[1])}"]
-        if len(ubsan) > 2 and ubsan[2]:
-            checks += ["-e", f"OV_UBSAN_C_EXCLUDE={','.join(ubsan[2])}"]
-    layout = layout or base_layout is not None
-    if record or layout:
-        checks += ["-e", "OV_RECORD=1"]
-    if layout:
-        checks += ["-e", "OV_LAYOUT=1"]
-    if base_layout is not None:
-        checks += ["-v", f"{base_layout}:{BASE_LAYOUT_MOUNT}:ro", "-e", f"OV_BASE_LAYOUT={BASE_LAYOUT_MOUNT}"]
+    if program_env is not None:
+        checks = ["-v", f"{program_env}:{PROGRAM_ENV_MOUNT}:ro", "-e", f"OV_PROGRAM_ENV={PROGRAM_ENV_MOUNT}"]
+    else:
+        if ubsan and "undefined" in sanitizer:
+            checks = ["-e", f"OV_UBSAN_CHECKS={','.join(ubsan[0])}", "-e", f"OV_UBSAN_EXCLUDE={','.join(ubsan[1])}"]
+            if len(ubsan) > 2 and ubsan[2]:
+                checks += ["-e", f"OV_UBSAN_C_EXCLUDE={','.join(ubsan[2])}"]
+        layout = layout or base_layout is not None
+        if record or layout:
+            checks += ["-e", "OV_RECORD=1"]
+        if layout:
+            checks += ["-e", "OV_LAYOUT=1"]
+        if base_layout is not None:
+            checks += ["-v", f"{base_layout}:{BASE_LAYOUT_MOUNT}:ro", "-e", f"OV_BASE_LAYOUT={BASE_LAYOUT_MOUNT}"]
     command = ["docker", "run", "--rm", "--init", "--network=none", *labels, "-e", f"SANITIZER={sanitizer}",
                "-e", f"OV_OWNER={owner}", *jobs, *checks, "-v", f"{out}:/out", tag, "compile"]
     code = run(*command)
