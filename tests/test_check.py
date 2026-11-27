@@ -1126,7 +1126,10 @@ class TestToolchains:
         assert check_build.newest_toolchain("c") == check_build.newest_toolchain("c++")
         assert "oss-fuzz-theorems-toolchain-rust@sha256:" in check_build.newest_toolchain("rust")
         assert check_build.languages_of(check_build.newest_toolchain("rust")) == ("rust",)
-        assert "oss-fuzz-theorems-toolchain-python@sha256:" in check_build.newest_toolchain("python")
+        # The newest Python toolchain is the prebuilt image, which publish-prebuilt puts in the package of the
+        # frame-pointer images (.github/workflows/toolchain-images-publish.yaml), not in the one of the row it is made
+        # from.
+        assert "oss-fuzz-theorems-toolchain@sha256:" in check_build.newest_toolchain("python")
         assert check_build.languages_of(check_build.newest_toolchain("python")) == ("python",)
         assert check_build.languages_of("example.org/not-listed:1") is None
         with pytest.raises(check_build.Failed):
