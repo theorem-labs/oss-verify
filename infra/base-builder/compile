@@ -51,6 +51,15 @@
 # link with an entry for its build and target in that tree takes the append mode (link-fuzz-target), which keeps each
 # function whose code did not change at the address the base gave it. OV_LAYOUT changes no byte of a binary. With
 # OV_BASE_LAYOUT, only the output and the stripped twin of an append link differ from those of a normal link.
+#
+# Set OV_PROGRAM_ENV to build whole programs and not fuzz targets: oss-verify check sets it for a port whose
+# project.yaml lists programs. It names a file of NAME=value entries, each ended by a NUL byte: the toolchain image's
+# own environment (its Config.Env), which oss-verify check reads on the host and mounts in the container. Then
+# build.sh runs in that environment alone, with SRC, WORK, OUT and HOME=/tmp added, and with what bash sets itself
+# (PWD, SHLVL and _). It gets none of the settings of the fuzz builds: no toolchain.sh, no compiler wrappers or shims,
+# no driver, no CC or CFLAGS, no SANITIZER, and no ENV of the builder or of the port. It runs as root, from the image's
+# working directory, with bash -eux. The build makes no stripped twin and no record ($OUT/.records). oss-verify check
+# takes from $OUT the programs that project.yaml lists (docs/build-contract.md, "Whole programs").
 set -euo pipefail
 
 LIB=/usr/local/lib/oss-verify
@@ -72,6 +81,18 @@ fi
 export -n OV_OWNER
 
 echo "compile: the $BUILD build (SANITIZER=$SANITIZER)"
+
+# A whole program (OV_PROGRAM_ENV, above). This comes before the Go branch and toolchain.sh, so that nothing that
+# compile sets later gets to build.sh. It does not use exec, so that the EXIT trap still gives $OUT to OV_OWNER.
+if [ -n "${OV_PROGRAM_ENV:-}" ]; then
+  mapfile -d '' -t program_env < "$OV_PROGRAM_ENV"
+  echo "compile: a program: build.sh runs in the toolchain image's own environment, with SRC, WORK, OUT and HOME=/tmp"
+  for entry in "${program_env[@]}"; do
+    echo "compile: env $entry"
+  done
+  env -i "${program_env[@]}" SRC="$SRC" WORK="$WORK" OUT="$OUT" HOME=/tmp "$BASH" -eux "$SRC/build.sh"
+  exit 0
+fi
 
 # A Go toolchain image (it sets OFTGO) builds a Go project, with OSS-Fuzz's Go helpers: go/compile-go.
 if [ -n "${OFTGO:-}" ]; then
