@@ -82,6 +82,16 @@ permissions: {}
 jobs:
   terms-accepted:
     name: terms-accepted
+    # Not for a merged pull request. GitHub sends edited for an edit of the description of a merged pull request too,
+    # and starts a run of this file: 13 such runs in the 7 days to 2026-11-27 03:58Z, 5 of them on heads whose copy of
+    # this file holds the checkout below, and every one of those 5 failed. Once the branch is deleted, which a merge
+    # does, GitHub builds no merge commit, so that checkout gets a commit of one parent and the step after it fails.
+    # Nobody reads the check: the pull request has merged, and .github/scripts/required-check posts nothing for a head
+    # with no open pull request. .github/scripts/enroll-dispatch's merged path read it, and a cancelled or failed run
+    # after the merge held an enrollment whose checks had all passed; it now reads only the runs created at or before
+    # the merge (bound_checks). This job's own result is skipped for such a run, which is no pass of the check either:
+    # GitHub makes a check run of the name with the conclusion skipped.
+    if: github.event.pull_request.merged != true
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

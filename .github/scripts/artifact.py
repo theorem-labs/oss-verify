@@ -71,17 +71,21 @@ def deciding_run(runs: list[dict]) -> dict | None:
     return max(kept, key=lambda r: r["id"], default=newest)
 
 
-def runs_at(api: Api, repo: str, path: str, event: str, sha: str, head: tuple[object, object]) -> list[dict]:
+def runs_at(api: Api, repo: str, path: str, event: str, sha: str, head: tuple[object, object],
+            before: str | None = None) -> list[dict]:
     """The runs of the workflow file `path` on `event` at the head commit `sha`, of a pull request from `head` (its
     repository and branch), as GitHub lists them, each with a whole id and run_attempt. A run of another file that
-    GitHub lists under the same workflow does not count."""
+    GitHub lists under the same workflow does not count. With `before`, a time GitHub gave (a pull request's
+    merged_at), only the runs it created at or before that time: the checks of a merged pull request are the ones
+    that decided its merge, and a run GitHub lists with no created_at is none of them."""
     workflow = quote(path.rsplit("/", 1)[1], safe="")
     return [r for page in api.pages(f"repos/{repo}/actions/workflows/{workflow}/runs?event={event}&head_sha={sha}"
                                     "&per_page=100")
             for r in page.get("workflow_runs") or []
             if r.get("path") == path and r.get("event") == event and r.get("head_sha") == sha
             and ((r.get("head_repository") or {}).get("full_name"), r.get("head_branch")) == head
-            and whole(r.get("id")) and whole(r.get("run_attempt"))]
+            and whole(r.get("id")) and whole(r.get("run_attempt"))
+            and (before is None or (isinstance(r.get("created_at"), str) and r["created_at"] <= before))]
 
 
 def read_member(api: Api, repo: str, run: int, name: str, member: str, limit: int) -> tuple[bytes | None, str]:

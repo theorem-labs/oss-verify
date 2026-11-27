@@ -845,6 +845,28 @@ def test_the_job_checks_out_the_merge_commit_into_merge_only_while_the_base_has_
     assert "PYTHONPATH" not in steps[program]["run"]
 
 
+@pytest.mark.parametrize("action, merged, runs", [
+    # An edit of a merged pull request's description: GitHub sends edited and starts a run, which this job skips.
+    ("edited", True, False),
+    ("edited", False, True),
+    ("opened", False, True),
+    ("reopened", False, True),
+    ("synchronize", False, True),
+    # A payload with no merged field (none of GitHub's today) runs the job: no run is skipped by accident.
+    ("edited", None, True),
+])
+def test_the_job_does_not_run_for_a_merged_pull_request(action, merged, runs):
+    # Once a merge deletes the branch, GitHub builds no merge commit, so the checkout gives one parent and the step
+    # after it fails: a red check that nobody reads. The merged path of .github/scripts/enroll-dispatch read it
+    # (tests/test_enroll_dispatch.py).
+    from test_outside_screen import evaluate
+
+    condition = read_workflow("terms.yaml")["jobs"]["terms-accepted"]["if"]
+    ctx = {"github.event_name": "pull_request", "github.event.action": action,
+           "github.event.pull_request.merged": merged}
+    assert bool(evaluate(condition, ctx)) == runs, (action, merged, condition)
+
+
 def test_a_base_without_the_program_runs_the_merge_commits_copy(tmp_path):
     # The pull request that adds .github/scripts/terms-accepted, or one whose base is older than that. The base has no
     # program, so only merge/'s copy, with the rules beside it in merge/.github/scripts, can decide as below.

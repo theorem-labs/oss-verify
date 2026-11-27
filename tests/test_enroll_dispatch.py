@@ -1113,6 +1113,30 @@ class Merged(unittest.TestCase):
             self.assertEqual(got["reason"], "pull request 32 was merged by a-member: the merge decides the review and "
                                             "the maintainer check")
 
+    def test_a_terms_run_after_the_merge_does_not_hold_the_enrollment(self):
+        # An agent edits a merged pull request's description, GitHub sends edited and starts a Terms run at the merged
+        # head, and once the branch is gone that run fails (#317, run 45882124186; 13 such runs in the 7 days to
+        # 2026-11-27 03:58Z). It is the newest run of terms.yaml at the head, so without the merge's time it would
+        # decide the check and hold an enrollment that every check passed for. terms.yaml now skips its job for a
+        # merged pull request, and a skipped job is no pass either: its check run's conclusion is skipped.
+        merged_at = "2026-11-26T19:05:35Z"
+        for after, conclusion in (("2026-11-26T19:14:18Z", "failure"), ("2026-11-26T19:14:18Z", "skipped"),
+                                  (merged_at, "failure")):
+            with self.subTest(created_at=after, conclusion=conclusion):
+                world = self.world()
+                world.pulls = [dict(world.pulls[0], merged_at=merged_at)]
+                for run in world.runs.values():
+                    run.setdefault("created_at", "2026-11-26T18:00:00Z")
+                world.run(206, ".github/workflows/terms.yaml", "pull_request", created_at=after,
+                          status="completed", conclusion=conclusion)
+                world.check(607, "terms-accepted", 206, conclusion=conclusion)
+                got = self.decide(world)
+                # A run created in the merge's own second is one of the runs the merge was made on, and still decides.
+                sent = after != merged_at
+                self.assertEqual(got["decision"], "dispatch" if sent else "none", got["reason"])
+                if not sent:
+                    self.assertIn(f"terms-accepted ({conclusion})", got["reason"])
+
     def test_a_pull_request_closed_without_a_merge_sends_nothing_and_takes_off_review_passed(self):
         # Its job skips (the run does not succeed); and a replay of a pull request that was closed without a merge. Each
         # sends nothing, and takes review-passed off the closed pull request when it carries it.

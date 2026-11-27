@@ -304,7 +304,7 @@ def head_of_pull(pull: dict) -> tuple[object, object]:
     return (at.get("repo") or {}).get("full_name"), at.get("ref")
 
 
-def bound_checks(api: Api, repo: str, sha: str, head: tuple) -> tuple[list[str], int | None]:
+def bound_checks(api: Api, repo: str, sha: str, head: tuple, before: str | None = None) -> tuple[list[str], int | None]:
     """The required checks that have not passed at `sha` from their bound source, and the Actions run of the bound
     project-builds check (None if it has not passed). A check counts only from one run of its workflow file, on one of
     its events, at `sha`, of the pull request whose head is `head` (repository, branch): another pull request at the
@@ -312,7 +312,12 @@ def bound_checks(api: Api, repo: str, sha: str, head: tuple) -> tuple[list[str],
     branch into another base) has the same runs. Of the runs GitHub lists, whether or not a run's job has started, the
     one that deciding_run of artifact.py takes decides for both, as it does for required-check's copy of the check: a
     job can start, and get its check run's id, in another order than the runs. Within that run, the newest check run of
-    the name, its latest attempt's, decides; a run with none has not passed."""
+    the name, its latest attempt's, decides; a run with none has not passed.
+
+    `before` is a merged pull request's merged_at (decide_merged): only the runs created at or before the merge decide,
+    because they are the runs the merge was made on. An edit of a merged pull request's description starts a Terms run
+    of its own, which fails once the branch is gone (its checkout has no merge commit), and without `before` that run
+    would hold an enrollment that every check passed for."""
     check_runs = [c for page in api.pages(f"repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100")
                   for c in page.get("check_runs") or []]
     waiting, build_run = [], None
@@ -323,7 +328,8 @@ def bound_checks(api: Api, repo: str, sha: str, head: tuple) -> tuple[list[str],
         if source is None:
             waiting.append(f"{context} (no known source)")
             continue
-        run = deciding_run([r for event in sorted(source[1]) for r in runs_at(api, repo, source[0], event, sha, head)])
+        run = deciding_run([r for event in sorted(source[1])
+                            for r in runs_at(api, repo, source[0], event, sha, head, before)])
         if run is None:
             waiting.append(f"{context} (not run by {source[0]} on {' or '.join(sorted(source[1]))})")
             continue
@@ -822,7 +828,8 @@ def merged_decision(api: Api, repo: str, runs: Runs, run: dict, number: int, pul
     why, approval = steering_gate(api, repo, number, pull, files, sha)
     if why:
         return outcome("none", f"pull request {number}: {why}", number, project, sha)
-    waiting, build_run = bound_checks(api, repo, sha, head)
+    # The runs the merge was made on: a run started by a later event decides nothing here (bound_checks).
+    waiting, build_run = bound_checks(api, repo, sha, head, time_of(pull.get("merged_at")))
     waiting += pull_checks(api, repo, sha, number)
     if waiting:
         return outcome("none", f"required checks not passed at {sha[:7]}{approval}: {', '.join(waiting)}; once they "
