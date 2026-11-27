@@ -1,7 +1,7 @@
 # Licence lines of a file in .theorem/
 
 A file that the maintainer writes in `.theorem/` carries the licence of their repository, as each other file of the repository does (case 4). A file copied from elsewhere keeps its licence lines (cases 1 to 3).
-When a case adds a `Modified` line, the maintainer is the author of the change: ask them which name and organisation to give.
+When a case adds a `Modified` line, the maintainer is the author of the change: ask them which name to give, their own or their organisation's.
 Use the first case that fits.
 
 1. **A seeded project's file that you adopt unchanged**, from `seeds/<name>/` or `projects/<name>/` of theorem-labs/oss-verify: add nothing. [NOTICE](../../../../NOTICE) and `seeds/UPSTREAM-CARRIED.tsv` give its licence.
