@@ -24,7 +24,8 @@ FROM ${TOOLCHAIN}
 # again. It is bind-mounted, so it leaves no file in the image.
 RUN --mount=type=bind,source=distrust-roots.py,target=/tmp/distrust-roots.py python3 /tmp/distrust-roots.py
 
-COPY toolchain.sh link-fuzz-target layout.py dsl.py record-compile recipes.sh release-target.sh /usr/local/lib/oss-verify/
+COPY toolchain.sh link-fuzz-target layout.py dsl.py record-compile recipes.sh release-target.sh compile-program \
+     /usr/local/lib/oss-verify/
 COPY driver/ /usr/local/lib/oss-verify/driver/
 COPY rust/ /usr/local/lib/oss-verify/rust/
 COPY python/ /usr/local/lib/oss-verify/python/
@@ -33,7 +34,7 @@ COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/b
 RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources \
                /usr/local/bin/git-credential-oss-verify \
                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile \
-               /usr/local/lib/oss-verify/go/compile-go \
+               /usr/local/lib/oss-verify/compile-program /usr/local/lib/oss-verify/go/compile-go \
  && mkdir -p /src /work /out
 
 ENV SRC=/src \

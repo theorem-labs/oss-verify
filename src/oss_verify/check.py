@@ -57,8 +57,9 @@ It runs these steps:
        --layout-out, each build records them, with the functions each link wraps (OV_LAYOUT=1). With --base-layout,
        each container also gets the base layout tree, read-only, as OV_BASE_LAYOUT, and each link with an entry there
        for its build and fuzz target is an append link: a development build, whose binaries are never pins. A project
-       that lists programs has the plain build alone, and its build.sh runs in the environment of the toolchain image
-       itself (its own ENV, with SRC, WORK, OUT and HOME=/tmp), with no record: the link records are for fuzz targets.
+       that lists programs has the plain build alone, which the builder's compile-program runs in place of compile:
+       its build.sh runs in the environment of the toolchain image itself (its own ENV, with SRC, WORK, OUT and
+       HOME=/tmp), with no record: the link records are for fuzz targets.
     7. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
        build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
        out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
@@ -217,8 +218,8 @@ def ubsan_settings(job, toolchain):
 def build_programs(job, tag, work, toolchain, home):
     """Compile the plain build of a project that lists programs, and collect them into work/out. build.sh runs in the
     environment of the toolchain image `toolchain` alone (check_build.toolchain_environment). Its entries go to
-    work/program-env, each ended by a NUL byte, and compile reads that file. The build has no record, no layout and no
-    UBSan setting.
+    work/program-env, each ended by a NUL byte, and the builder's compile-program reads that file
+    (check_build.COMPILE_PROGRAM). The build has no record, no layout and no UBSan setting.
 
     Return (targets, entries): the programs' names, in the order of project.yaml, and the entries that
     manifest.collect_programs gives. Raise Failed if the environment cannot be read, or if collect_programs finds a

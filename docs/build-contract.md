@@ -12,7 +12,7 @@ An OSS-Fuzz `Dockerfile` and `build.sh` do not run here without changes. They ex
 
 1. Make the builder image from [infra/base-builder/](../infra/base-builder/), from a toolchain image ([below](#toolchains)).
 2. Build the project image from the project's `Dockerfile`, on the builder. `oss-verify check` gives the build arguments `COMMIT` (the full commit that `repo#ref` names), `REPO` and `BASE_BUILDER`. Only this step has network access.
-3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan` and `asan-ubsan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`. A project with `programs` has the `plain` build alone, and `compile` runs its `build.sh` in the toolchain image's own environment ([below](#whole-programs)).
+3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan` and `asan-ubsan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`. A project with `programs` has the `plain` build alone. For it, the builder's script [compile-program](../infra/base-builder/compile-program) runs in place of `compile`, and runs its `build.sh` in the toolchain image's own environment ([below](#whole-programs)).
 4. Find the fuzz targets in the `$OUT` of each build. Copy each binary to `out/<target>/<target>.<build>`. For a project with `programs`, take each program that `project.yaml` lists from `$OUT`, as the build wrote it, and copy it to `out/<name>/<name>` ([below](#whole-programs)). Write the manifest, with the SHA-256 of each binary. `oss-verify check` lists each binary with its size, the size of its `.text` section, `static` or `dynamic`, and its SHA-256. With `--summary <file>`, it also writes this list as a Markdown table; the Build check of a pull request shows that table. A binary with a `PT_INTERP` or `PT_DYNAMIC` program header is dynamically linked. `oss-verify check` refuses a dynamically linked binary, and one whose program headers it cannot read, with exit status 2, the status for a project that breaks the enrollment rules. Then it compares each program with the SHA-256 that `project.yaml` pins: a program with other bytes makes the exit status 3. Size is not a rule: a binary of any size passes. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries have less than 1 MB of code: the larger of their `.text` section and their executable segments, which can hold read-only data too ([README](../README.md#who-can-enroll)).
 
 ## The builder
@@ -131,7 +131,7 @@ With `--checks`, the build also takes the compile records of the runtime. Thus t
 | `<fuzzer/FuzzedDataProvider.h>` | on the include path of `$CC` and `$CXX`, as in OSS-Fuzz |
 | `$SOURCE_DATE_EPOCH` | `1756684800`, for each tool that writes a date |
 
-`compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)). The `build.sh` of a project with `programs` gets the toolchain image's own environment instead ([below](#the-environment-of-a-programs-build)).
+`compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)). The `build.sh` of a project with `programs` gets the toolchain image's own environment instead, and the builder's script [compile-program](../infra/base-builder/compile-program) runs it in place of `compile` ([below](#the-environment-of-a-programs-build)).
 
 ## The builds
 
@@ -675,18 +675,18 @@ In the container, the image's own variables cannot be told from those that the b
 1. `oss-verify check` reads the image's own `ENV`, its `Config.Env`, with `docker image inspect --format '{{json .Config.Env}}' <toolchain image>`. If the image is not on the host, it runs `docker pull --quiet <toolchain image>` and reads the list again. If it still cannot read the list, the build fails with exit status 1. The build also fails for an entry that is not `NAME=value`, or whose name starts with `-`.
 2. If the image sets no `PATH`, `oss-verify check` puts Docker's default in front of the list, as `docker run` gives it: `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
 3. It writes the list to `program-env` in its work directory, each entry ended by a NUL byte. It mounts this file read-only in the container of the build, and names it in `OV_PROGRAM_ENV`.
-4. `compile` runs `build.sh` with `env -i`, with the list and with `SRC`, `WORK`, `OUT` and `HOME=/tmp`. It does this before it sets up a fuzz build, so nothing that `compile` sets gets to `build.sh`.
+4. The builder's script [compile-program](../infra/base-builder/compile-program) runs in the container, in place of `compile`. It runs `build.sh` with `env -i`, with the list and with `SRC`, `WORK`, `OUT` and `HOME=/tmp`. It sets up no fuzz build, so nothing that `compile` sets gets to `build.sh`. It is a script of its own, and not a part of `compile`, because the key of [the prebuilt CPython runtime](#the-prebuilt-cpython-runtime) holds the SHA-256 of `compile` and not that of `compile-program`, so a change to the build of a program changes the key of no Python build.
 
 For the newest C and C++ toolchain on 2026-11-27, the row `oss-fuzz-theorems-2026.10` of [infra/toolchains.tsv](../infra/toolchains.tsv), `build.sh` gets these variables:
 
 * from the toolchain image: `PATH`, `MUSL_SYSROOT`, `ASAN_RESOURCE_DIR`, `PKG_CONFIG_LIBDIR`, an empty `PKG_CONFIG_PATH`, `OFT_DEP_CC`, `OFT_DEP_CFLAGS` and `OFT_DEP_CXX`;
-* from `compile`: `SRC`, `WORK` and `OUT`, which are `/src`, `/work` and `/out` as in each build, and `HOME=/tmp`;
+* from `compile-program`: `SRC`, `WORK` and `OUT`, which are `/src`, `/work` and `/out` as in each build, and `HOME=/tmp`;
 * from bash itself: `PWD`, `SHLVL` and `_`, and `OLDPWD` after a `cd`.
 
 `build.sh` gets no other variable:
 
 * No `HOSTNAME`. Docker gives each container its own value, and both builds of `--twice` must get the same environment.
-* None of the settings of the fuzz builds. Of the variables of [What build.sh gets](#what-buildsh-gets), it gets only `$SRC`, `$WORK` and `$OUT`. Thus it gets no `$CC`, `$CFLAGS`, `$LIB_FUZZING_ENGINE` or `$SANITIZER`, and no `$SOURCE_DATE_EPOCH` unless the toolchain image sets it. `PATH` does not name `/tmp/shim`, and the build makes no compiler shims. The variables that `oss-verify check` gives `compile`, such as `OV_OWNER` and `OFT_MAKE_JOBS`, do not get to `build.sh`.
+* None of the settings of the fuzz builds. Of the variables of [What build.sh gets](#what-buildsh-gets), it gets only `$SRC`, `$WORK` and `$OUT`. Thus it gets no `$CC`, `$CFLAGS`, `$LIB_FUZZING_ENGINE` or `$SANITIZER`, and no `$SOURCE_DATE_EPOCH` unless the toolchain image sets it. `PATH` does not name `/tmp/shim`, and the build makes no compiler shims. The variables that `oss-verify check` gives `compile-program`, such as `OV_OWNER` and `OFT_MAKE_JOBS`, do not get to `build.sh`.
 * No `ENV` of the builder image, such as `SANITIZER=none`, and no `ENV` of the project's `Dockerfile`.
 
 Both builds of `--twice` get the same environment. `build.sh` runs as root, from the `WORKDIR` of the `Dockerfile`, with `bash -eux`, as in each build. `$CC` and `$CFLAGS` are not set, so a `build.sh` that names them stops under `-u`.
@@ -699,13 +699,13 @@ It copies the program to `out/<name>/<name>`, with mode 0755, and the link map t
 
 ### The build log of a program
 
-`compile` writes these lines for the build of a program:
+`compile-program` writes these lines for the build of a program:
 
     compile: the plain build (SANITIZER=none)
     compile: a program: build.sh runs in the toolchain image's own environment, with SRC, WORK, OUT and HOME=/tmp
     compile: env <NAME>=<value>
 
-The first line is the line of each plain build, at the start of its line. Then comes one line `compile: env NAME=value` for each variable of the toolchain image, in the order of the image. Then comes the trace that `bash -x` writes: a line that starts with `+ ` for each command of `build.sh`. The trace holds the program's own build command, for example `+ make`, and not each compile. The build writes no compile records and no `$OUT/.records/`.
+The first line is the line that `compile` writes for each plain build, at the start of its line. `compile-program` writes it too, because readers of the build log take this line as the start of a build. Then comes one line `compile: env NAME=value` for each variable of the toolchain image, in the order of the image. Then comes the trace that `bash -x` writes: a line that starts with `+ ` for each command of `build.sh`. The trace holds the program's own build command, for example `+ make`, and not each compile. The build writes no compile records and no `$OUT/.records/`.
 
 ### The refusals of a program
 

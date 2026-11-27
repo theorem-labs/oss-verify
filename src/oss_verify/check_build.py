@@ -1103,6 +1103,9 @@ DOCKER_FAILED = 125
 BASE_LAYOUT_MOUNT = "/ov-base-layout"
 # Where compile_build mounts the file of a program's environment, read-only, in the container of its build.
 PROGRAM_ENV_MOUNT = "/ov-program-env"
+# The builder's script that compile_build runs in place of compile for the build of a whole program. It is not compile,
+# because the key of the prebuilt CPython runtime holds compile's bytes (infra/base-builder/compile-program).
+COMPILE_PROGRAM = "/usr/local/lib/oss-verify/compile-program"
 
 
 def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=False, layout=False, base_layout=None,
@@ -1119,16 +1122,19 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
     (infra/base-builder/link-fuzz-target), which keeps each function whose code did not change at its base address.
     `program_env`, a path on the host, makes the build that of a whole program: it is a file of NUL-ended NAME=value
     entries, the toolchain image's own environment (toolchain_environment), mounted read-only at PROGRAM_ENV_MOUNT and
-    named by OV_PROGRAM_ENV, and compile runs build.sh in that environment, with SRC, WORK, OUT and HOME added. Such a
-    build gets none of the settings above (`ubsan`, `record`, `layout`, `base_layout`)."""
+    named by OV_PROGRAM_ENV. The container then runs COMPILE_PROGRAM in place of compile, which runs build.sh in that
+    environment, with SRC, WORK, OUT and HOME added. Such a build gets none of the settings above (`ubsan`, `record`,
+    `layout`, `base_layout`)."""
     step(f"compile: the {build} build (SANITIZER={sanitizer}), with no network")
     empty_directory(out, tag, labels=labels)
     owner = f"{os.getuid()}:{os.getgid()}"
     # The number of parallel jobs, if set here, for recipes that read it; it does not change the bytes.
     jobs = ["-e", "OFT_MAKE_JOBS"] if os.environ.get("OFT_MAKE_JOBS") else []
     checks = []
+    script = "compile"
     if program_env is not None:
         checks = ["-v", f"{program_env}:{PROGRAM_ENV_MOUNT}:ro", "-e", f"OV_PROGRAM_ENV={PROGRAM_ENV_MOUNT}"]
+        script = COMPILE_PROGRAM
     else:
         if ubsan and "undefined" in sanitizer:
             checks = ["-e", f"OV_UBSAN_CHECKS={','.join(ubsan[0])}", "-e", f"OV_UBSAN_EXCLUDE={','.join(ubsan[1])}"]
@@ -1142,7 +1148,7 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
         if base_layout is not None:
             checks += ["-v", f"{base_layout}:{BASE_LAYOUT_MOUNT}:ro", "-e", f"OV_BASE_LAYOUT={BASE_LAYOUT_MOUNT}"]
     command = ["docker", "run", "--rm", "--init", "--network=none", *labels, "-e", f"SANITIZER={sanitizer}",
-               "-e", f"OV_OWNER={owner}", *jobs, *checks, "-v", f"{out}:/out", tag, "compile"]
+               "-e", f"OV_OWNER={owner}", *jobs, *checks, "-v", f"{out}:/out", tag, script]
     code = run(*command)
     if code == DOCKER_FAILED:
         # docker run itself failed (the daemon could not start the container), not the build: once more, afresh.
@@ -1150,7 +1156,7 @@ def compile_build(tag, build, sanitizer, out, ubsan=None, *, labels, record=Fals
         empty_directory(out, tag, labels=labels)
         code = run(*command)
     if code != 0:
-        raise Failed(f"compile exited {code} in the {build} build")
+        raise Failed(f"{script} exited {code} in the {build} build")
 
 
 def oss_verify_state(job):

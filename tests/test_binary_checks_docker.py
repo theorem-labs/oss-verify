@@ -356,8 +356,8 @@ class TestProgram:
     def checked(request, root, name, prepare, *options):
         """Run oss-verify check, with --no-shell and `options`, on a copy of tests/fixtures/program that prepare(copy)
         changes, in a work directory of its own. validate.check_project and check_build.resolve are replaced by
-        stand-ins (COMMIT), and OFT_MAKE_JOBS is 2: compile_build passes it to compile, and the build of a program must
-        not see it. Return the Run. A finalizer of `request` removes the images of the run."""
+        stand-ins (COMMIT), and OFT_MAKE_JOBS is 2: compile_build passes it to the builder's compile-program, and the
+        build of a program must not see it. Return the Run. A finalizer of `request` removes the images of the run."""
         project, work = root / f"program-{name}", root / f"{name}-work"
         request.addfinalizer(lambda: TestProgram.remove_images(work))
         argv = ["--no-shell", *map(str, options), "--dir", str(work), str(project)]

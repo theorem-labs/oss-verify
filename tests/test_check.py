@@ -627,7 +627,8 @@ class TestLayoutOptions(Project):
 class TestCompileBuild:
     """The docker run command of compile_build: with a base layout tree, the tree mounted read-only and named by
     OV_BASE_LAYOUT, with the records and OV_LAYOUT; with a program's environment file, the file mounted read-only and
-    named by OV_PROGRAM_ENV, with none of those; with none of them, today's command."""
+    named by OV_PROGRAM_ENV, with none of those, and the builder's compile-program in place of compile; with none of
+    them, today's command."""
 
     LABELS = ["--label", "work=/w"]
 
@@ -687,7 +688,8 @@ class TestCompileBuild:
         command, out = self.command("plain", "none", program_env=pathlib.Path("/w/program-env"))
         assert command == ["docker", "run", "--rm", "--init", "--network=none", "--label", "work=/w",
                            "-e", "SANITIZER=none", "-e", owner, "-v", "/w/program-env:/ov-program-env:ro",
-                           "-e", "OV_PROGRAM_ENV=/ov-program-env", "-v", f"{out}:/out", "tag", "compile"]
+                           "-e", "OV_PROGRAM_ENV=/ov-program-env", "-v", f"{out}:/out",
+                           "tag", "/usr/local/lib/oss-verify/compile-program"]
 
 
 class TestToolchainEnvironment:
