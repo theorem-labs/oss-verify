@@ -73,7 +73,7 @@ This table is the only list of languages in these documents. It gives the status
 
 Our builder builds `c`, `c++`, `rust`, `python` and `go` projects today. `oss-verify validate` warns about the other languages, and `oss-verify check` refuses them. The builders of the other languages are pending. We add each one to [infra/toolchains.tsv](../infra/toolchains.tsv) after its image is published.
 
-A `rust` project has all four builds. Its `ubsan` build uses rustc's UB checks, not UndefinedBehaviorSanitizer ([build-contract.md](build-contract.md#rust-fuzz-targets)). A `python` project has all four builds: each build compiles CPython with its own flags.
+A `rust` project has all four builds. Its `ubsan` build uses rustc's UB checks, not UndefinedBehaviorSanitizer ([build-contract.md](build-contract.md#rust-fuzz-targets)). A `python` project has all four builds: each build compiles CPython with its own flags, or takes the CPython that the toolchain image ships for the same inputs ([build-contract.md](build-contract.md#the-prebuilt-cpython-runtime)).
 
 A `go` or `jvm` project has only the plain build. Go has no UndefinedBehaviorSanitizer or AddressSanitizer build, and the Go builder does not support cgo. Our tools do not write theorem statements for Go yet. A `jvm` project has halts statements only. Leave out `sanitizers`, or give `sanitizers: []`. A `go` project's fuzz targets are its OSS-Fuzz Go fuzz targets, which OSS-Fuzz's Go helpers build ([build-contract.md](build-contract.md#go-fuzz-targets)).
 

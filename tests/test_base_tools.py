@@ -13,7 +13,7 @@ one job has the id <file>:<job>.
 
 Two tests read the workflow files:
   - No workflow names pull_request.base.sha in an expression.
-  - No checkout of any workflow names a ref, but the one REF_CHECKOUTS lists. A checkout that names a ref can take
+  - No checkout of any workflow names a ref, but those that REF_CHECKOUTS lists. A checkout that names a ref can take
     the head of a pull request, in a workflow that starts on pull_request or in one that reads the files of a pull
     request, as review.yml does.
 
@@ -113,9 +113,11 @@ REFUSALS = {
 SKIPS = {
     "validate.yaml:validate": ({"event": "workflow_dispatch"}, "a run by hand"),
 }
-# The one checkout of the workflows that names a ref, as (file, job, ref): publish checks out the commit of the run of
-# toolchain-images.yaml that it publishes, which ToolchainPublish of tests/test_trigger_move.py holds to a push to main.
-REF_CHECKOUTS = [("toolchain-images-publish.yaml", "publish", "${{ github.event.workflow_run.head_sha }}")]
+# The checkouts of the workflows that name a ref, as (file, job, ref): publish, remake-prebuilt and publish-prebuilt
+# check out the commit of the run of toolchain-images.yaml that they publish, which ToolchainPublish of
+# tests/test_trigger_move.py holds to a push to main.
+REF_CHECKOUTS = [("toolchain-images-publish.yaml", job, "${{ github.event.workflow_run.head_sha }}")
+                 for job in ("publish", "remake-prebuilt", "publish-prebuilt")]
 # The sizes that the stand-in binary-sizes prints: one line of JSON, as the real one prints it.
 SIZES = '{"demo_fuzzer":{"plain":{"exec":4096,"text":1024}}}'
 # The line that the build step writes when binary-sizes --cut exits 0 and prints nothing.
