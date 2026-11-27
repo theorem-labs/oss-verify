@@ -11,14 +11,17 @@ import struct
 import subprocess
 import tempfile
 import time
+import types
 import zipfile
 
 import pytest
+import yaml
 
 from oss_verify import check_binaries
 from oss_verify import check_links
 from oss_verify import model_release
 from oss_verify.check_build import Failed
+from test_manifest import elf
 
 UNIMP = struct.pack("<I", check_links.TRAP)
 NOP = struct.pack("<I", 0x00000013)  # addi x0, x0, 0
@@ -2905,3 +2908,160 @@ class TestRuns:
         assert "| `t.plain` | pass | pass | pass | not instrumented (plain) | 1 files |" in text
         assert "| `t.asan` | pass | **fail** | pass | pass | not recorded |" in text
         assert "`t.asan`, system calls: `uname: not in the table`" in text
+
+
+class TestProgramChecks:
+    """check_binaries.program_checks: the checks that apply to a whole program. It has no fuzz entry, so no fuzz driver
+    runs it, and it has no quiet twin and no link record: only the ELF check applies, and each other check of a binary
+    has a result of its own for a program."""
+
+    # The same bytes at the path of a fuzz target's build and at the path of a program: one ELF check, one result.
+    ELF = elf(sections=[(".text", 1234)], segments=[1])
+    # What a program's build has for each check that does not run (docs/build-contract.md, "The checks of the
+    # binaries").
+    NOT_RUN = {"system_calls": "not-run", "quiet_loud": "not-run", "instrumented": "plain"}
+
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.work = tmp_path / "work"
+        for target, name in (("p", "p"), ("q", "q"), ("t", "t.plain")):
+            (self.work / "out" / target).mkdir(parents=True)
+            (self.work / "out" / target / name).write_bytes(self.ELF)
+        self.job = types.SimpleNamespace(builds=["plain"], directory=self.work)
+
+    @staticmethod
+    def no_model(patch):
+        """Replace the model step, so that no network is reached: the release's model cannot be read."""
+        def release_model():
+            raise Failed("no release.yaml")
+
+        def fetch(*arguments):
+            pytest.fail("the model was fetched")
+
+        patch.setattr(model_release, "release_model", release_model)
+        patch.setattr(model_release, "fetch", fetch)
+
+    def programs(self, targets=("p",)):
+        """program_checks of these programs, whose plain build is out/<name>/<name>, with no model."""
+        with pytest.MonkeyPatch.context() as patch:
+            self.no_model(patch)
+            return check_binaries.program_checks(self.job, list(targets), {t: {"plain": {"file": t}} for t in targets},
+                                                 self.work)
+
+    def fuzz_target(self):
+        """The checks of one fuzz target's plain build, `t`, as binary_checks gives them, run as
+        TestRuns::test_binary_checks_gives_check_3_the_reason_of_check_2 runs it."""
+        def run_job(job_dir, image, qemu, labels, seconds):  # one whole run, quiet and loud alike
+            results = job_dir / "results"
+            results.mkdir()
+            for kind in "lq":
+                (results / f"{kind}0.calls").write_text("exec\n")
+                (results / f"{kind}0.status").write_text("0\n")
+            for name in ("q0.out", "q0.err"):
+                (results / name).write_text("0\n")
+            return results
+
+        link = {"plain": {"uninstrumented": None, "instrumented": {"result": "plain"}}}
+        with pytest.MonkeyPatch.context() as patch:
+            self.no_model(patch)
+            patch.setattr(check_links, "read_compiles", lambda raw: {})
+            patch.setattr(check_links, "analyse", lambda *arguments: link)
+            patch.setattr(check_binaries, "record_of", lambda raw, target, compiles: ("no record", b"quiet"))
+            patch.setattr(check_binaries, "image_hashes", lambda *arguments, **options: {})
+            patch.setattr(check_binaries, "dwarf_reader", lambda *arguments: None)
+            patch.setattr(check_binaries, "assembly_reader", lambda *arguments: None)
+            patch.setattr(check_binaries, "seed_inputs",
+                          lambda directory, target: [(check_binaries.EMPTY, check_binaries.HEADER)])
+            patch.setattr(check_binaries, "qemu_version", lambda qemu: TestRuns.QEMU)
+            patch.setattr(check_binaries, "run_job", run_job)
+            patch.setattr(check_binaries.check_checks, "qemu", lambda: "/bin/true")
+            block, _, _ = check_binaries.binary_checks(self.job, "tag", "toolchain", ["t"],
+                                                       {"t": {"plain": {"file": "t.plain"}}}, {}, self.work,
+                                                       labels=[])
+        return block["targets"]["t"]["plain"]
+
+    def test_every_check_of_a_binary_has_a_program_result(self):
+        """The inventory of the checks: each key that a fuzz target's build has in the block of binary_checks is a key
+        of a program's build in the block of program_checks, with the result that a program has. A check added to
+        binary_checks fails this test until program_checks gives it a result too."""
+        fuzz = self.fuzz_target()
+        assert set(fuzz) == {"elf", "system_calls", "quiet_loud", "instrumented"}
+        program = self.programs()["targets"]["p"]["plain"]
+        assert list(program) == list(fuzz)
+        # The ELF check reads the same bytes, so it gives the same result.
+        assert program["elf"] == fuzz["elf"]
+        for key, result in self.NOT_RUN.items():
+            assert program[key]["result"] == result, key
+            assert program[key]["detail"].startswith("a program: "), key
+
+    def test_program_checks_run_no_binary(self):
+        def fails(name):
+            def call(*arguments, **options):
+                pytest.fail(f"program_checks called {name}")
+            return call
+
+        def isa(path):
+            return {"result": "pass", "detail": "isa ok"}
+
+        with pytest.MonkeyPatch.context() as patch:
+            self.no_model(patch)
+            for name in ("run_job", "record_of", "image_hashes", "seed_inputs", "qemu_version"):
+                patch.setattr(check_binaries, name, fails(name))
+            patch.setattr(check_binaries.check_checks, "qemu", fails("check_checks.qemu"))
+            patch.setattr(check_binaries.check_links, "read_compiles", fails("read_compiles"))
+            # No container: no docker command runs.
+            patch.setattr(check_binaries.check_build, "run", fails("check_build.run"))
+            patch.setattr(check_binaries.check_build, "output", fails("check_build.output"))
+            patch.setattr(check_binaries.binary_isa, "check", isa)
+            block = check_binaries.program_checks(self.job, ["p", "q"],
+                                                  {name: {"plain": {"file": name}} for name in "pq"}, self.work)
+        assert block["qemu"] == ""
+        assert block["inputs"] == {"p": [], "q": []}
+        assert block["model"] == {"error": "the model could not be read: no release.yaml"}
+        assert list(block["targets"]) == ["p", "q"]
+        for target, by_build in block["targets"].items():
+            assert list(by_build) == ["plain"]
+            # With a model that cannot be read, the ELF check has no verdict either way.
+            assert by_build["plain"]["elf"]["result"] == "stale"
+            assert by_build["plain"]["elf"]["detail"].startswith("isa ok; ")
+            assert "could not be read" in by_build["plain"]["elf"]["detail"]
+        # Each program has results of its own: the block, written as YAML, has no alias between two programs.
+        assert "&id" not in yaml.safe_dump(block)
+
+    def test_the_report_of_a_program(self):
+        model = {"name": "m", "commit": "f" * 40, "release": "2026.10.0"}
+        about = "a program: nothing runs it"
+
+        def block(elf_result, *targets):
+            inputs = {name: [] if name == "hello" else ["a", "b"] for name in targets}
+            return {"model": model, "qemu": "", "inputs": inputs,
+                    "targets": {name: {"plain": {
+                        "elf": elf_result,
+                        "system_calls": {"result": "not-run", "detail": about},
+                        "quiet_loud": {"result": "not-run", "detail": about},
+                        "instrumented": {"result": "plain", "detail": about}}} for name in targets}}
+
+        text = check_binaries.report(block({"result": "pass"}, "hello"), {}, ["plain"], {}, programs=["hello"])
+        assert ("| `hello.plain` | pass | not run (a program) | not run (a program) | not instrumented (plain) | "
+                "no list (a program) |") in text
+        assert text.count("not run (a program)") == 2
+        assert "**not decided**" not in text
+        # Nothing to say about the two checks that no program runs, and no fuzz target ran on any input.
+        assert "What each failure is" not in text
+        assert "Each fuzz target ran" not in text
+        # A result of the ELF check that is not a pass is listed, and the two that did not run are not.
+        stale = {"result": "stale", "detail": "isa ok; the model is not the release's"}
+        text = check_binaries.report(block(stale, "hello"), {}, ["plain"], {}, programs=["hello"])
+        assert "| `hello.plain` | **stale model** | not run (a program) |" in text
+        assert "What each failure is" in text
+        assert "- `hello.plain`, ELF and instructions: `isa ok; the model is not the release's`" in text
+        assert "system calls:" not in text and "quiet and loud:" not in text
+        # A fuzz target beside it reads as it does without the program, and is the only one that the line names.
+        mixed = block({"result": "pass"}, "hello", "t")
+        mixed["targets"]["t"]["plain"].update(system_calls={"result": "pass"}, quiet_loud={"result": "pass"})
+        text = check_binaries.report(mixed, {"t": {"plain": [{"name": "libc.a", "kind": "libc"}]}}, ["plain"],
+                                     {"t": {"plain": None}}, programs=["hello"])
+        assert "Each fuzz target ran on the empty input and up to 8 seed inputs (`t`: 2)." in text
+        assert "`hello`: 0" not in text
+        assert "| `t.plain` | pass | pass | pass | not instrumented (plain) | 1 files |" in text
+        assert "| `hello.plain` | pass | not run (a program) | not run (a program) |" in text

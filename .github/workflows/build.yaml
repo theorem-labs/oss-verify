@@ -313,7 +313,7 @@ jobs:
             0) result="builds, and a second build from scratch has the same bytes" ;;
             1) result="does not build (the log says which step failed)" ;;
             2) result="breaks the enrollment rules (the log lists them)" ;;
-            3) result="builds, but a second build from scratch has different bytes (the log says which)" ;;
+            3) result="builds, but a second build from scratch has different bytes, or a program is not the file that project.yaml pins (the log says which)" ;;
             *) result="could not be checked: oss-verify check exited $code" ;;
           esac
           echo "\`projects/$NAME/\` at \`${SHA:0:7}\` $result." >> "$GITHUB_STEP_SUMMARY"
