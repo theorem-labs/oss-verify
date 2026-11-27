@@ -1,16 +1,27 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 name: "Toolchain images"
-# toolchain-images makes the frame-pointer toolchain images. Each is a toolchain image of infra/toolchains.tsv with one
-# change: the environment variable OFT_FRAME_POINTERS=1 in its configuration. The builder reads this variable. On such
-# an image, infra/base-builder/toolchain.sh compiles C and C++ with -fno-omit-frame-pointer, and rust/recipes.sh gives
-# rustc -Cforce-frame-pointers=yes. Thus each function that the build compiles keeps a frame record, and s0 points to
-# it (docs/build-contract.md, "Frame pointers").
+# toolchain-images makes the frame-pointer toolchain images and the Python toolchain images with a prebuilt CPython
+# runtime.
+#
+# A frame-pointer image is a toolchain image of infra/toolchains.tsv with one change: the environment variable
+# OFT_FRAME_POINTERS=1 in its configuration. The builder reads this variable. On such an image,
+# infra/base-builder/toolchain.sh compiles C and C++ with -fno-omit-frame-pointer, and rust/recipes.sh gives rustc
+# -Cforce-frame-pointers=yes. Thus each function that the build compiles keeps a frame record, and s0 points to it
+# (docs/build-contract.md, "Frame pointers").
 #
 # crane mutate writes the new configuration and a manifest that names it and the base image's own layers. Thus every
 # file of the base image is in the new image with the same bytes, the musl sysroot and the AddressSanitizer runtime
 # too. crane writes nothing from the time or the runner. Thus the same base gives the same digest on every run, and a
 # pull request's run shows the digest that the push to main publishes.
+#
+# A Python build compiles the CPython runtime of its flav (infra/base-builder/python/recipes.sh) before it compiles the
+# project, and that is most of its time. Each of the four builds compiles the same runtime on every run. A prebuilt
+# image is a Python toolchain image with one more layer: the runtime of each of the four builds, compiled once, with its
+# compile records and the list of its inputs, in /opt/oft-py/prebuilt/<flav>-<key>/. <key> is the SHA-256 of that list.
+# A build on that image takes the shipped runtime only when its own inputs give the same key, and else compiles its
+# runtime as before. .github/scripts/python-runtime/make writes the layer from fixed times and owners, and crane append
+# adds it, so the same base and the same inputs give the same digest on every run too.
 #
 # The jobs:
 #   make          Once for each base image (the matrix). It makes the image in a registry on the runner, and checks
@@ -38,33 +49,57 @@ name: "Toolchain images"
 #   compare-digests  After make and docker-tests. It fails unless docker-tests gave a digest for the C and C++ row and
 #                 for the Rust row, and each is the digest that make made of that row: the images that docker-tests
 #                 tested are the images that make checked and probed.
+#   prebuilt      Beside make, once for each prebuilt image (the matrix): row, the row of infra/toolchains.tsv that is
+#                 to name the image; base, the Python row that it starts from; frame_pointers, 1 when it starts from
+#                 the frame-pointer image of that row, which it makes with crane mutate as make does. In a registry on
+#                 the runner, .github/scripts/python-runtime/make builds the runtime of each of the four builds in the
+#                 builder FROM that image, as a Python build does, and appends the layer. prebuilt fails unless the
+#                 manifest names the layers of the image that it starts from and then exactly one more, the
+#                 configuration is that image's with the diff id of that layer added, and each entry of the layer is
+#                 under /opt/oft-py/prebuilt. When infra/toolchains.tsv has the row <row>, it also fails unless that row
+#                 names the image that it made, in the package FP_PACKAGE, and ghcr.io holds that image. It keeps the
+#                 digest in the artifact prebuilt-digest-<row>. Then .github/scripts/python-runtime/probe builds the
+#                 fixture tests/fixtures/python-example FROM the image that it starts from and FROM the new image, with
+#                 each of the four builds and the records of oss-verify check. It fails unless /opt/oft-py/prebuilt of
+#                 the new image holds one directory <flav>-<key> for each flav, each build on the new image took that
+#                 runtime and compiled none, each build on the other image compiled its own, at least one compile
+#                 record of each build is of the runtime, and every file under each build's $OUT is the same on the two
+#                 images, by its path and its SHA-256, and each link by its target: the fuzz targets and their
+#                 stripped twins, the compile and link records, the store, flags.json and nosan/. Its step summary
+#                 gives the results.
 #
-# GitHub's paths filter below starts this file only for a change of what make reads, the inputs of the
-# images: this file, publish's file, frame-pointer-tests.yaml (the job docker-tests), the probes, infra/toolchains.tsv,
-# the builder and the fixture tests/fixtures/rust-example, whose Dockerfile, lock and crate/Cargo.toml the Rust probe
-# takes. A change of the other files that docker-tests reads (the tests, tests/fixtures/example,
-# src/oss_verify/check_build.py, pyproject.toml) changes no image, and runs no job of this file, so publish has nothing
-# to act on: the job docker of tests.yaml runs these tests for every change, on the images that it makes the same way.
+# GitHub's paths filter below starts this file only for a change of what make and prebuilt read, the inputs of the
+# images: this file, publish's file, frame-pointer-tests.yaml (the job docker-tests), the scripts and probes of
+# .github/scripts/frame-pointers and .github/scripts/python-runtime, infra/toolchains.tsv, the builder, the fixture
+# tests/fixtures/rust-example, whose Dockerfile, lock and crate/Cargo.toml the Rust probe takes, and the fixture
+# tests/fixtures/python-example, which prebuilt's probe builds. A change of the other files that docker-tests reads (the
+# tests, tests/fixtures/example, src/oss_verify/check_build.py, pyproject.toml) changes no image, and runs no job of
+# this file, so publish has nothing to act on: the job docker of tests.yaml runs these tests for every change, on the
+# images that it makes the same way.
 #
 # This file publishes nothing, and no job of it has a write permission. toolchain-images-publish.yaml (Toolchain
-# images: publish) puts the images on ghcr.io, all three in one package, FP_PACKAGE below. GitHub starts it when a run
-# of this file on main completes. Its job publish acts only when that run was for a push to main and passed: make,
-# docker-tests and compare-digests passed for every image. It takes the digest that make made from that run's artifact
-# fp-digest-<base row>, and it pushes nothing unless it makes the image again with that digest. Its header says how it
-# publishes, and what grant lets its token push to this package.
+# images: publish) puts the images on ghcr.io, all in one package, FP_PACKAGE below. GitHub starts it when a run of this
+# file on main completes. Its jobs act only when that run was for a push to main and passed: make, prebuilt,
+# docker-tests and compare-digests passed for every image. Its job publish takes the digest that make made from that
+# run's artifact fp-digest-<base row>, and it pushes nothing unless it makes the image again with that digest. Its jobs
+# remake-prebuilt and publish-prebuilt take the digest that prebuilt made from the artifact prebuilt-digest-<row>.
+# remake-prebuilt, which can only read, makes the image again, with make, and hands it to publish-prebuilt only if it
+# gets that digest. publish-prebuilt, which has packages: write, pushes nothing unless the image that it gets has that
+# digest. Its header says how it publishes, and what grant lets its token push to this package.
 #
 # OS Verify's Legion controller owns a failed run of this workflow on main, and a failed run of
 # toolchain-images-publish.yaml.
 #
-# If a job of this file fails in a run on main, publish does nothing for that run. Fix the cause, and run the
-# failed jobs of that run again: when the run then passes, its completion starts publish. If publish fails,
-# toolchain-images-publish.yaml's header says how to run publish again.
+# If a job of this file fails in a run on main, the jobs of toolchain-images-publish.yaml do nothing for that run. Fix
+# the cause, and run the failed jobs of that run again: when the run then passes, its completion starts them. If one of
+# them fails, toolchain-images-publish.yaml's header says how to run it again.
 #
-# make and docker-tests run code of the pull request: the builder (infra/base-builder), the probes and the tests.
-# They have contents: read and no secret; compare-digests has no permission. GitHub gives docker-tests, a called
-# workflow, no secret unless its caller job passes one, which it does not, and a token with that job's permissions
-# (contents: read) or fewer. No job of this file has packages: write. Only publish has it, in
-# toolchain-images-publish.yaml, which GitHub runs from main's copy alone.
+# make, prebuilt and docker-tests run code of the pull request: the builder (infra/base-builder), the scripts of
+# .github/scripts/frame-pointers and .github/scripts/python-runtime, the fixtures and the tests. They have contents:
+# read and no secret; compare-digests has no permission. GitHub gives docker-tests, a called workflow, no secret unless
+# its caller job passes one, which it does not, and a token with that job's permissions (contents: read) or fewer. No
+# job of this file has packages: write. Only publish and publish-prebuilt have it, in toolchain-images-publish.yaml,
+# which GitHub runs from main's copy alone.
 # This limits only these files: after the grant, a workflow file on any branch of this repository can ask for
 # packages: write and push to the package FP_PACKAGE (toolchain-images-publish.yaml's header).
 
@@ -78,9 +113,13 @@ on:
       # docker-tests' file
       - .github/workflows/frame-pointer-tests.yaml
       - .github/scripts/frame-pointers/**
+      # prebuilt's scripts: make and probe
+      - .github/scripts/python-runtime/**
       - infra/toolchains.tsv
       - infra/base-builder/**
       - tests/fixtures/rust-example/**
+      # the fixture that prebuilt's probe builds
+      - tests/fixtures/python-example/**
   push:
     branches: [main]
     # The same paths as pull_request's.
@@ -89,9 +128,11 @@ on:
       - .github/workflows/toolchain-images-publish.yaml
       - .github/workflows/frame-pointer-tests.yaml
       - .github/scripts/frame-pointers/**
+      - .github/scripts/python-runtime/**
       - infra/toolchains.tsv
       - infra/base-builder/**
       - tests/fixtures/rust-example/**
+      - tests/fixtures/python-example/**
 
 permissions: {}
 
@@ -100,9 +141,10 @@ permissions: {}
 cache-mode: none
 
 env:
-  # These values, the base rows of make's matrix, the image of its registry and the pins of actions/checkout and
-  # actions/download-artifact must stay equal to toolchain-images-publish.yaml's:
-  # test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails if one differs.
+  # These values, the base rows of make's matrix, the rows of prebuilt's matrix, the image of their registry and the
+  # pins of actions/checkout, actions/upload-artifact and actions/download-artifact must stay equal to
+  # toolchain-images-publish.yaml's: test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py)
+  # fails if one differs.
   # frame-pointer-tests.yaml, which docker-tests calls, holds its own copy of the crane values, of the registry image and
   # of the pin of actions/checkout, since a called workflow does not get its caller's env: that test compares its
   # copies too.
@@ -111,8 +153,9 @@ env:
   CRANE_VERSION: v0.22.1
   CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
   CRANE_ARCHIVE: go-containerregistry_Linux_x86_64.tar.gz
-  # The one package on ghcr.io of the frame-pointer images of all three base rows, where publish puts them
-  # (toolchain-images-publish.yaml). A frame-pointer row of infra/toolchains.tsv names an image in it.
+  # The one package on ghcr.io of the frame-pointer images of all three base rows and of the prebuilt images, where
+  # publish and publish-prebuilt put them (toolchain-images-publish.yaml). A frame-pointer row or a prebuilt row of
+  # infra/toolchains.tsv names an image in it.
   FP_PACKAGE: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain
 
 concurrency:
@@ -287,6 +330,185 @@ jobs:
           BASE: ${{ steps.base.outputs.image }}
           FP: ${{ steps.made.outputs.ref }}
         run: .github/scripts/frame-pointers/probe "$BASE_ROW" "$BASE" "$FP"
+
+  # prebuilt: each Python toolchain image with the CPython runtime of its four builds in one more layer (the header).
+  prebuilt:
+    runs-on: ubuntu-24.04
+    # make builds the runtime of the four builds, and the probe builds the fixture eight times, four times with its own
+    # runtime. On a VM of INFRA-5359, the four builds of a Python project took 713 s, 603 s of it for the runtime.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # row: the row of infra/toolchains.tsv that is to name the image, after publish-prebuilt
+        # (toolchain-images-publish.yaml) published it. base: the row of infra/toolchains.tsv to start from.
+        # frame_pointers: 1 to start from the frame-pointer image of base, which make makes too; empty to start from
+        # base's own image.
+        include:
+          - row: oss-fuzz-theorems-2026.10-python-prebuilt
+            base: oss-fuzz-theorems-2026.10-python
+            frame_pointers: ""
+          - row: oss-fuzz-theorems-2026.10-python-frame-pointers-prebuilt
+            base: oss-fuzz-theorems-2026.10-python
+            frame_pointers: "1"
+    services:
+      registry:
+        # make's registry image, pinned by the same digest.
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    env:
+      ROW: ${{ matrix.row }}
+      BASE_ROW: ${{ matrix.base }}
+      FRAME_POINTERS: ${{ matrix.frame_pointers }}
+    steps:
+      # The whole tree: make and the probe build infra/base-builder, and the probe builds tests/fixtures/python-example.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
+      - name: install crane
+        run: |
+          set -euo pipefail
+          curl -fsSL -o "$RUNNER_TEMP/$CRANE_ARCHIVE" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/$CRANE_ARCHIVE"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: the base image, from infra/toolchains.tsv
+        id: base
+        run: |
+          set -euo pipefail
+          image=$(awk -F'\t' -v row="$BASE_ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
+          [[ "$image" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
+            { echo "::error::infra/toolchains.tsv has no row $BASE_ROW with a toolchain digest: '$image'"; exit 1; }
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "name=${image%@*}" >> "$GITHUB_OUTPUT"
+
+      - name: the image to start from, the base image or its frame-pointer image
+        id: start
+        env:
+          BASE: ${{ steps.base.outputs.image }}
+          NAME: ${{ steps.base.outputs.name }}
+        run: |
+          set -euo pipefail
+          case $FRAME_POINTERS in
+            1)
+              # make's frame-pointer image of the base row, made as make makes it: the same digest.
+              ref=$(crane mutate "$BASE" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${NAME#ghcr.io/}:frame-pointers")
+              [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; } ;;
+            "") ref=$BASE ;;
+            *) echo "::error::frame_pointers is 1 or empty, not '$FRAME_POINTERS'"; exit 1 ;;
+          esac
+          echo "start from $ref"
+          echo "image=$ref" >> "$GITHUB_OUTPUT"
+
+      # make prints what it does, and last the line "made <repository>@<digest>".
+      - name: make the image with the prebuilt runtime in the runner's registry
+        id: made
+        env:
+          START: ${{ steps.start.outputs.image }}
+        run: |
+          set -euo pipefail
+          .github/scripts/python-runtime/make "$START" "localhost:5000/${FP_PACKAGE#ghcr.io/}:$ROW" |
+            tee "$RUNNER_TEMP/make.log"
+          last=$(tail -n 1 "$RUNNER_TEMP/make.log")
+          [[ "$last" =~ ^made\ (localhost:5000/[^@]+@sha256:[0-9a-f]{64})$ ]] ||
+            { echo "::error::make's last line names no image of the runner's registry by digest: '$last'"; exit 1; }
+          echo "ref=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: the prebuilt row of infra/toolchains.tsv, if there is one, names this image, and ghcr.io holds it
+        env:
+          MADE: ${{ steps.made.outputs.ref }}
+        run: |
+          set -euo pipefail
+          named=$(awk -F'\t' -v row="$ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
+          if [ -z "$named" ]; then
+            echo "infra/toolchains.tsv has no row $ROW yet: nothing to compare" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          want="$FP_PACKAGE@${MADE#*@}"
+          [ "$named" = "$want" ] ||
+            { echo "::error::infra/toolchains.tsv's row $ROW names $named, but the image made here is $want"; exit 1; }
+          crane manifest "$named" > /dev/null ||
+            { echo "::error::infra/toolchains.tsv's row $ROW names $named, which ghcr.io does not hold: publish it first"; exit 1; }
+          echo "row $ROW names \`$named\`: the image made here, and ghcr.io holds it" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # crane append adds the layer to the manifest and its diff id to the configuration, and changes nothing else that
+      # a build reads. The layer holds nothing outside /opt/oft-py/prebuilt, so each file of the image it starts from
+      # keeps its bytes. The probe below checks what /opt/oft-py/prebuilt holds.
+      - name: the new image is the image it starts from with one more layer, which holds only /opt/oft-py/prebuilt
+        env:
+          START: ${{ steps.start.outputs.image }}
+          NEW: ${{ steps.made.outputs.ref }}
+        run: |
+          set -euo pipefail
+          crane manifest "$START" > "$RUNNER_TEMP/start-manifest.json"
+          crane manifest "$NEW" > "$RUNNER_TEMP/new-manifest.json"
+          jq -e -n --slurpfile b "$RUNNER_TEMP/start-manifest.json" --slurpfile n "$RUNNER_TEMP/new-manifest.json" \
+            '$n[0].layers[:-1] == $b[0].layers and ($n[0].layers | length) == ($b[0].layers | length) + 1
+             and $b[0].mediaType == $n[0].mediaType' > /dev/null ||
+            { echo "::error::the new manifest does not name the layers of $START and then one more"; exit 1; }
+          crane config "$START" > "$RUNNER_TEMP/start-config.json"
+          crane config "$NEW" > "$RUNNER_TEMP/new-config.json"
+          jq -e -n --slurpfile b "$RUNNER_TEMP/start-config.json" --slurpfile n "$RUNNER_TEMP/new-config.json" \
+            '($b[0] | del(.history, .rootfs.diff_ids)) == ($n[0] | del(.history, .rootfs.diff_ids))
+             and $n[0].rootfs.diff_ids[:-1] == $b[0].rootfs.diff_ids
+             and ($n[0].rootfs.diff_ids | length) == ($b[0].rootfs.diff_ids | length) + 1' > /dev/null ||
+            { echo "::error::the new configuration is not the configuration of $START with one more diff id";
+              diff <(jq -S . "$RUNNER_TEMP/start-config.json") <(jq -S . "$RUNNER_TEMP/new-config.json") || true; exit 1; }
+          layer=$(jq -r '.layers[-1].digest' "$RUNNER_TEMP/new-manifest.json")
+          crane blob "${NEW%@*}@$layer" | tar -tzf - | sed -e 's|^\./||' -e 's|/$||' > "$RUNNER_TEMP/layer.txt"
+          entries=$(wc -l < "$RUNNER_TEMP/layer.txt")
+          [ "$entries" -gt 0 ] || { echo "::error::the new layer $layer holds no entry"; exit 1; }
+          outside=$(grep -cvE '^opt/oft-py/prebuilt(/|$)' "$RUNNER_TEMP/layer.txt" || true)
+          [ "$outside" = 0 ] ||
+            { echo "::error::the new layer $layer holds ${outside:-some} entries outside /opt/oft-py/prebuilt:";
+              grep -vE '^opt/oft-py/prebuilt(/|$)' "$RUNNER_TEMP/layer.txt" || true; exit 1; }
+          {
+            echo "### $ROW"
+            echo
+            echo "- base: \`$BASE_ROW\`$([ "$FRAME_POINTERS" != 1 ] || echo ", its frame-pointer image")"
+            echo "- started from: \`$START\`"
+            echo "- made: \`${NEW#*@}\`, with one more layer, \`$layer\`: $entries entries, each under /opt/oft-py/prebuilt"
+            echo
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # This job's registry ends with the job. When ghcr.io does not hold the image, remake-prebuilt
+      # (toolchain-images-publish.yaml) makes it again, and hands it to publish-prebuilt only if its digest is this one,
+      # and publish-prebuilt copies it to ghcr.io only if its digest is this one. A matrix job keeps one value of each
+      # output, so each image's digest is an artifact of its own.
+      - name: the digest, for remake-prebuilt and publish-prebuilt
+        env:
+          MADE: ${{ steps.made.outputs.ref }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/prebuilt-digest"
+          echo "${MADE#*@}" > "$RUNNER_TEMP/prebuilt-digest/$ROW.digest"
+          echo "$ROW: ${MADE#*@}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (sha-pinned)
+        with:
+          name: prebuilt-digest-${{ matrix.row }}
+          path: ${{ runner.temp }}/prebuilt-digest/${{ matrix.row }}.digest
+          if-no-files-found: error
+          # GitHub runs the jobs of a run again for up to 30 days: a rerun of remake-prebuilt or publish-prebuilt
+          # (toolchain-images-publish.yaml) reads this.
+          retention-days: 30
+          # A rerun of the job replaces the artifact of its run.
+          overwrite: true
+
+      # The probe reads the image that this job made and checked, from this job's registry: the image of the digest
+      # above.
+      - name: the probe, on the image it starts from and on the new image
+        env:
+          START: ${{ steps.start.outputs.image }}
+          NEW: ${{ steps.made.outputs.ref }}
+        run: .github/scripts/python-runtime/probe "$START" "$NEW"
 
   # frame-pointer-tests.yaml's job docker-tests. It starts beside make: it makes the C and C++ image and the Rust image
   # itself, from the same base rows with the same crane mutate, and keeps the digest of each image that it tested in

@@ -91,9 +91,11 @@ oft_write_cc_shim() {
   } > "$1"
 }
 
-# ov_release_layout <target> [<dependency> ...]: the release layout for a target and its dependencies, and the
-# compiler shims that rewrite paths into it. With OV_PATH_REWRITE=off, the shims rewrite no path (above).
-ov_release_layout() {
+# ov_release_variables <target> [<dependency> ...]: the variables of the release layout for a target and its
+# dependencies, from which ov_release_shims writes the compiler shims: OFT_REL_FLAGS, OFT_REL_CASES, OFT_ARCH_PIN,
+# OFT_SYSROOT_FLAG and SHIM; and the neutral names under /src (ov_neutral). With OV_PATH_REWRITE=off, the shims rewrite
+# no path (above).
+ov_release_variables() {
   if [ -n "${OV_PATH_REWRITE+x}" ] && [ "$OV_PATH_REWRITE" != off ]; then
     echo "ov_release_layout: OV_PATH_REWRITE must be off or unset, not '$OV_PATH_REWRITE'" >&2; exit 1
   fi
@@ -145,18 +147,31 @@ while [ "$i" -lt "$n" ]; do
   i=$((i+1))
 done'
   fi
-  oft_write_cc_shim "$SHIM/$CHOST-clang-plain" \
+}
+
+# ov_release_shims <directory>: the four compiler shims of the release layout, in <directory>, from the variables
+# that ov_release_variables set. ov_release_layout writes them in $SHIM. python/runtime.sh writes them again in a
+# directory of its own, from the layout's own targets, to check that the shims in $SHIM are these.
+ov_release_shims() {
+  oft_write_cc_shim "$1/$CHOST-clang-plain" \
     'clang --config=/opt/asan-static/musl.cfg'
-  oft_write_cc_shim "$SHIM/$CHOST-clang++-plain" \
+  oft_write_cc_shim "$1/$CHOST-clang++-plain" \
     'clang++ --config=/opt/asan-static/musl.cfg -stdlib=libc++'
+  oft_write_cc_shim "$1/$CHOST-clang-sealed" \
+    'clang --config=/tmp/asan-musl-sealed-noiconv.cfg' " $SHIM/oft-nogc-discard.ld"
+  oft_write_cc_shim "$1/$CHOST-clang++-sealed" \
+    'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
+  chmod +x "$1/$CHOST-clang-plain" "$1/$CHOST-clang-sealed" \
+           "$1/$CHOST-clang++-plain" "$1/$CHOST-clang++-sealed"
+}
+
+# ov_release_layout <target> [<dependency> ...]: the release layout for a target and its dependencies, and the
+# compiler shims that rewrite paths into it. With OV_PATH_REWRITE=off, the shims rewrite no path (above).
+ov_release_layout() {
+  ov_release_variables "$@"
+  ov_release_shims "$SHIM"
   printf 'SECTIONS { /DISCARD/ : { *(.data.rel.ro.__interception_extract_*) } } INSERT AFTER .text;\n' \
     > "$SHIM/oft-nogc-discard.ld"
-  oft_write_cc_shim "$SHIM/$CHOST-clang-sealed" \
-    'clang --config=/tmp/asan-musl-sealed-noiconv.cfg' " $SHIM/oft-nogc-discard.ld"
-  oft_write_cc_shim "$SHIM/$CHOST-clang++-sealed" \
-    'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
-  chmod +x "$SHIM/$CHOST-clang-plain" "$SHIM/$CHOST-clang-sealed" \
-           "$SHIM/$CHOST-clang++-plain" "$SHIM/$CHOST-clang++-sealed"
   # When compile records the build (OV_RECORDS, oss-verify check --checks): a front before each shim, which records each
   # compile (record-compile). Without records the shims are the release's, as written above.
   if [ -n "${OV_RECORDS:-}" ]; then

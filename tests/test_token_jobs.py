@@ -50,12 +50,19 @@ SRC_PATH = re.compile(r"\b(?:PYTHONPATH|sys\.path)\b.*\bsrc\b")
 SCRIPT = re.compile(r"\.github/scripts/([A-Za-z0-9._/-]+)")
 MODULE = re.compile(r"-m\s+([A-Za-z_][\w.]*)|^\s*from\s+([A-Za-z_][\w.]*)\s+import\b|^\s*import\s+([A-Za-z_][\w.]*)",
                     re.M)
-# The jobs that hold a token today, and the jobs they need: the test checks at least these.
+# The jobs that hold a token today, and the jobs they need: the test checks at least these. publish-prebuilt, which
+# holds packages: write, needs remake-prebuilt, which runs .github/scripts/python-runtime/make, which builds the runtime
+# with docker: publish-prebuilt pushes the image of remake-prebuilt's artifact.
 HOLDERS = {("enroll-dispatch.yml", "dispatch"), ("held-runs.yml", "held-runs"), ("review.yml", "screen"),
            ("review.yml", "review"), ("review.yml", "hold"), ("review.yml", "comment"), ("review.yml", "triage"),
-           ("toolchain-images-publish.yaml", "publish")}
+           ("toolchain-images-publish.yaml", "publish"), ("toolchain-images-publish.yaml", "publish-prebuilt")}
 FEEDERS = {("enroll-dispatch.yml", "decide"), ("review.yml", "route"), ("review.yml", "gather"),
-           ("review.yml", "triage-gather")}
+           ("review.yml", "triage-gather"), ("toolchain-images-publish.yaml", "remake-prebuilt")}
+# publish-prebuilt and remake-prebuilt, each by its file and its name.
+PUBLISH_PREBUILT = ("toolchain-images-publish.yaml", "publish-prebuilt")
+REMAKE_PREBUILT = ("toolchain-images-publish.yaml", "remake-prebuilt")
+# A step that runs make, as remake-prebuilt's make step runs it.
+MAKE_STEP = {"name": "make", "run": '.github/scripts/python-runtime/make "$START" "localhost:5000/x:$ROW"'}
 
 
 def read_file(path):
@@ -245,12 +252,18 @@ def test_no_job_that_holds_a_token_or_feeds_one_loads_code_from_src():
     assert audit().problems == []
 
 
+def files_run(workflows=None):
+    """{(file, job): the files of .github/scripts that the job runs, by their paths under it} of each job that the
+    audit checks."""
+    return {key: {str(path.relative_to(SCRIPTS)) for path in paths} for key, paths in audit(workflows).files.items()}
+
+
 def test_it_checks_the_jobs_that_hold_a_token_and_those_they_need_and_the_files_they_run():
     done = audit()
     assert HOLDERS | FEEDERS <= set(done.files)
     # No token: validate.yaml's validate runs src/'s oss-verify validate, the check enrollment, as a user does.
     assert ("validate.yaml", "validate") not in done.files
-    relative = {key: {str(path.relative_to(SCRIPTS)) for path in paths} for key, paths in done.files.items()}
+    relative = files_run()
     rules = {"validate_rules/__init__.py", "validate_rules/validate.py", "validate_rules/check_build.py"}
     assert {"review-gather", "triage.py"} | rules <= relative[("review.yml", "gather")]
     assert {"triage.py"} | rules <= relative[("review.yml", "triage-gather")]
@@ -260,6 +273,62 @@ def test_it_checks_the_jobs_that_hold_a_token_and_those_they_need_and_the_files_
     # review-neutralize so; review-verdict loads it by with_name("review-neutralize").
     assert {"review-hold", "review-held", "review-neutralize"} <= relative[("review.yml", "hold")]
     assert {"review-verdict", "review-neutralize"} <= relative[("review.yml", "comment")]
+    # remake-prebuilt runs .github/scripts/python-runtime/make, which runs layer.py beside it. publish-prebuilt, which
+    # holds packages: write, runs no file of .github/scripts.
+    assert {"python-runtime/make", "python-runtime/layer.py"} <= relative[REMAKE_PREBUILT]
+    assert relative[PUBLISH_PREBUILT] == set()
+
+
+def test_control_make_back_in_publish_prebuilt():
+    # A step of publish-prebuilt that runs make, as before remake-prebuilt: the audit follows make and layer.py from it,
+    # so the assertion that publish-prebuilt runs no file of .github/scripts fails.
+    workflows = read_workflows()
+    workflows[PUBLISH_PREBUILT[0]]["jobs"][PUBLISH_PREBUILT[1]]["steps"].append(dict(MAKE_STEP))
+    assert {"python-runtime/make", "python-runtime/layer.py"} <= files_run(workflows)[PUBLISH_PREBUILT]
+
+
+def test_control_a_make_that_runs_the_package_fails_remake_prebuilt():
+    # make as a script that runs oss-verify check of src/. remake-prebuilt runs it, and publish-prebuilt, which holds a
+    # token, needs it; prebuilt of toolchain-images.yaml runs it too, but holds no token and feeds none.
+    make = SCRIPTS / "python-runtime" / "make"
+
+    def read(path):
+        return "#!/usr/bin/env bash\nuv run oss-verify check projects/x\n" if path == make else read_file(path)
+    problems = audit(read=read).problems
+    assert {problem.split(" (")[0] for problem in problems} == {"toolchain-images-publish.yaml: remake-prebuilt"}, \
+        problems
+    assert all(problem.startswith("toolchain-images-publish.yaml: remake-prebuilt (publish-prebuilt needs it): ")
+               and problem.endswith("python-runtime/make: runs the package: uv run") for problem in problems), problems
+
+
+def test_control_a_make_that_runs_the_package_fails_publish_prebuilt_when_it_runs_make():
+    # The same make, with make back in publish-prebuilt: the audit names publish-prebuilt, for its own token, too.
+    make = SCRIPTS / "python-runtime" / "make"
+
+    def read(path):
+        return "#!/usr/bin/env bash\nuv run oss-verify check projects/x\n" if path == make else read_file(path)
+    workflows = read_workflows()
+    workflows[PUBLISH_PREBUILT[0]]["jobs"][PUBLISH_PREBUILT[1]]["steps"].append(dict(MAKE_STEP))
+    problems = audit(workflows, read=read).problems
+    assert {problem.split(" (")[0] for problem in problems} == {"toolchain-images-publish.yaml: remake-prebuilt",
+                                                                 "toolchain-images-publish.yaml: publish-prebuilt"}, \
+        problems
+    assert ("toolchain-images-publish.yaml: publish-prebuilt (holds a token: packages: write): step make >"
+            " python-runtime/make: runs the package: uv run") in problems, problems
+
+
+def test_control_a_layer_py_that_imports_oss_verify_fails_remake_prebuilt():
+    # make runs "$here/layer.py", the file beside it: the audit follows it from make.
+    layer = SCRIPTS / "python-runtime" / "layer.py"
+
+    def read(path):
+        text = read_file(path)
+        return text + "\nimport oss_verify\n" if path == layer else text
+    problems = audit(read=read).problems
+    assert {problem.split(" (")[0] for problem in problems} == {"toolchain-images-publish.yaml: remake-prebuilt"}, \
+        problems
+    assert all(problem.endswith("make > python-runtime/layer.py: runs the package: import oss_verify")
+               for problem in problems), problems
 
 
 def test_control_main_decide_job_with_src_fails():
