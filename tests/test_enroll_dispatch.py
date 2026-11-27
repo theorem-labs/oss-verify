@@ -624,6 +624,21 @@ class ThePullRequest(unittest.TestCase):
                 got = world.decide()
                 self.assertEqual((got["decision"], decision_reason(got)), ("none", said))
 
+    def test_a_record_nested_too_deep_for_json_sends_nothing_and_raises_nothing(self):
+        """json raises RecursionError, not ValueError, for a record.json nested too deep. 100 KB of brackets is far
+        under MAX_ARTIFACT_BYTES, and the pull request's own build.yaml can upload it. build_record gives None and that
+        error, and decide the decision none."""
+        for text in ("[" * 100_000, '{"a": ' * 100_000):
+            with self.subTest(text=text[:6]):
+                world = World()
+                world.artifacts[101] = zipped({"record.json": text})
+                rec, why = dispatch.build_record(world.api(), REPO, 101)
+                self.assertIsNone(rec)
+                self.assertTrue(why.startswith("Build run 101's enrollment-record cannot be read: maximum recursion "
+                                               "depth exceeded"), why)
+                got = world.decide()
+                self.assertEqual((got["decision"], decision_reason(got)), ("none", why))
+
     def test_the_reason_is_one_line(self):
         world = World()
         world.files = [{"filename": "a\nb\n::error::x", "status": "added"}]
@@ -2643,6 +2658,19 @@ class ReviewPassed(unittest.TestCase):
                     self.assertIn(f"review-passed comes off: pull request {PR} is closed", out["reason"])
                     self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
                     self.assertLabels(line, [])
+
+    def test_au_a_new_head_whose_record_is_nested_too_deep_loses_the_label(self):
+        # The new head's Build run uploads a record.json nested too deep for json. decide gives the decision none, as
+        # for a record.json that is not JSON, and does not stop before review_passed takes the label off.
+        line = self.labelled()
+        line.push(self.B)
+        world = line.world(self.B)
+        world.artifacts[101] = zipped({"record.json": "[" * 100_000})
+        out = line.run_decide(world, 104, "")
+        self.assertEqual((out["decision"], out["review_passed"], out["review_passed_at"]), ("none", "off", "head"),
+                         out["reason"])
+        self.assertEqual(self.job(line, out), [CHECK, TAKE_OFF])
+        self.assertLabels(line, [])
 
 
 class BeforeTheMove(unittest.TestCase):
