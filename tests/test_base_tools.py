@@ -37,7 +37,8 @@ runs a step with no shell:. A stand-in gh answers the compare API with the statu
 
 test_binary_sizes runs the build step of build.yaml with a stand-in oss-verify check and binary-sizes. When oss-verify
 check passes and a run of binary-sizes fails, the step writes a warning and a summary sentence with the exit status.
-It writes no output of binary-sizes, and its exit status does not change.
+It writes no output of binary-sizes, and its exit status does not change. test_binary_sizes_of_a_program runs the real
+binary-sizes on the work directory of a whole program: it gives the sizes of out/<name>/<name>, as of a fuzz target.
 
 The tests read the repository's .github/workflows. Two cases, the_step_checks_out_the_first_parent and binary_sizes,
 read a directory that a caller gives, so a control can run them on a changed copy. A control (its name starts with
@@ -62,6 +63,8 @@ import textwrap
 
 import pytest
 
+from oss_verify import manifest
+from test_manifest import PT_LOAD, elf
 from test_outside_screen import evaluate
 from test_take_project import git, isolated_git_env
 from test_trigger_move import action_of, as_text, env_of, outputs, parse, render
@@ -762,6 +765,29 @@ def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
 @pytest.mark.parametrize("case", list(BINARY_SIZES))
 def test_binary_sizes(tmp_path, case):
     binary_sizes(tmp_path, case)
+
+
+def test_binary_sizes_of_a_program(tmp_path):
+    # The manifest of a program, as oss-verify check writes it: the target hello, marked kind: program, whose one build
+    # plain is the file out/hello/hello, with a link map beside it.
+    work = tmp_path / "work"
+    program = work / "out" / "hello" / "hello"
+    program.parent.mkdir(parents=True)
+    program.write_bytes(elf(sections=[(".text", 100)], segments=[(PT_LOAD, 5, 3000)]))
+    (program.parent / "hello.map").write_text("the link map of hello\n")
+    entries = {"hello": {"plain": {"file": "hello", "bytes": program.stat().st_size,
+                                   "sha256": manifest.sha256_of(program)}}}
+    data = manifest.manifest(
+        project="hello", repo="https://example.invalid/hello", ref="", commit="0" * 40, oss_verify=None,
+        builder={"toolchain": "example.invalid/toolchain@sha256:" + "0" * 64}, sources={}, builds=["plain"],
+        targets=["hello"], entries=entries, layouts={"hello": {"plain": manifest.binary_layout(program)}},
+        programs=["hello"],
+        link_maps=manifest.link_maps(work / "out", [{"file": "hello", "sha256": "0" * 64, "link_map": "hello.map"}]))
+    manifest.write_manifest(work / "manifest.yaml", data)
+    assert data["targets"]["hello"]["kind"] == "program"
+    done = subprocess.run([str(ROOT / ".github" / "scripts" / "binary-sizes"), str(work)], capture_output=True,
+                          text=True, env={**os.environ, "PYTHONPATH": str(ROOT / "src")}, stdin=subprocess.DEVNULL)
+    assert (done.returncode, done.stdout, done.stderr) == (0, '{"hello":{"plain":{"exec":3000,"text":100}}}\n', "")
 
 
 def test_control_a_step_that_checks_out_the_second_parent(tmp_path, scratch):

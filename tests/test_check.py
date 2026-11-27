@@ -98,6 +98,33 @@ class TestRebuild:
         assert differences == ["demo_fuzzer.ubsan: in the lock, not in this build",
                                "other_fuzzer.plain: in this build, not in the lock"]
 
+    def test_a_program_and_its_link_map_are_compared(self):
+        program = {"hello": {"plain": {"file": "hello", "bytes": 900, "sha256": "1" * 64}}}
+        first_map = {"hello": {"file": "hello.map", "bytes": 40, "sha256": "2" * 64}}
+
+        def block(second_map):
+            return manifest.rebuild(program, program, ["hello"], host="host", at="2026-11-27T00:00:00Z",
+                                    builder={"toolchain": TOOLCHAIN}, builds=["plain"], programs=["hello"],
+                                    link_maps=(first_map, second_map))
+
+        same, differences, matched = block({"hello": dict(first_map["hello"])})
+        assert (same["result"], differences, matched) == ("identical", [], 1)
+        assert same["targets"] == {"hello": {"kind": "program", "builds": program["hello"],
+                                             "link_map": first_map["hello"]}}
+        # The second build's link map has other bytes: its own SHA-256 is recorded, and the difference names it.
+        other = {"hello": {"file": "hello.map", "bytes": 41, "sha256": "3" * 64}}
+        changed, differences, matched = block(other)
+        assert (changed["result"], matched) == ("differs", 1)
+        assert len(differences) == 1
+        assert "hello" in differences[0] and "the link map hello.map" in differences[0]
+        assert "3" * 64 in differences[0] and "2" * 64 in differences[0]
+        assert changed["targets"]["hello"]["link_map"] == other["hello"]
+        # The second build has no link map: that differs too, and the block's entry has no link_map key.
+        missing, differences, _ = block({})
+        assert missing["result"] == "differs"
+        assert len(differences) == 1 and "the link map hello.map" in differences[0]
+        assert missing["targets"] == {"hello": {"kind": "program", "builds": program["hello"]}}
+
 
 class Project:
     """A project to give oss-verify check, whose builds are replaced."""
