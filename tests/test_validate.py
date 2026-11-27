@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for oss-verify validate:  uv run pytest"""
 import contextlib
+import functools
 import io
 import os
 import pathlib
@@ -675,6 +676,122 @@ class TestProblems:
             os.symlink(directory, link)
             problems, _, _ = validate.check_project(link)
             assert any("projects/linked is one" in problem for problem in problems), problems
+
+
+# The hostile spellings of TestHostileYaml: YAML text that a small project.yaml can give at any place. The largest
+# project.yaml of the test has 28,227 bytes. LONG_TEXT is a string of 20,000 characters. HUGE_INT is 4,000 hex digits:
+# an integer of 16,000 bits. Python gives no integer of more than 4,300 decimal digits as text, so its repr() raises.
+# UNKNOWN_KEYS is a mapping of 200 unknown keys.
+LONG_TEXT = "x" * 20000
+HUGE_INT = "0x" + "f" * 4000
+UNKNOWN_KEYS = "{" + ", ".join(f"k{number}: 1" for number in range(200)) + "}"
+# An address of 20,000 characters on a domain reserved for examples. It is valid, and it makes a warning.
+LONG_ADDRESS = "x" * (20000 - len("@example.com")) + "@example.com"
+
+
+def repeated(text):
+    """A YAML flow list of `text` and 2,000 aliases of it."""
+    return f"[&e {text}" + ", *e" * 2000 + "]"
+
+
+def flow(*entries):
+    """A YAML flow mapping of these entries. Each entry is two YAML texts: a key and a value."""
+    return "{" + ", ".join(f"? {key} : {value}" for key, value in entries) + "}"
+
+
+def with_field(field, value):
+    """MINIMAL's project.yaml with `field` set to `value`, YAML text."""
+    if field in validate.REQUIRED_KEYS:
+        return re.sub(rf"^{field}: .*$", lambda _: f"{field}: {value}", MINIMAL, flags=re.M)
+    return MINIMAL + f"{field}: {value}\n"
+
+
+def in_field(field, *entries):
+    """MINIMAL's project.yaml with `field` set to a flow mapping of these entries."""
+    return with_field(field, flow(*entries))
+
+
+# Each spelling in each form that it has: "value", the value of a field; "entry", an entry of a mapping (its key and its
+# value); "addresses", the addresses of a valid auto_ccs. A list is not a mapping key (PyYAML refuses it), and a mapping
+# holds a key once (the aliases of one key in it give one entry). Thus a nested alias and a repeated alias have no entry
+# form. An address is a string. Thus only a long string and a repeated alias have an addresses form.
+HOSTILE_SPELLINGS = {
+    # 4,782,969 strings, 25 MB as text, in 303 bytes of YAML.
+    "a nested alias": {"value": nested_list(6)},
+    # Each {<<: *e} makes a new mapping of the 200 keys. A check of the object's id() does not join them.
+    "a merge key": {"value": f"[&e {UNKNOWN_KEYS}" + ", {<<: *e}" * 99 + "]", "entry": ("<<", UNKNOWN_KEYS)},
+    "an integer key": {"value": flow((HUGE_INT, "1")), "entry": (HUGE_INT, "1")},
+    "a long string": {"value": LONG_TEXT, "entry": (LONG_TEXT, "1"), "addresses": f"[{LONG_ADDRESS}]"},
+    "a repeated alias": {"value": repeated(LONG_TEXT), "addresses": repeated(LONG_ADDRESS)},
+}
+# Each place: the form of a spelling that it takes, and a function from that form to a project.yaml.
+HOSTILE_PLACES = {
+    **{field: ("value", functools.partial(with_field, field)) for field in validate.ALLOWED_KEYS},
+    "an unknown field": ("value", functools.partial(with_field, "unknown")),
+    "budgets.halts": ("value", lambda value: in_field("budgets", ("halts", value))),
+    "budgets.agrees": ("value", lambda value: in_field("budgets", ("agrees", value))),
+    "budgets.agrees.address": ("value", lambda value: in_field("budgets", ("agrees", flow(("address", value))))),
+    "proofs.repo": ("value", lambda value: in_field("proofs", ("repo", value))),
+    "proofs.path": ("value", lambda value: in_field("proofs", ("path", value))),
+    "ubsan_checks.add": ("value", lambda value: in_field("ubsan_checks", ("add", value), ("reason", "x"))),
+    "ubsan_checks.remove": ("value", lambda value: in_field("ubsan_checks", ("remove", value), ("reason", "x"))),
+    "ubsan_checks.reason": ("value", lambda value: in_field("ubsan_checks", ("add", "[alignment]"), ("reason", value))),
+    "an entry of programs": ("value", programs),
+    "the file of a program": ("value", lambda value: programs(flow(("file", value), ("sha256", PIN)))),
+    "the sha256 of a program": ("value", lambda value: programs(flow(("file", "hello"), ("sha256", value)))),
+    "the link_map of a program": (
+        "value", lambda value: programs(flow(("file", "hello"), ("sha256", PIN), ("link_map", value)))),
+    "a key of the top level": ("entry", lambda entry: MINIMAL + "? {}\n: {}\n".format(*entry)),
+    "a key of budgets": ("entry", lambda entry: in_field("budgets", entry)),
+    "a key of budgets.agrees": ("entry", lambda entry: in_field("budgets", ("agrees", flow(entry)))),
+    "a key of proofs": ("entry", lambda entry: in_field("proofs", entry)),
+    "a key of ubsan_checks": ("entry", lambda entry: in_field("ubsan_checks", ("add", "[alignment]"), ("reason", "x"),
+                                                               entry)),
+    "a key of a program": ("entry", lambda entry: programs(flow(("file", "hello"), ("sha256", PIN), entry))),
+    # A project.yaml that is valid otherwise: it has no problem, and its addresses make warnings.
+    "auto_ccs of a valid project": ("addresses", functools.partial(with_field, "auto_ccs")),
+}
+HOSTILE_CASES = [(spelling, place) for spelling, forms in HOSTILE_SPELLINGS.items()
+                 for place, (form, _) in HOSTILE_PLACES.items() if form in forms]
+
+
+class TestHostileYaml:
+    """Any YAML spelling at any field of project.yaml gives bounded work and output. Through aliases and merge keys, a
+    small project.yaml can give a large value, or one value at many places. A mapping key can be an integer whose repr()
+    raises. For each spelling at each place, validate raises no exception. It gives at most 101 problems and at most
+    101 warnings: 100, then one line that says that more are not shown. Each line has at most 1,000 characters, and all
+    the lines together have at most 101,000. validate takes at most 2.25 MiB at the peak."""
+
+    MAX_LINES = 101
+    # A line that quotes 200 characters of a value has fewer than 500.
+    MAX_LINE = 1000
+    MAX_CHARACTERS = MAX_LINES * MAX_LINE
+    # Measured with Python 3.12 and PyYAML 6.0.3: yaml.safe_load of these project.yaml files alone takes at most
+    # 1.11 MiB at the peak (a merge key as a value: 99 new mappings of 200 keys), and at most 0.26 MiB for each other
+    # spelling. The bound is about twice the most.
+    MAX_PEAK = int(2.25 * 2**20)
+
+    @pytest.mark.parametrize("spelling, place", HOSTILE_CASES,
+                             ids=[f"{spelling} at {place}" for spelling, place in HOSTILE_CASES])
+    def test_any_spelling_at_any_place_is_bounded(self, spelling, place):
+        form, build = HOSTILE_PLACES[place]
+        text = build(HOSTILE_SPELLINGS[spelling][form])
+        tracemalloc.start()
+        try:
+            problems, warnings, _ = check(text)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        if form == "addresses":
+            # validate gives warnings only for a valid project.yaml. With a problem, this row would not test them.
+            assert problems == [], problems
+        assert len(problems) <= self.MAX_LINES, f"{len(problems):,} problems"
+        assert len(warnings) <= self.MAX_LINES, f"{len(warnings):,} warnings"
+        longest = max((len(line) for line in problems + warnings), default=0)
+        assert longest <= self.MAX_LINE, f"a line of {longest:,} characters"
+        characters = sum(len(line) for line in problems + warnings)
+        assert characters <= self.MAX_CHARACTERS, f"{characters:,} characters of problems and warnings"
+        assert peak <= self.MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text):,} bytes of YAML"
 
 
 class TestOutput:
