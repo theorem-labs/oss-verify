@@ -58,10 +58,11 @@ class Check:
 # --- Reading C and C++ ---------------------------------------------------------------------------------------------
 
 
-def blank(text):
+def blank(text, directives=None):
     """Return (code, comments): `text` with each comment, string literal, character literal, preprocessor line and
     `#if 0` block replaced by spaces (newlines kept, so offsets and lines stay), and the (start, end) offsets of each
-    comment."""
+    comment. A comment in a directive is not one of them. If `directives` is a list, each directive's (start, text
+    without its comments) is added to it."""
     code = list(text)
     comments = []
     n = len(text)
@@ -78,6 +79,37 @@ def blank(text):
             j += 1
         return j
 
+    def directive(start):
+        """The end of the directive at `start`, and its text with each comment in it replaced by spaces. Comments go
+        before directives (translation phases 3 and 4): a /* that a directive line opens takes the directive on to the
+        line of its */, and an abort() in a comment is not in the directive."""
+        j, spans, last = start, [], [-1, -1]  # last: see separator(), so 1'1'1'1 is read once here too
+        while j < n and not (text[j] == "\n" and text[j - 1] != "\\" and text[j - 2:j] != "\\\r"):
+            if text.startswith("/*", j):
+                k = text.find("*/", j + 2)
+                k = n if k < 0 else k + 2
+            elif text.startswith("//", j):
+                k = directive_end(j)
+            # A /* in a literal opens no comment.
+            elif text[j] == '"' or (text[j] == "'" and not separator(text, j, last)):
+                k = j + 1
+                while k < n and text[k] not in (text[j], "\n"):
+                    k += 2 if text[k] == "\\" else 1
+                k = min(k, n)  # a backslash that ends the text escapes nothing after it
+                j = k + 1 if k < n and text[k] == text[j] else k
+                continue
+            else:
+                j += 1
+                continue
+            spans.append((j, k))
+            j = k
+        body = list(text[start:j])
+        for first, end in spans:
+            for k in range(first - start, end - start):
+                if body[k] != "\n":
+                    body[k] = " "
+        return j, "".join(body)
+
     i, line_start, skipping = 0, True, 0
     quote = [-1, -1]  # the last `'` read as code, and where the number it may be in starts: see separator()
     while i < n:
@@ -90,8 +122,10 @@ def blank(text):
             i += 1
             continue
         if line_start and c == "#":
-            j = directive_end(i)
-            word = re.match(r"#\s*(\w*)\s*(\S*)", text[i:j])
+            j, body = directive(i)
+            if directives is not None:
+                directives.append((i, body))
+            word = re.match(r"#\s*(\w*)\s*(\S*)", body)
             if skipping:
                 skipping += {"if": 1, "ifdef": 1, "ifndef": 1, "endif": -1}.get(word[1], 0)
                 if skipping == 1 and word[1] in ("else", "elif"):
@@ -376,7 +410,8 @@ def parse_records(lines, check):
 def find_checks(text, path=""):
     """The abort() calls of a C or C++ source: [Check], in the order of their lines. `path` names the file in them.
     Give the text decoded as latin-1, so that a column counts bytes, as llvm-cov's do."""
-    code, comments = blank(text)
+    directives = []
+    code, comments = blank(text, directives)
     starts = [0] + [k + 1 for k, c in enumerate(text) if c == "\n"]
 
     def line_of(offset):
@@ -440,14 +475,12 @@ def find_checks(text, path=""):
             check.note = ("no condition in its function guards this abort(), so no seed that passes reaches it: "
                           "write `if (!condition) abort();`")
         checks.append(check)
-    directive = False  # inside a preprocessor directive, which a line that ends in \ continues
-    for number, raw in enumerate(source_lines, 1):
-        in_directive = directive or raw.lstrip().startswith("#")
-        directive = in_directive and raw.rstrip("\r").endswith("\\")
-        if in_directive and ABORT.search(raw):
-            checks.append(Check(number, None, path=path, text=raw.strip(),
-                                note="an abort() in a macro is not read as a property check: write "
-                                     "`if (!condition) abort();` where the check is"))
+    for start, body in directives:
+        for number, part in enumerate(body.split("\n"), line_of(start)):
+            if ABORT.search(part):
+                checks.append(Check(number, None, path=path, text=source_lines[number - 1].strip(),
+                                    note="an abort() in a macro is not read as a property check: write "
+                                         "`if (!condition) abort();` where the check is"))
     return sorted(checks, key=lambda check: check.line)
 
 

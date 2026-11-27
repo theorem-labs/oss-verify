@@ -176,6 +176,11 @@ class Speed(unittest.TestCase):
             self.assertEqual(len(found), 4096)
             self.assertEqual({(check.guard, check.note) for check in found}, {((2, 262146), None)})
 
+    def test_a_directive_with_many_digit_separators_is_read_in_linear_time(self):
+        """A directive's separators are read as the code's are: the number is read once, not once for each `'`."""
+        (found,) = self.timed("#if X == " + "1'" * 32768 + "1\n#endif\nvoid f(int x) {\n  if (x) abort();\n}\n")
+        self.assertEqual((found.line, found.guard, found.note), (4, (4, 4), None))
+
     def test_the_checks_on_one_long_line_share_its_text(self):
         """The text of a line is found once, however many checks are on it. A copy for each check took memory that
         grew with the square of the line: 8,192 checks on one line of 172 KB held 1.4 GB of copies."""
@@ -199,6 +204,38 @@ class Macros(unittest.TestCase):
         (found,) = check_records.find_checks(source)
         self.assertEqual(found.line, 2)
         self.assertIn("macro", found.note)
+
+    def test_an_abort_in_a_comment_on_a_directive_line_is_not_noted(self):
+        """Comments go before directives: an abort() in a comment on a directive line is in no macro."""
+        for comment in ("// for abort()", "/* for abort() */", "/* for\n   abort() */"):
+            source = "#include <stdlib.h>  " + comment + "\nvoid f(int x) {\n  if (x) abort();\n}\n"
+            (found,) = check_records.find_checks(source)
+            self.assertEqual((found.line, found.note), (source.count("\n") - 1, None), repr(comment))
+
+    def test_a_comment_that_a_directive_line_opens_is_not_code(self):
+        """A /* on a directive line runs on to its */: the lines up to it are the comment, not code."""
+        source = "#include <stdlib.h> /* for\n   abort() */\nvoid f(int x) {\n  if (x) abort();\n}\n"
+        code, _ = check_records.blank(source)
+        self.assertEqual(code.count("abort"), 1)
+        self.assertEqual([(found.line, found.guard) for found in check_records.find_checks(source)], [(4, (4, 4))])
+
+    def test_a_comment_mark_in_a_directive_literal_opens_no_comment(self):
+        source = '#define S "/*"\n#define T abort()\nint x = 1\'000; /* */\n'
+        self.assertEqual([found.line for found in check_records.find_checks(source)], [2])
+        source = "#if N == 1'000 // abort()\n#endif\n"
+        self.assertEqual(check_records.find_checks(source), [])
+
+    def test_a_comment_in_an_if_directive_does_not_mask_it(self):
+        """#if 0 with comments inside or after it is recognized as #if 0, skipping enclosed checks."""
+        source = "#if 0/* comment */\nvoid f() { abort(); }\n#endif\n"
+        self.assertEqual(check_records.find_checks(source), [])
+        source = "#if/* comment */0\nvoid f() { abort(); }\n#endif\n"
+        self.assertEqual(check_records.find_checks(source), [])
+
+    def test_a_multiline_comment_in_a_directive_keeps_line_numbers(self):
+        source = "#define M /* line 1\n line 2\n line 3 */ 1\nvoid f(int x) {\n  if (x) abort();\n}\n"
+        (found,) = check_records.find_checks(source)
+        self.assertEqual(found.line, 5)
 
 
 if __name__ == "__main__":
