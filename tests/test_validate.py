@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tracemalloc
 import zipfile
 
 import pytest
@@ -554,6 +555,23 @@ class TestProblems:
         assert summary is None
         assert sum(len(problem) for problem in problems) < 2000
         assert any(f"'{'x' * 200}'..." in problem for problem in problems), problems
+
+    @pytest.mark.parametrize("key", ["add", "remove"])
+    def test_a_ubsan_item_that_aliases_make_a_large_list(self, key):
+        """An item of ubsan_checks.add or remove that is not a string is refused by its type, and validate never turns
+        it into text. Through aliases, the item here, 257 bytes of YAML, holds 531,441 strings, 2.8 MB as text, and
+        each level of about 56 bytes more is 9 times as much: str() of such items made oss-verify validate take 2.3 s
+        and 192 MiB for a project.yaml of 600 bytes."""
+        text = MINIMAL + f"ubsan_checks: {{{key}: [{nested_list(5)}], reason: x}}\n"
+        tracemalloc.start()
+        try:
+            problems, _, summary = check(text)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert summary is None
+        assert f"ubsan_checks.{key} must be a list of UBSan check names" in problems, problems
+        assert peak < 2**20, f"validate allocated {peak:,} bytes at the peak for {len(text)} bytes of project.yaml"
 
     def test_budgets(self):
         self.expect_problem(MINIMAL + "budgets: {oom: 1GiB}\n", "unknown field 'oom'")
