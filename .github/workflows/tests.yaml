@@ -353,44 +353,46 @@ jobs:
     name: docker (${{ matrix.shard }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # The shards. The Docker tests are CPU-bound: on one 4-core runner they took 3290-3323 CPU-s, in 1080-1094 s (an
-    # n2d-standard-4 VM, AMD Milan as on GitHub's runner, at 2fa3b63, INFRA-5359), so even with the builds of each class
-    # at once one runner needs about 14 minutes for them. Each shard is whole classes, or whole files, so a setUpClass
-    # builds once, and each has a runner's 4 cores: python is PythonBuilder alone (4 CPython builds), rust the two
-    # classes that build Rust's standard library, and c and records split the rest about evenly by their CPU. workers
-    # is the shard's pytest-xdist workers: one for each class that the shard can run beside another without leaving the
-    # cores to one. languages are the languages whose newest toolchain image the shard pulls, and frame_pointers the
-    # rows of infra/toolchains.tsv whose frame-pointer image it makes: the images that its classes need, and no other,
-    # as pulling all of them took each shard 87-141 s. fail-fast is off, so each shard reports its own tests; the check
-    # tests waits for all of them.
+    # The shards. The Docker tests are CPU-bound: they took 2187 CPU-s, in 642 s of tests in four shards, on an
+    # n2d-standard-4 VM (2 AMD Milan cores of 2 threads each, as a 4-vCPU GitHub runner is 2 cores of 2 threads; at
+    # 80c44a1, INFRA-5359), so even with the builds of each class at once one runner needs about 9 minutes for them.
+    # Each shard is whole classes, or whole files, so a setUpClass builds once, and each has a runner's 4 threads: rust
+    # the two classes that build Rust's standard library, c the classes of the C, Go and cJSON fixtures, and
+    # python-records PythonBuilder with the files of the link records. Each shard also costs 71-92 s of its job beside
+    # its tests (the runner, its tools, and the pull of its images, each of which holds the 1.1 GB layer of the C
+    # toolchain; the medians by shard of runs 45933112913 to 45980529993), so PythonBuilder, 91 s of tests since its
+    # CPython runtime is prebuilt, is no shard of its own: on that VM, with this change's edits of the tests,
+    # python-records took 231.6 s of tests where the shards python and records took 93.8 s and 167.4 s apart. workers is
+    # the shard's pytest-xdist workers: one for each class that the shard can run beside another without leaving the
+    # threads to one. python-records has three: on that VM it took 231.6 s with three and 239.0 s with four. c has
+    # three, for its five classes: with two, in run 45933112913, they took 319 s of class time (pytest's durations) in a
+    # step of 192 s; on that VM it took 72.5 s with two, 69.0 s with three and 69.3 s with four. languages are the
+    # languages whose newest toolchain image the shard pulls, and frame_pointers the rows of infra/toolchains.tsv whose
+    # frame-pointer image it makes: the images that its classes need, and no other, as pulling all of them took each
+    # shard 87-141 s. fail-fast is off, so each shard reports its own tests; the check tests waits for all of them.
     strategy:
       fail-fast: false
       matrix:
         include:
-          - shard: python
-            workers: 1
-            languages: python
-            frame_pointers: ""
-            tests: tests/test_builder.py::PythonBuilder
           - shard: rust
             workers: 2
             languages: rust
             frame_pointers: oss-fuzz-theorems-2026.10-rust
             tests: tests/test_builder.py::RustBuilder tests/test_builder.py::FramePointersRust
           - shard: c
-            workers: 2
+            workers: 3
             languages: c go
             frame_pointers: oss-fuzz-theorems-2026.10
             tests: >-
               tests/test_builder.py::Builder tests/test_builder.py::UbsanChecks tests/test_builder.py::GoBuilder
               tests/test_builder.py::AllocationFailureOnCjson tests/test_builder.py::FramePointersC
-          - shard: records
-            workers: 2
-            languages: c
+          - shard: python-records
+            workers: 3
+            languages: python c
             frame_pointers: ""
             tests: >-
-              tests/test_append_docker.py tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py
-              tests/test_target_settings_docker.py
+              tests/test_builder.py::PythonBuilder tests/test_append_docker.py tests/test_binary_checks_docker.py
+              tests/test_seed_runs_docker.py tests/test_target_settings_docker.py
     permissions:
       contents: read
     services:
@@ -462,7 +464,10 @@ jobs:
       # frame-pointer images of its frame_pointers rows, for FramePointersC and FramePointersRust
       # (tests/test_builder.py's FRAME_POINTER_IMAGES): for each row, the row's image with OFT_FRAME_POINTERS=1, made as
       # make of toolchain-images.yaml makes it (crane mutate, into the registry on this runner), and the base image,
-      # which those tests build on too.
+      # which those tests build on too. The pulls run at once, and crane copies each row's layers from ghcr.io into the
+      # registry while they run: every image here holds the C toolchain's 1.1 GB layer, which Docker fetches and unpacks
+      # once. Docker pulls a made image only after the toolchain images, so that it has their layers and fetches none of
+      # them again from the registry.
       - name: Pull the toolchain images, and make the frame-pointer images
         id: images
         if: steps.fork.outputs.enrollment != 'true'
@@ -476,11 +481,14 @@ jobs:
           images=$(python3 -P -c 'import sys
           from oss_verify import check_build
           print(*sorted({check_build.newest_toolchain(language) for language in sys.argv[1:]}))' "${languages[@]}")
+          pulls=()
           for image in $images; do
             [[ "$image" =~ ^ghcr\.io/theorem-labs/[a-z0-9-]+@sha256:[0-9a-f]{64}$ ]] ||
               { echo "::error::infra/toolchains.tsv names a toolchain image with no digest: '$image'"; exit 1; }
-            docker pull --quiet "$image" > /dev/null
+            docker pull --quiet "$image" > /dev/null &
+            pulls+=("$!")
           done
+          bases=() refs=()
           for row in "${rows[@]}"; do
             base=$(awk -F'\t' -v row="$row" '$1 == row { print $2 }' infra/toolchains.tsv)
             [[ "$base" =~ ^ghcr\.io/theorem-labs/oss-fuzz-theorems-toolchain(-[a-z]+)?@sha256:[0-9a-f]{64}$ ]] ||
@@ -488,6 +496,12 @@ jobs:
             name=${base%@*}
             ref=$(crane mutate "$base" --env OFT_FRAME_POINTERS=1 -t "localhost:5000/${name#ghcr.io/}:frame-pointers")
             [[ "$ref" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "::error::crane gave no digest: '$ref'"; exit 1; }
+            bases+=("$base") refs+=("$ref")
+          done
+          # wait fails the step (set -e) with the status of a pull that failed.
+          for pull in "${pulls[@]}"; do wait "$pull"; done
+          for i in "${!rows[@]}"; do
+            row=${rows[$i]} base=${bases[$i]} ref=${refs[$i]}
             docker pull --quiet "$base" > /dev/null
             docker pull --quiet "$ref" > /dev/null
             echo "$row: made $ref"

@@ -19,7 +19,7 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import validate
-from test_builder import RUN, compile_builds, docker_ready, run_in_container
+from test_builder import RUN, compile_builds, docker_ready, each_build_at_once
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "target-settings"
 TAG = f"oss-verify-test/target-settings:{RUN}"
@@ -89,9 +89,9 @@ class TestTargetSettings:
             zeros = tmp_path / f"zeros-{size}"
             zeros.touch()
             os.truncate(zeros, size)
-        runner = "".join(f'timeout 600 /qemu /raw/{build}/{target} /in/zeros-{size} > /dev/null 2>&1; '
-                         f'echo "{build} {target} {size} $?"\n' for build in BUILDS for target, size, _ in RUNS)
-        done = run_in_container(check_build.newest_toolchain(), runner, (tmp_path, "/in"),
-                                *((self.raw[build], f"/raw/{build}") for build in BUILDS))
-        results = {tuple(line.split()[:3]): int(line.split()[3]) for line in done.stdout.splitlines()}
+        runner = "".join(f'timeout 600 /qemu /raw/$B/{target} /in/zeros-{size} > /dev/null 2>&1; '
+                         f'echo "$B {target} {size} $?"\n' for target, size, _ in RUNS)
+        output = each_build_at_once(check_build.newest_toolchain(), runner, BUILDS, (tmp_path, "/in"),
+                                    *((self.raw[build], f"/raw/{build}") for build in BUILDS))
+        results = {tuple(line.split()[:3]): int(line.split()[3]) for line in output.splitlines()}
         assert results == {(build, target, str(size)): status for build in BUILDS for target, size, status in RUNS}

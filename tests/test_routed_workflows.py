@@ -886,9 +886,9 @@ def test_every_docker_test_is_in_exactly_one_shard():
     docker = collected(*workflow("tests.yaml")["env"]["DOCKER_TESTS"].split())
     groups = {shard: collected(*tests) for shard, _, tests in shards()}
     assert twice_or_never(groups.values(), docker) == (set(), set(), set())
-    python = {test for test in groups["python"]}
-    assert python and all("::PythonBuilder::" in test for test in python), python
-    left_out = twice_or_never([g for shard, g in groups.items() if shard != "python"], docker)
+    python = {test for test in docker if "::PythonBuilder::" in test}
+    assert python, docker
+    left_out = twice_or_never([group - python for group in groups.values()], docker)
     assert left_out == (python, set(), set()), left_out
     doubled = twice_or_never([*groups.values(), python], docker)
     assert doubled == (set(), python, set()), doubled
@@ -1006,15 +1006,15 @@ def test_each_class_of_a_docker_shard_finds_the_images_it_needs_there(tmp_path):
     """Each shard of docker pulls the toolchain images, and makes the frame-pointer images, that its classes need: where
     Docker has only the images that the shard's IMAGES_STEP pulled, with its TESTS_STEP's env, no class of the shard,
     and no test of one, skips. Each class asks Docker for the images it needs in its own skipUnless or skipif, so this
-    reads its need from there. The classes read are all that pytest collects of the shard. Controls: the shard python
-    without the Python image, and the shard c without its frame-pointer row, are found, and so is a step that makes a
-    frame-pointer image and does not pull it."""
+    reads its need from there. The classes read are all that pytest collects of the shard. Controls: the shard
+    python-records without the Python image, and the shard c without its frame-pointer row, are found, and so is a step
+    that makes a frame-pointer image and does not pull it."""
     for shard, _, tests in shards():
         skips = shard_skips(tmp_path / shard, shard)
         assert set(skips) == {"::".join(test.split("::")[:2]) for test in collected(*tests)}, (shard, skips)
         assert {name: why for name, why in skips.items() if why} == {}, shard
-    python = shard_skips(tmp_path / "python-on-c", "python", languages="c")
-    assert list(python) == ["tests/test_builder.py::PythonBuilder"], python
+    python = shard_skips(tmp_path / "python-on-c", "python-records", languages="c")
+    assert {name for name, why in python.items() if why} == {"tests/test_builder.py::PythonBuilder"}, python
     assert "the Python toolchain image" in python["tests/test_builder.py::PythonBuilder"], python
     c = shard_skips(tmp_path / "c-without-frame-pointers", "c", frame_pointers="")
     assert {name for name, why in c.items() if why} == {"tests/test_builder.py::FramePointersC"}, c
