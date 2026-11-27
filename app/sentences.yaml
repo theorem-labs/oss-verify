@@ -11,10 +11,8 @@
 # Left out of this file:
 # - The texts of this repository's workflows that review outside pull requests and issues. They keep their
 #   own approved texts.
-# - The model's text of the enrollment review's comment, which follows `review.md`. The comment's first line
-#   and its footer are here.
 # - The files that the App commits: statements, contracts, contract checks and proofs. A person at Theorem
-#   approves each file before the App commits it.
+#   approves the contracts and the contract checks before the App commits them.
 #
 # Each key holds one sentence, or the words that fill a {name} part of another key's sentence. A text of more
 # than one sentence has one key for each sentence, and the App joins them in the order of this file: with a space
@@ -99,7 +97,7 @@ check_run:
     conclusion: success
     title: "Setup is ready to merge."
     summary: "Every check of setup passed at {commit}, and {repository} enrolls when {installer}, who installed the app, merges this pull request.\n{check_lines}"  # {commit}: a commit id. {repository}: a repository's name. {installer}: a login. {check_lines}: a sentence of another key of this file, build_checks.line.form, one line for each fuzz target with a decided check.
-  build_checks:  # the checks of each fuzz target's binaries and properties, as docs/rules.md gives them
+  build_checks:  # the checks of each fuzz target's binaries and properties, as the checks of `theorem app build checks` give them
     # A check of the binaries fails for a fuzz target when one of its binaries has the result `fail`, and passes
     # when each binary has the result `pass`. Any other result decides nothing. A check that decides nothing has
     # no part in a line, and a fuzz target with no decided check has no line. A result changes no conclusion of
@@ -112,7 +110,7 @@ check_run:
       elf: "ELF and instructions"        # each binary is a static riscv64 program, and LPS executes each of its instructions
       system_calls: "system calls"       # each system call of the binary's runs on its seed inputs is one that LPS has
       quiet_loud: "quiet and loud"       # the quiet twin writes nothing and ends as the binary ends, on the same inputs
-      instrumented: "instrumented code"  # the binary links no code without the build's sanitizer, other than the code that docs/rules.md allows
+      instrumented: "instrumented code"  # the binary links no code without the build's sanitizer, other than the code that the check of the binaries allows
       reach: "reach"                     # a seed input reaches each property check of the fuzz target
       breakage: "breakages"              # each breakage makes a property check fire, and each property check has one
     results:
@@ -187,53 +185,6 @@ releases:  # on theorem-labs/oss-verify-proofs, from a publication
   publication:
     title: "{release}"  # {release}: a release's version, such as 2026.11.2
     body: "The changes are in [CHANGELOG.md]({changelog_link})."  # {changelog_link}: a link to a public page, CHANGELOG.md at the release's tag
-
-enrollment_review:  # today's texts of this repository's enrollment review, reworded, on the setup pull request
-  check_run_name: "Enrollment review"
-  conclusion_sentences:
-    success: "No change is needed."
-    failure: "The changes below are needed."
-    action_required: "No change is asked of you, and the review left some checks open."
-  no_verdict: "The review gave no verdict."
-  no_reason: "The review gave no reason."
-  not_run:
-    text_check:
-      title: "The automated review did not run."
-      summary: "An automated screen of text from accounts without write access did not pass or could not read this pull request, and no change is asked of you."
-    failed:
-      title: "A job of the review failed."
-      summary: "The review gave no verdict."
-  comment:
-    hidden_first_line: "<!-- oss-verify review of {commit} -->"  # {commit}: a commit id, the reviewed head. Not shown.
-    first_line: "{conclusion_sentence}"  # {conclusion_sentence}: a sentence of another key of this file, one key of conclusion_sentences.
-    # The model's text under `review.md` comes next, and this file leaves it out. Then comes the footer.
-    footer:
-      author: "Claude wrote this review of `{commit}`."  # {commit}: a commit id
-      caveat: "It can be wrong."
-      replaced: "A review of a later commit replaces it."
-      screened: "An automated screen passed this pull request first: {screens}."  # only when the screen ran. {screens}: a sentence of another key of this file, the keys of screens for the checks that ran, joined with ", ".
-    screens:
-      model_armor: "Google Cloud Model Armor"
-      prompt_shields: "Azure AI Content Safety Prompt Shields"
-      claude: "a Claude model with no tools"
-
-enrollment_checks_comment:  # today's triage comment of this repository, reworded, on the setup pull request
-  heading: "Enrollment checks: {repository}"  # {repository}: a repository's name
-  columns: ["", "Check", "Result"]
-  rows:  # one row for each check of setup
-    rules: "Form of `.theorem/`"
-    statements: "Statements"
-    build: "Build"
-    terms: "Terms box"
-    scope: "Pull request scope"
-    name: "Project name"
-    fork: "Fork"
-    license: "License"
-    ruleset: "Ruleset"
-  results:
-    pass: "Passed"
-    fail: "Failed"
-  footer: "Setup is finished only when every check passes."
 
 open_pull_requests:  # a person at Theorem posts one of these on each pull request to this repository that is still open when enrollment by pull request ends, then closes it
   enrollment: "Your project now enrolls, or stays enrolled, through the GitHub App Theorem Verify (https://github.com/apps/theorem-verify) and a pull request that your coding agent writes with this repository's skill `theorem-setup` and opens from the branch `theorem/setup` on your project's repository."  # on an enrollment, a re-pin or a move of an enrolled project
