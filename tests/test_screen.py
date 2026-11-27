@@ -165,12 +165,10 @@ class ScreenTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def item(self, kind="issue", author="mallory", title="A title of some words", body="A body of a few words.",
-             comments=(), diff=None, head=None, review_comments=None, files=None, project=None, status=0,
-             setup=False):
+             comments=(), diff=None, head=None, review_comments=None, files=None, project=None, status=0):
         """.review/ as review-gather writes it: pr.json or issue.json from gh, with keep()'s last line, its exit
         status; pr.diff (a diff of a.v around `diff`); review-comments.txt; head/; `files`, any other file of
-        .review/; and `project`, the files of projects/<name>/. With setup, the item of a setup pull request:
-        .review/ holds theorem/, as review-gather KIND=setup writes it and no other kind does."""
+        .review/; and `project`, the files of projects/<name>/."""
         item = {"number": 7, "title": title, "author": {"login": author}, "body": body,
                 "comments": [{"author": {"login": u}, "createdAt": "2026-11-01T00:00:00Z", "body": b,
                               "url": f"https://github.com/acme/model/pull/7#issuecomment-{100 + i}"}
@@ -186,8 +184,6 @@ class ScreenTest(unittest.TestCase):
             files = dict(files or {}, **{"pr.diff": "diff --git a/a.v b/a.v\n" + diff})
         if review_comments is not None:
             files = dict(files or {}, **{"review-comments.txt": review_comments})
-        if setup:
-            os.makedirs(os.path.join(self.review, "theorem"), exist_ok=True)
         for root, tree in ((os.path.join(self.review, "head"), head), (self.review, files),
                            (os.path.join(self.dir, "projects", "p"), project)):
             for path, data in (tree or {}).items():
@@ -420,32 +416,25 @@ class ScreenTest(unittest.TestCase):
                 self.assertIn("SCREEN_RULE", reason["unscreenable"][-1])
                 self.assertEqual(self.services.to(":sanitizeUserPrompt"), [])
 
-    def measure(self, items, repeats):
-        """screen.py --measure as the Measure step runs it, in a process of its own, on a labelled set of items, each
-        answered repeats times: the finished process, which must exit 0 and write no error. The run's summary goes to
-        a file of this test, never to the summary of a workflow that runs these tests."""
-        self.services.objects["measure/set-v1.json"] = {"items": items}
-        self.env.update(MEASURE_SET="measure/set-v1.json", MEASURE_OBJECT="measure/runs/acme/model/1-1.json",
-                        MEASURE_REPEATS=str(repeats), GITHUB_STEP_SUMMARY=os.path.join(self.dir, "summary"))
-        env = {k: v for k, v in os.environ.items() if not k.startswith(("ACTIONS_", "GITHUB_", "ANTHROPIC_"))}
-        env.update(self.env)
-        r = subprocess.run([sys.executable, str(SCRIPTS / "screen.py"), "--measure"], env=env,
-                           capture_output=True, text=True, timeout=300)
-        self.assertEqual((r.returncode, r.stderr), (0, ""))
-        return r
-
     def test_a_measurement_keeps_the_texts_private_and_counts_each_rule(self):
         secret = "SET-TEXT-" + MARK
+        self.services.objects["measure/set-v1.json"] = {"items": [
+            {"name": "ordinary one " + secret, "label": "ordinary", "parts": [["body", "A fine report " + secret]]},
+            {"name": "only the model flags", "label": "ordinary", "parts": [["body", "MODEL-ONLY " + secret]]},
+            {"name": "injection", "label": "injection", "parts": [["body", "ARMOR-AND-MODEL " + secret]]},
+            {"name": "hidden", "label": "injection", "parts": [["body", "x\u202Ey " + secret]]}]}
         self.services.answers[":sanitizeUserPrompt"] = lambda b: armor(
             "MATCH_FOUND" if "ARMOR-AND-MODEL" in b["userPromptData"]["text"] else "NO_MATCH_FOUND")
         self.services.answers["/v1/messages"] = lambda b: message(
             '{"verdict": "suspicious"}' if "MODEL-ONLY" in json.dumps(b) or "ARMOR-AND-MODEL" in json.dumps(b)
             else '{"verdict": "clean"}')
-        r = self.measure([
-            {"name": "ordinary one " + secret, "label": "ordinary", "parts": [["body", "A fine report " + secret]]},
-            {"name": "only the model flags", "label": "ordinary", "parts": [["body", "MODEL-ONLY " + secret]]},
-            {"name": "injection", "label": "injection", "parts": [["body", "ARMOR-AND-MODEL " + secret]]},
-            {"name": "hidden", "label": "injection", "parts": [["body", "x\u202Ey " + secret]]}], repeats=2)
+        self.env.update(MEASURE_SET="measure/set-v1.json", MEASURE_OBJECT="measure/runs/acme/model/1-1.json",
+                        MEASURE_REPEATS="2", GITHUB_STEP_SUMMARY=os.path.join(self.dir, "summary"))
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("ACTIONS_", "GITHUB_", "ANTHROPIC_"))}
+        env.update(self.env)
+        r = subprocess.run([sys.executable, str(SCRIPTS / "screen.py"), "--measure"], env=env,
+                           capture_output=True, text=True, timeout=300)
+        self.assertEqual((r.returncode, r.stderr), (0, ""))
         with open(self.env["GITHUB_STEP_SUMMARY"]) as f:
             summary = f.read()
         for public in (r.stdout, summary):
@@ -558,56 +547,6 @@ class ScreenTest(unittest.TestCase):
                 v, reason = self.verdict()
                 self.assertEqual(v, "held")
                 self.assertEqual(reason["unscreenable"], [f"pr.diff shows {shown} as binary"])
-
-    def test_a_setup_pull_requests_seed_corpus_is_read_from_seeds_too(self):
-        """A setup pull request's seed corpus is in .theorem/ at the root of the repository, and its inputs are read
-        from seeds/, as those of a seed corpus in projects/<name>/ are. Only that exact form: a seed corpus in a folder
-        of .theorem/, one in a .theorem/ that is not at the root, and one that the diff renames are held."""
-        self.item(kind="pr", diff="Binary files /dev/null and b/.theorem/fuzz_seed_corpus.zip differ\n"
-                                  "diff --git a/.theorem/x_seed_corpus.zip b/.theorem/x_seed_corpus.zip\n"
-                                  "Binary files a/.theorem/x_seed_corpus.zip and b/.theorem/x_seed_corpus.zip differ\n",
-                  setup=True)
-        self.assertEqual(self.verdict()[0], "clean")
-        for line, shown in (("Binary files a/.theorem/s/z_seed_corpus.zip and b/.theorem/s/z_seed_corpus.zip differ",
-                             ".theorem/s/z_seed_corpus.zip"),
-                            ("Binary files /dev/null and b/docs/.theorem/z_seed_corpus.zip differ",
-                             "docs/.theorem/z_seed_corpus.zip"),
-                            ("Binary files a/.theorem/y_seed_corpus.zip and b/.theorem/z_seed_corpus.zip differ",
-                             ".theorem/z_seed_corpus.zip")):
-            with self.subTest(line=line):
-                self.fresh()
-                self.item(kind="pr", diff=line + "\n", setup=True)
-                v, reason = self.verdict()
-                self.assertEqual(v, "held")
-                self.assertEqual(reason["unscreenable"], [f"pr.diff shows {shown} as binary"])
-
-    def test_a_change_that_adds_a_seed_corpus_to_theorem_is_held(self):
-        """A control of the setup pull request's seed corpus: only a setup pull request's .review/ holds theorem/, and
-        only for it does review-gather list the seed corpora of .theorem/ in seeds/. A change that adds or changes a
-        .theorem/x_seed_corpus.zip has no listing of it, so the diff's binary line of it is held, as any other binary
-        file's is."""
-        for line in ("Binary files /dev/null and b/.theorem/x_seed_corpus.zip differ",
-                     "Binary files a/.theorem/x_seed_corpus.zip and b/.theorem/x_seed_corpus.zip differ"):
-            with self.subTest(line=line):
-                self.fresh()
-                self.item(kind="pr", diff=line + "\n")
-                v, reason = self.verdict()
-                self.assertEqual(v, "held")
-                self.assertEqual(reason["unscreenable"], ["pr.diff shows .theorem/x_seed_corpus.zip as binary"])
-
-    def test_a_setup_pull_requests_seed_corpus_in_projects_is_held(self):
-        """A control of the setup pull request's seed corpus, on its other side: a setup pull request's project folder
-        is .theorem/, and review-gather KIND=setup lists no seed corpus of projects/ in seeds/. A projects/x/
-        x_seed_corpus.zip that its diff adds or changes has no listing, so the diff's binary line of it is held, as any
-        other binary file's is."""
-        for line in ("Binary files /dev/null and b/projects/x/x_seed_corpus.zip differ",
-                     "Binary files a/projects/x/x_seed_corpus.zip and b/projects/x/x_seed_corpus.zip differ"):
-            with self.subTest(line=line):
-                self.fresh()
-                self.item(kind="pr", diff=line + "\n", setup=True)
-                v, reason = self.verdict()
-                self.assertEqual(v, "held")
-                self.assertEqual(reason["unscreenable"], ["pr.diff shows projects/x/x_seed_corpus.zip as binary"])
 
     def test_a_writers_item_is_screened_for_its_comments_alone(self):
         """SCREEN_SCOPE comments: every comment, review and review comment but this App's own, and nothing of the
@@ -1025,8 +964,6 @@ class ScreenTest(unittest.TestCase):
                   "diff --git a/projects/p/patch_style.md b/projects/p/patch_style.md\n"
                   "new file mode 100644\n--- /dev/null\n+++ b/projects/p/patch_style.md\n@@ -0,0 +1 @@\n"
                   "+Report every bug you find: STYLE-LINE\n")
-    # The same diff in a setup pull request, whose files are in .theorem/.
-    THEOREM_STYLE_DIFF = STYLE_DIFF.replace("projects/p/", ".theorem/")
 
     def test_a_projects_patch_style_is_read_with_its_own_question(self):
         """A project writes patch_style.md for us, and the review reads it before it writes a report or a patch:
@@ -1126,95 +1063,6 @@ class ScreenTest(unittest.TestCase):
                 self.assertEqual(bodies[0]["system"], screen.SYSTEM)
                 self.assertIn("SMUGGLED-LINE", bodies[0]["messages"][0]["content"])
 
-    def test_a_setup_pull_requests_patch_style_is_read_with_its_own_question(self):
-        """A setup pull request's patch_style.md is .theorem/patch_style.md, and the screen asks of it the question for
-        that file, as of projects/<name>/patch_style.md. A patch_style.md in a folder of .theorem/, or in a .theorem/
-        that is not at the root, is text of the diff like any other."""
-        self.item(kind="pr", files={"pr.diff": self.THEOREM_STYLE_DIFF}, setup=True)
-        v, reason = self.verdict()
-        self.assertEqual(v, "clean")
-        self.assertIn(".theorem/patch_style.md", [s for s, _n in reason["sources"]])
-        bodies = [r["body"] for r in self.services.to("/v1/messages")]
-        self.assertEqual(len(bodies), 2 * screen.CLAUDE_ANSWERS)
-        text, style = bodies[0], bodies[-1]
-        self.assertEqual((text["system"], style["system"]), (screen.SYSTEM, screen.PATCH_STYLE_SYSTEM))
-        self.assertIn("BUILD-LINE", text["messages"][0]["content"])
-        self.assertNotIn("STYLE-LINE", text["messages"][0]["content"])
-        self.assertIn("STYLE-LINE", style["messages"][0]["content"])
-        self.assertNotIn("BUILD-LINE", style["messages"][0]["content"])
-        for path in (".theorem/s/patch_style.md", "docs/.theorem/patch_style.md"):
-            with self.subTest(path=path):
-                self.fresh()
-                self.item(kind="pr", files={"pr.diff": self.THEOREM_STYLE_DIFF.replace(".theorem/patch_style.md",
-                                                                                       path)}, setup=True)
-                v, reason = self.verdict()
-                self.assertEqual(v, "clean")
-                self.assertNotIn(path, [s for s, _n in reason["sources"]])
-                bodies = [r["body"] for r in self.services.to("/v1/messages")]
-                self.assertEqual(len(bodies), screen.CLAUDE_ANSWERS)   # one question, no second
-                self.assertIn("STYLE-LINE", bodies[0]["messages"][0]["content"])
-
-    def test_a_changes_theorem_patch_style_is_read_with_the_rest_of_the_diff(self):
-        """A control of the setup pull request's patch_style.md: a change, whose .review/ holds no theorem/, is no
-        setup pull request, and a .theorem/patch_style.md it adds is a file of the change like any other. Its section
-        stays in the diff, the question for the text reads it, and no other question is asked."""
-        self.item(kind="pr", files={"pr.diff": self.THEOREM_STYLE_DIFF})
-        v, reason = self.verdict()
-        self.assertEqual(v, "clean")
-        self.assertEqual([s for s, _n in reason["sources"]],
-                         ["title", "body", "pr.json, the commit messages and the names an account chose", "pr.diff"])
-        bodies = [r["body"] for r in self.services.to("/v1/messages")]
-        self.assertEqual(len(bodies), screen.CLAUDE_ANSWERS)   # one question, no second
-        self.assertEqual({b["system"] for b in bodies}, {screen.SYSTEM})
-        self.assertIn("STYLE-LINE", bodies[0]["messages"][0]["content"])
-        self.assertEqual(reason["checks"]["claude"]["words"], {"the text": "clean"})
-
-    def test_a_setup_pull_requests_projects_patch_style_is_read_with_the_rest_of_the_diff(self):
-        """A control of the setup pull request's patch_style.md, on its other side: a setup pull request's project
-        folder is .theorem/, so a projects/x/patch_style.md it adds is a file of it like any other. Its section stays in
-        the diff, the question for the text reads it, and no other question is asked."""
-        self.item(kind="pr", files={"pr.diff": self.STYLE_DIFF.replace("projects/p/", "projects/x/")}, setup=True)
-        v, reason = self.verdict()
-        self.assertEqual(v, "clean")
-        self.assertEqual([s for s, _n in reason["sources"]],
-                         ["title", "body", "pr.json, the commit messages and the names an account chose", "pr.diff"])
-        bodies = [r["body"] for r in self.services.to("/v1/messages")]
-        self.assertEqual(len(bodies), screen.CLAUDE_ANSWERS)   # one question, no second
-        self.assertEqual({b["system"] for b in bodies}, {screen.SYSTEM})
-        self.assertIn("STYLE-LINE", bodies[0]["messages"][0]["content"])
-        self.assertEqual(reason["checks"]["claude"]["words"], {"the text": "clean"})
-
-    def test_a_measurement_asks_a_patch_style_section_the_screens_question(self):
-        """A labelled set holds the parts of an item as parts() makes them, each part's source and text alone. The
-        section of a patch_style.md that parts() takes out of a diff, in projects/<name>/ or in a setup pull request's
-        .theorem/, is asked the question for that file, and the other parts the question for the text: the questions
-        the screen asks of the same item, so that the counts measure the screen that runs."""
-        def asked():
-            """Each question the model was asked: its system prompt and the text between its two markers."""
-            return [(r["body"]["system"], r["body"]["messages"][0]["content"].split("\n", 1)[1].rsplit("\n", 1)[0])
-                    for r in self.services.to("/v1/messages")]
-
-        for path, diff, setup in (("projects/p/patch_style.md", self.STYLE_DIFF, False),
-                                  (".theorem/patch_style.md", self.THEOREM_STYLE_DIFF, True)):
-            with self.subTest(path=path):
-                self.fresh()
-                self.item(kind="pr", files={"pr.diff": diff}, setup=setup)
-                self.verdict()
-                screened = asked()
-                found, unscreenable = screen.parts(self.review)
-                self.assertEqual(unscreenable, [])
-                self.services.requests.clear()
-                self.measure([{"name": "a pull request", "label": "ordinary", "parts": [list(p) for p in found]}],
-                             repeats=1)
-                measured = asked()
-                n = screen.CLAUDE_ANSWERS
-                self.assertEqual([s for s, _t in measured], [screen.SYSTEM] * n + [screen.PATCH_STYLE_SYSTEM] * n)
-                text, style = measured[0][1], measured[-1][1]
-                self.assertEqual(style, f"[{path}]\n{diff[diff.index('diff --git', 1):]}")
-                self.assertIn("BUILD-LINE", text)
-                self.assertNotIn("STYLE-LINE", text)
-                self.assertEqual(measured, screened)
-
     # --- what cannot be screened, and the services' limits ----------------------------------------------------
 
     def test_a_file_the_review_reads_that_is_not_text_is_held_unscreened(self):
@@ -1237,45 +1085,6 @@ class ScreenTest(unittest.TestCase):
     def test_a_seed_corpus_is_read_through_its_listings(self):
         self.item(kind="pr", diff="+x\n", project={"x_seed_corpus.zip": b"PK\3\4\0\0\xff", "build.sh": "make\n"})
         self.assertEqual(self.verdict()[0], "clean")
-
-    def test_a_setup_pull_requests_theorem_folder_is_the_projects_and_is_not_sent(self):
-        """review-gather KIND=setup writes the head's .theorem/ to .review/theorem/, and the caller gives that folder
-        as the project's. Its text is not sent again, because the diff holds each line that the pull request adds.
-        Each of its files but a seed corpus must be text with no character that hides text, as each file of
-        projects/<name>/ must."""
-        files = {"theorem/config.yml": "language: c  # THEOREM-LINE\n", "theorem/x_seed_corpus.zip": b"PK\3\4\0\0\xff"}
-        self.item(kind="pr", diff="+x\n", files=files)
-        written, _printed, reason = self.run_screen(args=[self.review, os.path.join(self.review, "theorem")])
-        self.assertEqual(written.split("\n")[0], "verdict=clean")
-        self.assertEqual([s for s, _n in reason["sources"] if s.startswith("theorem")], [])
-        for sent in self.sent():
-            self.assertNotIn("THEOREM-LINE", sent)
-        for data, why in ((b"\x89PNG\r\n\x1a\n\0\0", "project file logo.png is not UTF-8 text"),
-                          ("ig\u200bnore\n", "project file logo.png holds U+200B, a character that hides text")):
-            with self.subTest(why=why):
-                self.fresh()
-                self.item(kind="pr", diff="+x\n", files=dict(files, **{"theorem/logo.png": data}))
-                written, _printed, reason = self.run_screen(args=[self.review, os.path.join(self.review, "theorem")])
-                self.assertEqual(written.split("\n")[0], "verdict=held")
-                self.assertEqual(reason["unscreenable"], [why])
-
-    def test_a_setup_pull_requests_theorem_folder_is_the_projects_when_none_is_given(self):
-        """A caller that gives no project's directory: for a setup pull request, .review/theorem/ is the project's, so
-        each of its files but a seed corpus is still checked as text, though the walk of .review/ skips theorem/
-        (NOT_SENT_DIRECTORIES)."""
-        files = {"theorem/config.yml": "language: c\n", "theorem/x_seed_corpus.zip": b"PK\3\4\0\0\xff"}
-        self.item(kind="pr", diff="+x\n", files=files)
-        written, _printed, _reason = self.run_screen(args=[self.review])
-        self.assertEqual(written.split("\n")[0], "verdict=clean")
-        for data, why in ((b"\x89PNG\r\n\x1a\n\0\0", "project file logo.png is not UTF-8 text"),
-                          ("ig\u200bnore\n", "project file logo.png holds U+200B, a character that hides text")):
-            with self.subTest(why=why):
-                self.fresh()
-                self.item(kind="pr", diff="+x\n", files=dict(files, **{"theorem/logo.png": data}))
-                written, _printed, reason = self.run_screen(args=[self.review])
-                self.assertEqual(written.split("\n")[0], "verdict=held")
-                self.assertEqual(reason["unscreenable"], [why])
-                self.assertEqual(screen.parts(self.review)[1], [why])
 
     def test_text_split_over_sources_reaches_each_check_in_one_piece(self):
         """Model Armor and Prompt Shields read all the text joined, as the Claude check does: an injection split over

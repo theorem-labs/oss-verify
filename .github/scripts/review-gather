@@ -10,7 +10,6 @@
 #   KIND=change GH_TOKEN=... REPO=... PR=<number> HEAD_SHA=<head commit> [LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
 #   KIND=issue GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
-#   KIND=setup FETCHED=<folder> [LAST_REVIEW=<file>] .github/scripts/review-gather <directory>
 #
 # review.yml's gather job runs it from the checkout of main, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
@@ -31,8 +30,7 @@
 # take-project's count of the files that the pull request changes outside projects/<name>/, which only a branch of
 # this repository can: when it is not 0, this writes their names to outside.txt and each as it is at HEAD_SHA under
 # head/, as for a change, and the review judges them by review-change.md too (.github/scripts/review-prompt).
-# KIND is route's decision in review.yml, or setup in check.yml's review job, and this chooses its path on it once,
-# here at its top.
+# KIND is route's decision in review.yml, and this chooses its path on it once, here at its top.
 # KIND=change, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
 # and each changed file as it is at HEAD_SHA, as data under head/, cut at 1 MiB. It resumes the session of the last
 # change review of the pull request, for context, with the diff from the head that review reviewed. That head comes
@@ -41,45 +39,9 @@
 # .github/scripts/review-body writes. It never comes from the runs API, or from LAST_REVIEW, which sits in a cache
 # that review.yml's session job writes in main's scope with what the review job kept, after its model read the text
 # of the pull request, an outside one too. LAST_REVIEW gives the session's id, which is resumed only when the head
-# LAST_REVIEW names is that head (resume_review, below).
+# LAST_REVIEW names is that head.
 # KIND=issue, the draft reply to an issue (review-issue.md): only the issue's title, body, author and comments, in
 # issue.json, and nothing else.
-# KIND=setup, the review of a setup pull request: the pull request on an owner's repository that adds .theorem/.
-# check.yml's review job runs it from the checkout of this repository's main, with no token and no build data. It
-# reads only FETCHED, the folder that check.yml's fetch job wrote, and LAST_REVIEW. It calls no gh, git, curl or other
-# network command, and it runs neither .github/scripts/triage.py nor the rules of .github/scripts/validate_rules/.
-# FETCHED has the form setup-fetch/1 (tests/fixtures/setup-fetch/ is one):
-#   pr.json                     the setup pull request, as gh pr view --json number,title,author,isDraft,createdAt,
-#                               body,headRefOid,files,commits,comments,reviews gives it.
-#   pr.diff                     gh pr diff, as this script writes it for an enrollment.
-#   review-comments.txt         the review comments, and their authors one login a line, as this script writes
-#   review-comment-authors.txt  them for an enrollment.
-#   theorem/                    the head's .theorem/ folder, as data.
-#   source.tar                  the repository at the head, as GitHub's tarball gives it (gh api
-#                               repos/<owner>/<name>/tarball/<head>): one top folder, <owner>-<name>-<commit>/.
-#   setup.json, setup.txt       the standard output and the standard error of theorem app setup --at <head>
-#                               --repo <owner>/<name> --pr <number> --installer <login> --record record.json --json.
-#   record.json                 that command's record: {"installer": <login>, "ticked_by": <login> or null}.
-#   repository.json             gh api repos/<owner>/<name>.
-#   contributors.json           gh api "repos/<owner>/<name>/contributors?per_page=5".
-#   last-review-head.txt        the head that the App's review comment on the pull request names, or nothing.
-#   since-last-review.diff      only when that head is an ancestor of the pull request's head: the diff from it.
-# A file of the form that is not there stops this with exit status 2, and the message names the file. The directory
-# gets pr.json (with keep's last line, below), pr.diff, review-comments.txt, review-comment-authors.txt and
-# description.md, as for an enrollment; theorem/, in the place of projects/<name>/; setup.txt, the checks of
-# setup.json and the reasons of setup.txt, in the place of validate.txt and the triage comment; record.json as it is;
-# repository.txt, from repository.json and contributors.json; source/, from source.tar; the seed listings of the seed
-# corpora of theorem/, as for an enrollment; and since-last-review.diff when FETCHED holds it, whole, as for a change.
-# As for a change, the review resumes the session of its last review, and this writes `session` and `last` to
-# GITHUB_OUTPUT, only when last-review-head.txt names a head and LAST_REVIEW names a session kept for that head. A setup
-# pull request changes only .theorem/, so the review also resumes only when since-last-review.diff is a plain diff of
-# files under .theorem/ alone, which it can prove from each of its lines (setup_diff, below): the file is not empty,
-# each section starts with a line diff --git whose paths are under .theorem/, and each line is of a form that git diff
-# writes for two commits. Any other file gives a fresh review, which reads all of the directory again, and a line of the
-# standard output says why: a diff that changes a file outside .theorem/ (after a merge of the default branch into
-# theorem/setup, for one), a diff with a line of any other form (a submodule's log, which has no line diff --git; a
-# line diff --cc or diff --combined, which start the sections of a combined diff; a binary patch; an empty line), an
-# empty file, or a file that is not a diff.
 # The runner reads none of its output as a workflow command: the gathered text is the pull request's or the issue's.
 resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
@@ -111,474 +73,7 @@ reviewed_head() {
   if [[ ${head:-} =~ ^[0-9a-f]{40}$ ]]; then echo "$head"; fi
   return 0
 }
-# The line `session=<id> head=<commit>` of LAST_REVIEW, the file of the cache (the header above), as `<id> <commit>`:
-# its first line of that form, and nothing when LAST_REVIEW names no file or the file has no line of that form.
-last_review() {
-  sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' "${LAST_REVIEW:-/nonexistent}" 2> /dev/null \
-    | head -n 1
-  return 0
-}
-# Whether a change review or a setup review (the header above) resumes the session of its last review, for context,
-# with the diff from the head that review reviewed. $1 is the review's kind, $2 that head, from the review comment, or
-# nothing when there is none, $3 the head the diff goes to, or nothing, and $4... the command that gathers or reads that
-# diff, with $2 as its last argument: it exits 0 when the review can resume with the diff, and else it says why the
-# review is fresh. The session's id comes from LAST_REVIEW, and only when LAST_REVIEW names that same head: a session
-# kept for another head (a review whose save did not happen, an older run's entry) is not the session of that review,
-# and the command does not run. When the review resumes, this writes `session` and `last` to GITHUB_OUTPUT.
-resume_review() {
-  local kind=$1 reviewed=$2 to=$3 session kept
-  shift 3
-  read -r session kept <<< "$(last_review)"
-  [[ -n $reviewed && -n $session ]] || return 0
-  if [ "$kept" != "$reviewed" ]; then
-    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
-  elif "$@" "$reviewed"; then
-    echo "review-gather: the $kind review resumes the session $session, with the diff from $reviewed, the head its" \
-      "last review reviewed (its review comment)${to:+, to $to}"
-    { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
-  fi
-  return 0
-}
-# For resume_review (above), a change review: since-last-review.diff, the diff from the head $1 to HEAD_SHA. GitHub's
-# compare diffs from the merge base, which is $1 only when HEAD_SHA descends from it (status "ahead"). After a
-# force-push, or on the same head, there is no diff, and the review is fresh.
-change_diff() {
-  local status
-  [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || return 1
-  status=$(gh api "repos/$REPO/compare/$1...$HEAD_SHA" --jq .status 2> /dev/null) || status=""
-  if [ "$status" = ahead ]; then
-    keep since-last-review.diff gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$1...$HEAD_SHA"
-  fi
-  [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ] && return 0
-  echo "review-gather: no diff from $1, the head the last review reviewed, to $HEAD_SHA (compare status" \
-    "${status:-unknown}): the review is fresh"
-  return 1
-}
-# Each seed corpus of the folder $1: its listing, and the first 512 bytes of each of its first 200 inputs, in
-# hexadecimal. The zip is the pull request's. read() with no size decompresses the whole member before it cuts the
-# member, so this reads 512 bytes through open(). zipfile decompresses bzip2 and lzma with no bound, also for a read
-# with a size. So this reads only a stored or deflated member, and gives a line for each other member that says that
-# it is not read. open() raises RuntimeError for an encrypted member, because this gives no password. So this reads no
-# member whose bit 0x1 of the general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and
-# gives a line for it too. open() raises NotImplementedError for a member whose bit 0x20 (compressed patched data) or
-# bit 0x40 (strong encryption) is set, also without bit 0x1, so this reads no such member either, and gives a line for
-# it. A member that open() or the read refuses with any other error (a corrupt deflate stream, a bad CRC, data cut
-# short, a local header that does not match the central directory, or one whose bit 0x800 says that its name is UTF-8
-# when it is not) gets a line with the error, and this goes on with the next member. ZipFile() reads the central
-# directory before any member, and refuses a zip cut short, which has lost its central directory (BadZipFile; the
-# listing holds the error of unzip -l too), and one whose central directory gives a name with bit 0x800 set that is
-# not UTF-8, as a zip tool sets it (UnicodeDecodeError; unzip -l lists each member of it). For a zip that ZipFile()
-# refuses with any error, the hexadecimal file holds one line, `(not read: <the error's name>: <its message>)`, the
-# form of a member's line with an error, and no other, and the python exits 0. So no error leaves the file, or an input
-# in it, with no line that says why it is not read.
-seed_listings() {
-  local zip target
-  for zip in "$1"/*_seed_corpus.zip; do
-    [ -f "$zip" ] || continue
-    target=$(basename "$zip" _seed_corpus.zip)
-    keep "seeds/$target.listing.txt" unzip -l "$zip"
-    python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
-import sys, zipfile
-with open(sys.argv[2], "w") as out:
-    try:
-        archive = zipfile.ZipFile(sys.argv[1])
-    except Exception as e:
-        out.write(f"(not read: {type(e).__name__}: {e})\n")
-    else:
-        with archive:
-            for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
-                out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
-                if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-                    out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
-                    continue
-                if info.flag_bits & 0x1:
-                    out.write("(not read: encrypted)\n")
-                    continue
-                if info.flag_bits & 0x20:
-                    out.write("(not read: compressed patched data)\n")
-                    continue
-                if info.flag_bits & 0x40:
-                    out.write("(not read: strong encryption)\n")
-                    continue
-                try:
-                    with archive.open(info) as member:
-                        data = member.read(512)
-                except Exception as e:
-                    out.write(f"(not read: {type(e).__name__}: {e})\n")
-                    continue
-                for at in range(0, len(data), 16):
-                    row = data[at:at + 16]
-                    text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-                    out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
-EOF
-  done
-}
-# Take each CLAUDE*.md, AGENTS*.md and .claude/ out of the folder $1, at any depth. Claude Code reads a CLAUDE.md, an
-# AGENTS.md or a .claude/ beside a file that it reads as instructions. The files of the folder are data, so these go
-# (rule 1 of review.md).
-drop_instructions() {
-  find "$1" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
-}
-# For resume_review (above), a setup review: whether since-last-review.diff of FETCHED, the diff from the head $1 that
-# the fetch job wrote, is a plain diff of files under .theorem/ alone (the header above). The review resumes only on
-# what this can prove: the file is not empty, its first line starts with `diff --git `, in each line
-# `diff --git a/<path> b/<path>` both paths are under .theorem/, and each line is of a form that a plain git diff of two
-# commits writes. A section starts with its line diff --git. Up to its first hunk header, a line that starts with
-# `@@ `, each line of the section is an extended header (one that starts with `index `, `old mode `, `new mode `,
-# `deleted file mode `, `new file mode `, `similarity index `, `dissimilarity index `, `rename from `, `rename to `,
-# `copy from ` or `copy to `), `--- ` or `+++ ` and then a/, b/ or /dev/null, or `Binary files ... differ`. After it,
-# each line is a hunk header or a hunk line, which starts with a space, `+`, `-` or `\` (\ No newline at end of file).
-# `--- ` and `+++ ` start no section. Each other line gives a fresh review: a submodule's log (git diff --submodule=log
-# writes `Submodule <path> <old>..<new>:` and a line for each commit, with no line diff --git), a line `diff --cc ` or
-# `diff --combined ` (the start of a section of a combined diff, whose paths this does not read), a binary patch
-# (`GIT binary patch` and its data), an empty line, or a line of a form that this does not know. Its reason names the
-# kind of the line and quotes none of its text. A path can hold " b/", so each " b/" of a line diff --git must start a
-# path under .theorem/. A path that git writes in quotes (for a name with a quote, a backslash or a byte that is not
-# printable ASCII) does not start with a/.theorem/, so its diff gives a fresh review too.
-setup_diff() {
-  local diff=$FETCHED/since-last-review.diff why
-  if [[ ! -f $diff || -L $diff ]]; then
-    echo "review-gather: no diff from $1, the head the last review reviewed: the review is fresh"
-    return 1
-  fi
-  why=$(awk 'NR == 1 && !/^diff --git / { why = "does not start with diff --git"; exit }
-             /^diff --git / {
-               n = split(substr($0, 12), path, " b/")
-               outside = n < 2 || index(path[1], "a/.theorem/") != 1
-               for (i = 2; i <= n; i++) outside = outside || index(path[i], ".theorem/") != 1
-               if (outside) { why = "changes a file outside .theorem/"; exit }
-               hunks = 0
-               next
-             }
-             /^diff / { why = "holds a section that is not of diff --git"; exit }
-             /^@@ / { hunks = 1; next }
-             hunks && (/^[-+ ]/ || /^\\/) { next }
-             !hunks && /^(index|old mode|new mode|deleted file mode|new file mode|similarity index) / { next }
-             !hunks && /^(dissimilarity index|rename from|rename to|copy from|copy to) / { next }
-             !hunks && /^(---|\+\+\+) (a\/|b\/|\/dev\/null$)/ { next }
-             !hunks && /^Binary files .* differ$/ { next }
-             { why = "holds a line that is not of a plain diff"; exit }
-             END { print (NR == 0 ? "is empty" : why) }' "$diff") || why="cannot be read"
-  [ -z "$why" ] && return 0
-  echo "review-gather: the diff from $1 $why: the review is fresh"
-  return 1
-}
-# KIND=setup (the header above): each command reads a file of FETCHED or LAST_REVIEW, or writes in the directory. No
-# command reads the network.
-gather_setup() {
-  local name reviewed=""
-  [[ -n ${FETCHED:-} && -d $FETCHED && ! -L $FETCHED ]] || { echo "review-gather: FETCHED is not a folder" >&2; exit 2; }
-  for name in pr.json pr.diff review-comments.txt review-comment-authors.txt theorem/ source.tar setup.json setup.txt \
-      record.json repository.json contributors.json last-review-head.txt; do
-    if [[ $name == */ ]]; then
-      [[ -d $FETCHED/$name && ! -L $FETCHED/${name%/} ]] && continue
-    else
-      [[ -f $FETCHED/$name && ! -L $FETCHED/$name ]] && continue
-    fi
-    echo "review-gather: FETCHED has no $name, which the form setup-fetch/1 has" >&2
-    exit 2
-  done
-  mkdir -p "$out/seeds"
-  # pr.json with keep's last line, as the screen and the review read it: the status is jq's, which fails on a file
-  # that is not JSON.
-  keep pr.json jq -c . "$FETCHED/pr.json"
-  cp -- "$FETCHED/pr.diff" "$FETCHED/review-comments.txt" "$FETCHED/review-comment-authors.txt" \
-    "$FETCHED/record.json" "$out/"
-  jq -r '.body // ""' "$FETCHED/pr.json" > "$out/description.md" 2> /dev/null
-  # The head's .theorem/, in the place of projects/<name>/, as data: regular files and folders alone. cp -R copies a
-  # symbolic link as a link and follows none, and find then takes out each file that is not a regular file or a
-  # folder.
-  rm -rf "$out/theorem"
-  cp -R -- "$FETCHED/theorem" "$out/theorem"
-  find "$out/theorem" -mindepth 1 ! -type f ! -type d -delete
-  drop_instructions "$out/theorem"
-  # The checks of theorem app setup and their reasons, in the place of validate.txt and the triage comment. A check's
-  # name is a short word, so that no line of setup.json can look like another check.
-  {
-    echo "== the checks of theorem app setup (setup.json): each check's name, and pass or fail"
-    jq -r 'if type == "array" and all(.[]; type == "object" and (.name | type == "string" and
-               test("\\A[a-z][a-z0-9_-]{0,63}\\z")) and (.result == "pass" or .result == "fail"))
-           then .[] | "\(.name) \(.result)"
-           else error("setup.json is not a list of checks, each with a name and the result pass or fail") end' \
-      "$FETCHED/setup.json"
-    echo "(exit status $?)"
-    echo
-    echo "== the reasons (setup.txt, the standard error of theorem app setup)"
-    cat -- "$FETCHED/setup.txt"
-    echo "(exit status $?)"
-  } > "$out/setup.txt" 2>&1
-  # The repository's facts, in the form of an enrollment's repository.txt (below) where FETCHED has them.
-  {
-    jq -r '"repo: \(.html_url)"' "$FETCHED/repository.json"
-    echo "Not read for a setup pull request, which reads no network: git ls-remote, the comparisons, and the pull" \
-      "requests of a ref."
-    echo
-    echo "== the repository on GitHub"
-    jq -cS '{full_name, default_branch, fork, archived, pushed_at, created_at, stargazers_count, forks_count,
-             license: .license.spdx_id}' "$FETCHED/repository.json"
-    echo "(exit status $?)"
-    echo
-    echo "== contributors (the top 5, with their commits)"
-    jq -r '.[] | "\(.login) \(.contributions)"' "$FETCHED/contributors.json"
-    echo "(exit status $?)"
-  } > "$out/repository.txt" 2>&1
-  # source.tar is GitHub's tarball of the project at the head, which git archive writes: one global PAX header with the
-  # commit, then folders, regular files and symbolic links, with an extended PAX header only for a long path, a long
-  # link target or a large size. So the script reads that shape alone, and refuses a tar of any other shape rather
-  # than reading it.
-  # GitHub's tarball is gzip, and both reads below decompress it with gzip alone: the walk with gzip.open, and tarfile
-  # with r:gz, which opens a GzipFile too, so that they read the same bytes. A file that does not start with the
-  # two bytes of gzip, 1f 8b, is refused before either reads it. tarfile's r:* would try bzip2 and xz before a plain
-  # tar, and its xz reads the LZMA-alone format too, which has no magic: a plain tar could hold, in fields that the
-  # walk does not read, a stream that tarfile would read as another tar.
-  # First a walk reads the tar once, in order, to the end of the stream. Each header has the ustar magic and version,
-  # a checksum that is the sum of its bytes, and a size of octal digits. A global PAX header is the first header of the
-  # tar, if there is one, and holds only comment (git archive adds mtime for a commit after the year 2242, and that
-  # tar is refused). An extended PAX header holds only path, linkpath and size (1 to 20 ASCII digits), and comes right
-  # before the header of a folder, a regular file or a symbolic link, with size only before a file and linkpath only
-  # before a link. A PAX header holds at most 1 MiB of records "<length> <keyword>=<value>\n", which fill it exactly,
-  # with no keyword twice, and zero bytes after them in its last block, where tarfile reads records too. The walk
-  # holds each PAX header in memory, and the bound keeps that small: git archive writes an extended PAX header only
-  # for a path, a link target or a size, and no path or link target of a real tree comes near 1 MiB. A folder or a
-  # link has the size 0. A member of any other type (a hard link, a device, a FIFO, a GNU sparse file or long name) is
-  # refused. The tar ends at its first block of zero bytes, and each byte after it is zero; that read makes gzip check
-  # its CRC and length.
-  # Then tarfile reads the tar, and each member that it reads is the walk's next one: at the same offset, with its data
-  # at the same offset, of the same size and type. After the last, no member of the walk is left. So tarfile takes no
-  # member that the walk did not read, and skips none (it takes a header that it cannot read after the first for the
-  # end of the tar, and raises nothing).
-  # A refused tar gives no source/, and source.txt says so. The reason names what is wrong: for a file that is not
-  # gzip, its first bytes; for a gzip stream that gzip cannot read, gzip's or zlib's own error; else the byte offset of
-  # the header or the record, and what is wrong there.
-  # source/ gets what is in the tar's one top folder, <owner>-<name>-<commit>/. It does not take a symbolic link, a
-  # member whose name holds a NUL byte (a PAX path can hold one, and no path of the file system can), a member whose
-  # path is absolute or has a part "..", a member outside the top folder, a member whose folder or file it cannot make
-  # (another member has its path, or the file system refuses its name, longer than 255 bytes, say), or a member whose
-  # data it cannot copy, whose file it then takes away. It names each, with the reason, and takes the others. It makes
-  # the folders with os.makedirs and each file with O_EXCL and O_NOFOLLOW, and it makes no link, so no path that it
-  # writes passes through a link and nothing that it writes is outside source/.
-  rm -rf "$out/source" "$out/source.txt"
-  if python3 -P - "$FETCHED/source.tar" "$out/source" <<'EOF'
-import gzip, os, re, shutil, sys, tarfile
-tar, into = sys.argv[1], sys.argv[2]
-top, refused = None, []
-BLOCK = 512
-# For each type of PAX header: its name, and the keywords that it may hold (the comment above).
-PAX = {b"g": ("global", (b"comment",), "comment"),
-       b"x": ("extended", (b"path", b"linkpath", b"size"), "path, linkpath or size")}
-MEMBERS = (tarfile.REGTYPE, tarfile.DIRTYPE, tarfile.SYMTYPE)
-# A record's length has at most 7 digits, so that one record can fill the 1 MiB that a PAX header may hold.
-RECORD = re.compile(rb"([1-9][0-9]{0,6}) ([^=]*)=")
-
-
-class ShapeError(Exception):
-    """A file that is not gzip, or a tar of a shape that git archive does not write, or that tarfile reads otherwise
-    (the comment above)."""
-
-
-def records(kind, at, data):
-    """{keyword: value} of the records `data` of the PAX header of type `kind` at byte `at`."""
-    name, allowed, said = PAX[kind]
-    found, pos = {}, 0
-    while pos < len(data):
-        match = RECORD.match(data, pos)
-        end = pos + int(match[1]) if match else 0
-        if not match or end > len(data) or match.end() >= end or data[end - 1] != 0x0A:
-            raise ShapeError(f"the {name} PAX header at byte {at} has a record at byte {at + BLOCK + pos} that is not"
-                             " of the form '<length> <keyword>=<value>\\n'")
-        keyword, value = match[2], data[match.end():end - 1]
-        shown = keyword.decode("utf-8", "backslashreplace")
-        if keyword not in allowed:
-            raise ShapeError(f"the {name} PAX header at byte {at} holds the keyword {shown!r}, which is not {said}")
-        if keyword in found:
-            raise ShapeError(f"the {name} PAX header at byte {at} holds the keyword {shown!r} twice")
-        if keyword == b"size" and not re.fullmatch(rb"[0-9]{1,20}", value):
-            raise ShapeError(f"the {name} PAX header at byte {at} holds a size that is not 1 to 20 ASCII digits:"
-                             f" {value[:40]!r}")
-        found[keyword] = value
-        pos = end
-    return found
-
-
-def walk(path):
-    """[(offset, offset of the data, size, type)] of each member of the tar at `path`, as tarfile gives them: the
-    offset of a member with an extended PAX header is that of the header. A file that does not start with the bytes of
-    gzip, or a tar of another shape, raises ShapeError; a gzip stream that gzip cannot read raises gzip's or zlib's own
-    error."""
-    with open(path, "rb") as raw:
-        magic = raw.read(2)
-    if magic != b"\x1f\x8b":
-        raise ShapeError(f"the file starts with the bytes {magic!r}, not with those of gzip, b'\\x1f\\x8b'")
-    members, at, extended = [], 0, None
-    with gzip.open(path, "rb") as stream:
-        def blocks(length, start, keep=False):
-            # The data of the header at `start`, `length` bytes in whole blocks, kept or dropped.
-            nonlocal at
-            kept, left = b"", -(-length // BLOCK) * BLOCK
-            while left:
-                chunk = stream.read(min(left, 1 << 16))
-                if not chunk:
-                    raise ShapeError(f"the tar ends at byte {at}, in the data of the header at byte {start}")
-                at, left = at + len(chunk), left - len(chunk)
-                kept += chunk if keep else b""
-            return kept
-
-        while True:
-            start, header = at, stream.read(BLOCK)
-            at += len(header)
-            if len(header) < BLOCK:
-                raise ShapeError(f"the tar ends at byte {at}, " + (f"in the header at byte {start}" if header
-                                                                     else "with no block of zero bytes to end it"))
-            if not header.strip(b"\0"):
-                if extended:
-                    raise ShapeError(f"the extended PAX header at byte {extended[0]} is followed by the end of the tar,"
-                                     f" at byte {start}")
-                break
-            if header[257:265] != b"ustar\x0000":
-                raise ShapeError(f"the header at byte {start} has the magic and version {header[257:265]!r}, not"
-                                 " those of ustar")
-            checksum = re.match(rb"[^\0 ]*", header[148:156])[0]
-            if (not re.fullmatch(rb"[0-7]{1,8}", checksum)
-                    or int(checksum, 8) != sum(header[:148]) + 8 * 0x20 + sum(header[156:])):
-                raise ShapeError(f"the header at byte {start} has the checksum {header[148:156]!r}, which is not the"
-                                 " sum of its bytes")
-            size = header[124:136].split(b"\0")[0]
-            if not re.fullmatch(rb"[0-7]{1,12}", size):
-                raise ShapeError(f"the header at byte {start} has the size {header[124:136]!r}, which is not octal"
-                                 " digits")
-            size, kind = int(size, 8), header[156:157]
-            if extended and kind not in MEMBERS:
-                raise ShapeError(f"the extended PAX header at byte {extended[0]} is followed by a header of the tar"
-                                 f" type {kind!r}, at byte {start}, not by the header of a member")
-            if kind in PAX:
-                if kind == b"g" and start:
-                    raise ShapeError(f"the global PAX header at byte {start} is not the first header of the tar")
-                if size > 1 << 20:
-                    raise ShapeError(f"the {PAX[kind][0]} PAX header at byte {start} holds {size} bytes, more than"
-                                     " 1 MiB")
-                data = blocks(size, start, keep=True)
-                if data[size:].strip(b"\0"):
-                    raise ShapeError(f"the {PAX[kind][0]} PAX header at byte {start} has a byte that is not zero after"
-                                     " its records, in its last block")
-                found = records(kind, start, data[:size])
-                if kind == b"x":
-                    extended = (start, found)
-                continue
-            if kind not in MEMBERS:
-                raise ShapeError(f"the header at byte {start} is of the tar type {kind!r}, not a folder (5), a regular"
-                                 " file (0) or a symbolic link (2)")
-            offset, found = extended or (start, {})
-            extended = None
-            if b"linkpath" in found and kind != tarfile.SYMTYPE:
-                raise ShapeError(f"the extended PAX header at byte {offset} gives a link target to the header at byte"
-                                 f" {start}, which is not of a symbolic link")
-            if kind == tarfile.REGTYPE:
-                size = int(found.get(b"size", size))
-                blocks(size, start)
-            elif b"size" in found:
-                raise ShapeError(f"the extended PAX header at byte {offset} gives a size to the header at byte {start},"
-                                 " which is not of a regular file")
-            elif size:
-                raise ShapeError(f"the header at byte {start} is of a folder or a symbolic link, and has the size"
-                                 f" {size}, not 0")
-            members.append((offset, start + BLOCK, size, kind))
-        while chunk := stream.read(1 << 16):
-            if chunk.strip(b"\0"):
-                byte = at + len(chunk) - len(chunk.lstrip(b"\0"))
-                raise ShapeError(f"the tar ends with the block of zero bytes at byte {start}, and the byte at {byte}"
-                                 " after it is not zero")
-            at += len(chunk)
-    return members
-
-
-def reading(member):
-    """A member as tarfile or the walk reads it, for a reason."""
-    return ("no member" if member is None
-            else "the member at byte {} (its data at byte {}, {} bytes, tar type {!r})".format(*member))
-
-
-try:
-    walked = iter(walk(tar))
-    with tarfile.open(tar, "r:gz") as archive:
-        os.mkdir(into)
-        for member in archive:
-            # Each member that tarfile reads is the walk's next one (the comment above).
-            read = (member.offset, member.offset_data, member.size, member.type)
-            if (expected := next(walked, None)) != read:
-                raise ShapeError(f"tarfile reads {reading(read)}, and the walk reads {reading(expected)}")
-            # os.makedirs() and os.open() refuse a name that holds a NUL byte with ValueError, so this refuses that
-            # member first, with its own reason.
-            if "\x00" in member.name:
-                refused.append((member.name, "its name holds a NUL byte"))
-                continue
-            parts = member.name.split("/")
-            if member.name.startswith("/") or ".." in parts:
-                refused.append((member.name, "its path leaves the folder"))
-                continue
-            top = parts[0] if top is None else top
-            rest = [part for part in parts[1:] if part not in ("", ".")]
-            if parts[0] in ("", ".") or parts[0] != top or not (rest or member.isdir()):
-                refused.append((member.name, "it is not in the top folder"))
-                continue
-            path = os.path.join(into, *rest)
-            file = None
-            try:
-                if member.isdir():
-                    os.makedirs(path, exist_ok=True)
-                elif member.type == tarfile.REGTYPE:
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    file = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-                else:
-                    refused.append((member.name, "it is a symbolic link"))
-            except (FileExistsError, NotADirectoryError, IsADirectoryError):
-                refused.append((member.name, "another member has its path"))
-            except OSError as e:
-                refused.append((member.name, f"it cannot be written here: {e.strerror or e}"))
-            except Exception as e:
-                refused.append((member.name, f"it cannot be written here: {type(e).__name__}: {e}"))
-            if file is None:
-                continue
-            try:
-                with os.fdopen(file, "wb") as out, archive.extractfile(member) as data:
-                    shutil.copyfileobj(data, out)
-            except Exception as e:
-                # This run made the file (O_EXCL): it takes away the part that it wrote.
-                os.unlink(path)
-                refused.append((member.name, f"its data cannot be copied: {type(e).__name__}: {e}"))
-        if (left := next(walked, None)) is not None:
-            raise ShapeError(f"tarfile reads {reading(None)}, and the walk reads {reading(left)}")
-except Exception as e:
-    sys.exit(f"review-gather: source.tar is not a tar file that can be read: {type(e).__name__}: {e}")
-for name, why in refused[:20]:
-    print(f"review-gather: source.tar: not taken: {name!r}: {why}", file=sys.stderr)
-if len(refused) > 20:
-    print(f"review-gather: source.tar: not taken: {len(refused) - 20} more members", file=sys.stderr)
-EOF
-  then
-    drop_instructions "$out/source"
-  else
-    rm -rf "$out/source"
-    echo "Not gathered: source.tar of the fetch job could not be read as a tar file, so there is no source to read." \
-      > "$out/source.txt"
-  fi
-  seed_listings "$out/theorem"
-  # The diff since the last review, whole, as for a change: the review reads each change since its last review, and it
-  # resumes the session of that review only when the diff is a plain diff of files under .theorem/ alone (setup_diff,
-  # above).
-  if [[ -f $FETCHED/since-last-review.diff && ! -L $FETCHED/since-last-review.diff ]]; then
-    keep since-last-review.diff cat -- "$FETCHED/since-last-review.diff"
-  fi
-  # As for a change: the head that the last review reviewed comes from the App's review comment, which the fetch job
-  # read (last-review-head.txt).
-  IFS= read -r reviewed < "$FETCHED/last-review-head.txt"
-  [[ $reviewed =~ ^[0-9a-f]{40}$ ]] || reviewed=""
-  resume_review setup "$reviewed" "" setup_diff
-}
 case ${KIND:-} in
-  setup)
-    gather_setup
-    exit 0
-    ;;
   issue)
     [[ ${ISSUE:-} =~ ^[0-9]+$ ]] || { echo "review-gather: ISSUE is not a number" >&2; exit 2; }
     mkdir -p "$out"
@@ -590,7 +85,7 @@ case ${KIND:-} in
     [[ ${NAME:-} =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || { echo "review-gather: NAME is not a project name" >&2; exit 2; }
     ;;
   *)
-    echo "review-gather: KIND is not enrollment, change, issue or setup" >&2
+    echo "review-gather: KIND is not enrollment, change or issue" >&2
     exit 2
     ;;
 esac
@@ -654,7 +149,27 @@ outside_the_project() {
 }
 if [ "$KIND" = change ]; then
   heads every_file || exit 1
-  resume_review change "$(reviewed_head)" "${HEAD_SHA:-}" change_diff
+  reviewed=$(reviewed_head)
+  # The cache's file gives the session's id, and its head must be the one the review comment gave: a session kept for
+  # another head (a review whose save did not happen, an older run's entry) is not the session of that review.
+  read -r session kept < <(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' \
+    "${LAST_REVIEW:-/nonexistent}" 2> /dev/null | head -n 1)
+  if [[ -n $reviewed && -n ${session:-} && ${kept:-} != "$reviewed" ]]; then
+    echo "review-gather: the session in the cache was kept for $kept, not $reviewed: the review is fresh"
+  elif [[ -n $reviewed && -n ${session:-} && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]]; then
+    status=$(gh api "repos/$REPO/compare/$reviewed...$HEAD_SHA" --jq .status 2> /dev/null) || status=""
+    if [ "$status" = ahead ]; then
+      keep since-last-review.diff gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$reviewed...$HEAD_SHA"
+    fi
+    if [ "$(tail -n 1 "$out/since-last-review.diff" 2> /dev/null)" = "(exit status 0)" ]; then
+      echo "review-gather: the change review resumes the session $session, with the diff from $reviewed, the head its" \
+        "last review reviewed (its review comment), to $HEAD_SHA"
+      { echo "session=$session"; echo "last=$reviewed"; } >> "${GITHUB_OUTPUT:-/dev/null}"
+    else
+      echo "review-gather: no diff from $reviewed, the head the last review reviewed, to $HEAD_SHA (compare status" \
+        "${status:-unknown}): the review is fresh"
+    fi
+  fi
   exit 0
 fi
 mkdir -p "$out/build" "$out/seeds"
@@ -707,8 +222,35 @@ for t in got:
 EOF
 keep template-history.txt git log --format='%h %cI %s' -- .github/PULL_REQUEST_TEMPLATE.md
 
-# The seed listings of each seed corpus of projects/<name>/ (seed_listings, above).
-seed_listings "$dir"
+# Each seed corpus: its listing, and the first 512 bytes of each of its first 200 inputs, in hexadecimal. The zip is the
+# pull request's. read() with no size decompresses the whole member before it cuts the member, so this reads 512 bytes
+# through open(). zipfile decompresses bzip2 and lzma with no bound, also for a read with a size. So this reads only a
+# stored or deflated member, and gives a line for each other member that says that it is not read. open() raises
+# RuntimeError for an encrypted member, because this gives no password. So this reads no member whose bit 0x1 of the
+# general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and gives a line for it too.
+for zip in "$dir"/*_seed_corpus.zip; do
+  [ -f "$zip" ] || continue
+  target=$(basename "$zip" _seed_corpus.zip)
+  keep "seeds/$target.listing.txt" unzip -l "$zip"
+  python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
+    for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
+        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
+        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
+            continue
+        if info.flag_bits & 0x1:
+            out.write("(not read: encrypted)\n")
+            continue
+        with archive.open(info) as member:
+            data = member.read(512)
+        for at in range(0, len(data), 16):
+            row = data[at:at + 16]
+            text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+            out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
+EOF
+done
 
 # The project's repository: the facts of check G1, and its source at the built commit, as data.
 # repo comes from the pull request: it is used only if oss-verify validate's rule for it holds, and its ref is used in
@@ -771,7 +313,9 @@ if [[ ${COMMIT:-} =~ ^[0-9a-f]{40}$ ]]; then
     # Data only: no git metadata, and no symbolic link, which could point the reader outside the directory.
     rm -rf "$source/.git"
     find "$source" -type l -delete
-    drop_instructions "$source"
+    # Claude Code reads a CLAUDE.md or .claude/ in a directory whose files it reads as instructions: the project's are
+    # data, so they go (rule 1 of review.md).
+    find "$source" \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' -o -name .claude \) -prune -exec rm -rf {} +
   else
     rm -rf "$source"
     echo "review-gather: could not fetch $COMMIT from $repo" >&2
@@ -785,7 +329,8 @@ fi
 # resumes: HEAD_SHA is the head commit the build took. GitHub's compare diffs from the merge base, which is the last
 # review's commit only when the head descends from it (status "ahead"). After a force-push, or on the same head (an
 # edit of the pull request), there is no diff, and the review is fresh.
-last=$(last_review)
+last=$(sed -n 's/^session=\([0-9a-f-]\{36\}\) head=\([0-9a-f]\{40\}\)$/\1 \2/p' "${LAST_REVIEW:-/nonexistent}" 2> /dev/null \
+  | head -n 1)
 session=${last% *} since=${last#* }
 since_diff() {
   gh api -H 'Accept: application/vnd.github.diff' "repos/$REPO/compare/$since...$HEAD_SHA" \

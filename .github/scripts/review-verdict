@@ -4,10 +4,10 @@
 """The verdict of an enrollment's review, as the check run `Enrollment review` of the oss-verify App records it:
 
     VERDICTS=<json> REASONS=<json> HEAD_SHA=<commit> [CRITICALITY_SCORE=<number>] [OSS_FUZZ=true|false] \\
-      [SIZES=<json>] [INSTALLER=<login>] [TICKED_BY=<login>] .github/scripts/review-verdict
+      [SIZES=<json>] .github/scripts/review-verdict
     HOLD=screen|cap|failed [FREE=<time>] [JOB=gather|screen|review|hold] RUN_URL=<run> REPO=<owner/repo> \\
       PR=<number> HEAD_SHA=<commit> [CRITICALITY_SCORE=<number>] [OSS_FUZZ=true|false] [SIZES=<json>] \\
-      [INSTALLER=<login>] [TICKED_BY=<login>] .github/scripts/review-verdict
+      .github/scripts/review-verdict
     .github/scripts/review-verdict --ids
     .github/scripts/review-verdict --holds
     .github/scripts/review-verdict --sentence success|failure|action_required
@@ -47,25 +47,13 @@ order:
                        "exec": ...}}}. It comes from build.yaml's project-builds output results_sizes, through the
                        artifact build-results and .github/scripts/take-build-results: the gather job's output sizes, at
                        most 100,000 bytes.
-    installer          INSTALLER, the account that installed the Theorem Verify App, on a setup pull request: the
-                       pull request on the owner's repository that adds .theorem/. It is null when INSTALLER is empty
-                       or not set, as on each review that is not of a setup pull request.
-    ticked_by          TICKED_BY, the account that ticked the box of the terms in the setup pull request's
-                       description. It is null when TICKED_BY is empty or not set: the box is not ticked, or the
-                       review is not of a setup pull request.
-
-INSTALLER and TICKED_BY are each empty or a GitHub login: at most 39 characters, of letters, digits and single
-hyphens, that does not start or end with a hyphen (LOGIN). Any other value, a newline too, stops this with exit status
-2, and it prints nothing.
 
 criticality_score and oss_fuzz are null when they are not known: the repository is a fork (for criticality_score
 only: a fork is not scored), it is not on github.com or GitHub does not find it, its row could not be checked, or the
 run had no gather (the daily cap) or its gather failed before the triage. A gather that fails after the triage, at the
 fetch of the source, can still give the two values: they are then the values that the run got. Only a JSON number
 that is finite and not a boolean is a CRITICALITY_SCORE, only the text true or false is an OSS_FUZZ, and only a JSON
-object is a SIZES. Any other value is null, and so is a value that is not given. On a setup pull request, the run does
-not get a criticality score, OSS-Fuzz or binary sizes, so criticality_score, oss_fuzz and sizes are null there, by
-this rule.
+object is a SIZES. Any other value is null, and so is a value that is not given.
 
 The text is json.dumps(record, ensure_ascii=True, separators=(",", ":")), with each "<", ">" and "&" replaced by
 \\u003c, \\u003e and \\u0026, in "<!-- " and " -->". A JSON parser reads each escape back as the same character. The
@@ -132,9 +120,6 @@ SCHEMA = "oss-verify/enrollment-review/1"
 TEXT_LIMIT = 65535
 # The escape of each character that can end the record's HTML comment, or start a tag or a character reference.
 ESCAPES = {ord("<"): "\\u003c", ord(">"): "\\u003e", ord("&"): "\\u0026"}
-# A GitHub login: at most 39 characters, of letters, digits and single hyphens, that does not start or end with a
-# hyphen.
-LOGIN = re.compile(r"(?=.{1,39}\Z)[A-Za-z0-9](?:-?[A-Za-z0-9])*")
 
 # No bytecode file beside the scripts: the job's checkout is main's, and only read.
 sys.dont_write_bytecode = True
@@ -170,17 +155,6 @@ def head():
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         die("HEAD_SHA is not a commit of 40 lower-case hexadecimal digits")
     return sha
-
-
-def login(name):
-    """The GitHub login in the environment variable `name` (INSTALLER or TICKED_BY), or None when it is empty or not
-    set."""
-    value = os.environ.get(name, "")
-    if not value:
-        return None
-    if not LOGIN.fullmatch(value):
-        die(f"{name} is not empty and not a GitHub login")
-    return value
 
 
 def score(text):
@@ -299,7 +273,6 @@ def main():
     if arguments:
         die("usage: review-verdict [--ids | --holds | --sentence CONCLUSION]")
     sha = head()
-    installer, ticked_by = login("INSTALLER"), login("TICKED_BY")
     hold = os.environ.get("HOLD", "")
     if hold:
         conclusion, title, summary, job = from_hold(hold)
@@ -312,7 +285,7 @@ def main():
     record = {"schema": SCHEMA, "head": sha, "hold": hold or None, "job": job, "verdicts": verdicts,
               "criticality_score": score(os.environ.get("CRITICALITY_SCORE")),
               "oss_fuzz": {"true": True, "false": False}.get(os.environ.get("OSS_FUZZ")),
-              "sizes": sizes if isinstance(sizes, dict) else None, "installer": installer, "ticked_by": ticked_by}
+              "sizes": sizes if isinstance(sizes, dict) else None}
     print(json.dumps({"conclusion": conclusion, "title": title, "summary": summary, "text": fitted(record)}))
 
 

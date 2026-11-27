@@ -5,14 +5,7 @@
 write access may go to the review without a person.
 
     python3 .github/scripts/screen.py <the .review directory> [<the projects/<name> directory>]
-    python3 .github/scripts/screen.py <the .review directory> [<the .review/theorem directory>]
     python3 .github/scripts/screen.py --sign-in
-
-For a setup pull request on an owner's repository, .review/ holds the head's .theorem/ as theorem/
-(NOT_SENT_DIRECTORIES says who writes it, and so which item is a setup pull request), and that directory is the
-project's, in the place of projects/<name>/: the caller gives it, or gives no second argument and the screen takes it.
-The checks of a project's directory then apply to it: each of its files but a seed corpus must be text, and its seed
-corpus and its patch_style.md are those in .theorem/, and none in projects/ (SETUP_SEED_CORPUS, SETUP_PATCH_STYLE_PATH).
 
 Up to three independent checks read the text that the review would read, and each answers one word, clean or
 suspicious. SCREEN_CHECKS names the ones that run, and must name Model Armor:
@@ -65,7 +58,6 @@ posts the review comment through it, and that comment is in pr.json's comments, 
 rocq-linux-process-semantics the bot's comment is not gathered, so its screen holds every word joiner.
 """
 
-import collections
 import json
 import os
 import re
@@ -199,73 +191,39 @@ KEPT_STATUS = re.compile(r"\(exit status (\d+)\)\n?\Z")
 #   source/  the project's repository at the built commit: the repository an enrollment names, not text the pull
 #            request carries, and far more text than MAX_CHARS. review.yml's header says that it is not screened; the
 #            review of every enrollment reads it, whoever wrote the pull request.
-#   theorem/ the head's .theorem/ of a setup pull request (review-gather KIND=setup, and no other kind, writes it, so
-#            an item whose .review/ holds it is a setup pull request). Its files are the project's directory: pr.diff
-#            holds each line of them that the pull request adds, and parts() walks this directory as the project's
-#            when the caller gives none, so each of its files but a seed corpus must be text.
-NOT_SENT_DIRECTORIES = ("head", "source", "theorem")
+NOT_SENT_DIRECTORIES = ("head", "source")
 # A seed corpus's listing of its inputs in hexadecimal (review-gather): a row is an offset, 16 bytes and their text.
 SEED_ROW = re.compile(r"[0-9a-f]{4}  ((?:[0-9a-f]{2} ){0,15}[0-9a-f]{2}) *  .{1,16}")
 # A file a diff shows as binary, whose lines the diff does not hold (a quoted name, as git writes a name that is not
 # ASCII, too). A seed corpus is the one binary file an enrollment has, and its inputs are read from seeds/: its line is
-# exempt only in this exact form (seed_corpus_form), with no space in the path, so that no crafted file name can take
-# its form, and only in the project's folder of the item's kind: projects/<name>/ for an item that is not a setup pull
-# request (SEED_CORPUS), and .theorem/ for a setup pull request (SETUP_SEED_CORPUS), whose seed corpora review-gather
-# KIND=setup lists in seeds/ from theorem/, and none of projects/. parts() chooses one of the two for the item
-# (NOT_SENT_DIRECTORIES says which item is a setup pull request), and the line of a seed corpus in the other folder is
-# held, as any other binary file's is.
+# exempt only in this exact form, with no space in the path, so that no crafted file name can take its form.
 BINARY_DIFF = re.compile(r"^Binary files (.*) and (.*) differ$", re.M)
-
-
-def seed_corpus_form(folder):
-    """The exact form of the binary line of a seed corpus in folder, a pattern of the project's folder."""
-    return re.compile(rf"Binary files (?:/dev/null|a/({folder}/[^/ ]+_seed_corpus\.zip)) and "
-                      rf"b/({folder}/[^/ ]+_seed_corpus\.zip) differ")
-
-
-SEED_CORPUS = seed_corpus_form(r"projects/[^/ ]+")
-SETUP_SEED_CORPUS = seed_corpus_form(r"\.theorem")
-# A diff's section for one file, and the path of the file it writes. A project's patch_style.md is read with its own
-# question (PATCH_STYLE_SYSTEM), so its section comes out of the diff and is read on its own, by the path in that
-# section's own header: the lines before its first hunk, which git writes, and never a line of the file, which an
-# author writes and could shape like a header. The path is taken as it stands, with nothing stripped: a path with a
-# space in it or after it keeps that space, and the tab git writes after such a name, and a path that holds a
-# backslash, a quotation mark or a byte that is not ASCII is quoted whole, so none of them matches here, and that file
-# is read with the rest of the diff. A project's patch_style.md is in the project's folder of the item's kind
-# (patch_style_form): projects/<name>/patch_style.md for an item that is not a setup pull request (PATCH_STYLE_PATH),
-# and .theorem/patch_style.md for a setup pull request (SETUP_PATCH_STYLE_PATH). parts() chooses one of the two for the
-# item (NOT_SENT_DIRECTORIES) and gives it to split_patch_style: a patch_style.md in the other folder is a file of the
-# pull request like any other, its section stays in the diff, and the question for the text reads it.
+SEED_CORPUS = re.compile(r"Binary files (?:/dev/null|a/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip)) and "
+                         r"b/(projects/[^/ ]+/[^/ ]+_seed_corpus\.zip) differ")
+# A diff's section for one file, and the path of the file it writes. A project's patch_style.md is read with its
+# own question (PATCH_STYLE_SYSTEM), so its section comes out of the diff and is read on its own, by the path in
+# that section's own header: the lines before its first hunk, which git writes, and never a line of the file,
+# which an author writes and could shape like a header. The path is taken as it stands, with nothing stripped:
+# a path with a space in it or after it keeps that space, and the tab git writes after such a name, and a path
+# that holds a backslash, a quotation mark or a byte that is not ASCII is quoted whole, so none of them matches
+# here, and that file is read with the rest of the diff.
 DIFF_SECTION = re.compile(r"^diff --git .*$", re.M)
 SECTION_PATH = re.compile(r"^\+\+\+ b/(.*)$", re.M)
+PATCH_STYLE_PATH = re.compile(r"projects/[^/\s]+/patch_style\.md")
 
 
-def patch_style_form(folder):
-    """The path of a project's patch_style.md in folder, a pattern of the project's folder."""
-    return re.compile(rf"{folder}/patch_style\.md")
-
-
-PATCH_STYLE_PATH = patch_style_form(r"projects/[^/\s]+")
-SETUP_PATCH_STYLE_PATH = patch_style_form(r"\.theorem")
-# A section that split_patch_style took out of a diff, as a pair of parts(): its path and the section. measure() makes
-# one too, of a part of its labelled set under such a path, since the set holds each part's source and text alone. Its
-# type is the one record that a pair is such a section: finish() reads it as diff text, and claude() asks
-# PATCH_STYLE_SYSTEM of it.
-StyleSection = collections.namedtuple("StyleSection", "source text")
-
-
-def split_patch_style(text, style_path):
-    """A diff without the sections that write a patch_style.md whose path is of the form style_path (parts() chooses
-    it for the item's kind), and those sections as their own pairs (StyleSection)."""
+def split_patch_style(text):
+    """A diff without the sections that write a projects/<name>/patch_style.md, and those sections as their own
+    (path, section) pairs."""
     starts = [m.start() for m in DIFF_SECTION.finditer(text)]
     rest, style, last = [], [], 0
     for start, end in zip(starts, starts[1:] + [len(text)]):
         section = text[start:end]
         hunk = section.find("\n@@")
         path = SECTION_PATH.search(section if hunk < 0 else section[:hunk])
-        if path and style_path.fullmatch(path.group(1)):
+        if path and PATCH_STYLE_PATH.fullmatch(path.group(1)):
             rest.append(text[last:start])
-            style.append(StyleSection(path.group(1), section))
+            style.append((path.group(1), section))
             last = end
     if not style:
         return text, []
@@ -438,8 +396,7 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #                               job and all_review_comments_are_ours() read; a login is letters, digits and
 #                               hyphens, and carries no prose.
 #   source.txt                  review-gather's fixed line in place of the project's repository when no built
-#                               commit of it came from the Build run, or for a setup pull request when source.tar
-#                               cannot be read: there is no source to read.
+#                               commit of it came from the Build run: there is no source to read.
 #   template-history.txt        git log of this repository's pull request template.
 #   validate.txt                oss-verify validate on projects/<name>/, every line of which the diff adds.
 #   build/result.md             the build job's own one-line result, or the fixed line of take-build-results when
@@ -514,22 +471,15 @@ def parts(review, project=None):
     (their bytes); and the two files of review-gather that carry text the project decides (GENERATED says which
     files are not read, and why). Any other file the gather job writes is read too, so that a file added there
     is screened until someone says it is ours. Not read: the changed files under head/, the project's repository
-    (source/), the .theorem/ of a setup pull request (theorem/, whose lines the diff holds), and the last review's
-    session. A patch_style.md the diff writes in the project's folder of the item's kind (projects/<name>/, or
-    .theorem/ for a setup pull request: an item whose review directory holds theorem/, NOT_SENT_DIRECTORIES) is read as
-    a source of its own, under its path (StyleSection): claude() asks another question of it. A patch_style.md in the
-    other folder is text of the diff like any other.
+    (source/), and the last review's session. A projects/<name>/patch_style.md the diff writes is read as a
+    source of its own, under its path: claude() asks another question of it.
 
     The filter is by author and by source, never by what the text says: main's own scripts write text addressed to
     a reviewer or to the review's model, and a screen that reads it answers about main, not about the account.
 
-    Each file the review reads must still be text: a changed file of a change (head/), and each file of the
-    project's directory (project: projects/<name>/, or .review/theorem/ for a setup pull request, which is the
-    project's directory when no project is given) but a seed corpus, and the diff must show it as text. The diff then
-    shows every line a text file's change adds, and an image or another binary file could carry what no check here
-    reads. The one binary line it may hold is a seed corpus's in the project's folder of the item's kind, whose inputs
-    are read from seeds/: in projects/<name>/ (SEED_CORPUS), or for a setup pull request in .theorem/ instead
-    (SETUP_SEED_CORPUS)."""
+    Each file the review reads must still be text: a changed file of a change (head/), and each file of
+    projects/<name>/ but a seed corpus, and the diff must show it as text. The diff then shows every line a text
+    file's change adds, and an image or another binary file could carry what no check here reads."""
     found, unscreenable, whole_files = [], [], set()
     item_path = next((os.path.join(review, n) for n in ("pr.json", "issue.json")
                       if os.path.isfile(os.path.join(review, n))), None)
@@ -579,13 +529,7 @@ def parts(review, project=None):
             if isinstance(a, dict):
                 names.append(f"{a.get('name') or ''} {a.get('email') or ''}")
     found.append((f"{shown_item}, the commit messages and the names an account chose", "\n".join(names)))
-    ours_review_comments = all_review_comments_are_ours(review)
-    # The item's kind (NOT_SENT_DIRECTORIES), and with it the project's folder: the forms of its seed corpus and of its
-    # patch_style.md are chosen here, once.
-    setup = os.path.isdir(os.path.join(review, "theorem"))
-    if setup and project is None:
-        project = os.path.join(review, "theorem")
-    seed_corpus, style_path = (SETUP_SEED_CORPUS, SETUP_PATCH_STYLE_PATH) if setup else (SEED_CORPUS, PATCH_STYLE_PATH)
+    ours_review_comments, diffs = all_review_comments_are_ours(review), set()
     for root, dirs, files in os.walk(review):
         rel = os.path.relpath(root, review)
         dirs.sort()
@@ -607,12 +551,14 @@ def parts(review, project=None):
                 continue
             if source.endswith(".diff"):
                 for m in BINARY_DIFF.finditer(text):
-                    seed = seed_corpus.fullmatch(m.group(0))
+                    seed = SEED_CORPUS.fullmatch(m.group(0))
                     if m.group(2) == "/dev/null" or (seed and seed.group(1) in (None, seed.group(2))):
                         continue   # a deleted file is read by no one; a seed corpus is read from seeds/
                     unscreenable.append(f"{source} shows {m.group(2).strip(chr(34))[2:]} as binary")
-                text, style = split_patch_style(text, style_path)
-                found.extend(style)
+                text, style = split_patch_style(text)
+                for style_path, section in style:
+                    found.append((style_path, section))
+                    diffs.add(style_path)
             if source in IN_SPANS:
                 # Ours but for what it quotes, and it quotes only in code spans (IN_SPANS).
                 found.append((f"{source}, what it quotes",
@@ -643,22 +589,21 @@ def parts(review, project=None):
                 elif hiding(text, whole_file=True):
                     unscreenable.append(f"{label} {os.path.relpath(path, directory)} holds {hiding(text, True)}, "
                                         "a character that hides text")
-    return finish(found, unscreenable, whole_files)
+    return finish(found, unscreenable, whole_files, diffs)
 
 
-def finish(found, unscreenable, whole_files=frozenset()):
+def finish(found, unscreenable, whole_files=frozenset(), diffs=frozenset()):
     """The pairs that hold text, and the reasons: characters that hide text, and too much text. whole_files names the
-    sources that are a whole file (a byte order mark may begin one); a diff and a patch_style.md's section
-    (StyleSection) are diff text. A seed's .hex.txt is read by the review as hexadecimal, so what its
+    sources that are a whole file (a byte order mark may begin one), and diffs the ones that are diff text under
+    another name (a patch_style.md's section). A seed's .hex.txt is read by the review as hexadecimal, so what its
     bytes decode to hides nothing from it. A seed corpus's listing names its zip entries as
     they are stored, so it is checked like any other text."""
-    found = [pair for pair in found if pair[1].strip()]
-    for pair in found:
-        source, text = pair
+    found = [(s, t) for s, t in found if t.strip()]
+    for source, text in found:
         if source.startswith("seeds" + os.sep) and source.endswith(".hex.txt"):
             continue
         c = hiding(text, whole_file=source in whole_files,
-                   diff=source.endswith(".diff") or isinstance(pair, StyleSection))
+                   diff=source.endswith(".diff") or source in diffs)
         if c:
             unscreenable.append(f"{source} holds {c}, a character that hides text")
     total = sum(len(s) + len(t) + 4 for s, t in found)
@@ -875,18 +820,15 @@ def claude_word(answer):
 
 
 def claude(found):
-    """The model, one question for the text and, when the pull request adds a project's patch_style.md, one for that
-    file (PATCH_STYLE_SYSTEM): the project writes it for us, and the first question would answer about what the file
-    is for. That file is each pair of found that is a StyleSection: a section that split_patch_style took out of a
-    diff, in the project's folder that parts() chose for the item's kind, or a part of a labelled set that measure()
-    made one by its path. Every other pair goes to the first question, the diff with any other patch_style.md in it
-    among them. Each question is asked CLAUDE_ANSWERS times and its word is the majority, since the model answers at
-    its own temperature (the gateway's model takes no other) and one answer on a long ordinary text is a coin with a
-    small bias. Either question's word suspicious holds the item."""
+    """The model, one question for the text and, when the enrollment adds a projects/<name>/patch_style.md, one
+    for that file (PATCH_STYLE_SYSTEM): the project writes it for us, and the first question would answer about
+    what the file is for. Each question is asked CLAUDE_ANSWERS times and its word is the majority, since the
+    model answers at its own temperature (the gateway's model takes no other) and one answer on a long ordinary
+    text is a coin with a small bias. Either question's word suspicious holds the item."""
     token = anthropic_token()
     base = env("ANTHROPIC_URL")
-    style = [pair for pair in found if isinstance(pair, StyleSection)]
-    questions = [("the text", [pair for pair in found if not isinstance(pair, StyleSection)], None)]
+    style = [(s, t) for s, t in found if PATCH_STYLE_PATH.fullmatch(s)]
+    questions = [("the text", [(s, t) for s, t in found if not PATCH_STYLE_PATH.fullmatch(s)], None)]
     if style:
         questions.append(("patch_style.md", style, PATCH_STYLE_SYSTEM))
     words, answers = {}, {}
@@ -1032,13 +974,7 @@ def measure():
     items = fetch(env("MEASURE_SET"))["items"]
     results = []
     for item in items:
-        # The set holds each part's source and text alone. A part under the path of a project's patch_style.md, in
-        # projects/<name>/ (PATCH_STYLE_PATH) or in .theorem/ (SETUP_PATCH_STYLE_PATH), is the section that parts()
-        # took out of the diff of an item of that kind (split_patch_style), one that is not a setup pull request or one
-        # that is: no other part parts() makes has such a name. So it is a StyleSection, and claude() asks of it the
-        # question that screen() asks.
-        found = [StyleSection(s, t) if PATCH_STYLE_PATH.fullmatch(s) or SETUP_PATCH_STYLE_PATH.fullmatch(s)
-                 else (s, t) for s, t in item["parts"]]
+        found = [(s, t) for s, t in item["parts"]]
         hidden = [c for c in (hiding(t) for _s, t in found) if c]
         for _ in range(repeats):
             words = {} if hidden else {c: r["word"] for c, r in run_checks(found, ran, sign_in_stops=False).items()}
@@ -1161,8 +1097,8 @@ def main():
             return no_verdict(e)
         return 0
     if len(sys.argv) not in (2, 3):
-        print("usage: screen.py <the .review directory> [<the projects/<name> or .review/theorem directory>]"
-              " | screen.py --measure | screen.py --sign-in", file=sys.stderr)
+        print("usage: screen.py <the .review directory> [<the projects/<name> directory>] | screen.py --measure"
+              " | screen.py --sign-in", file=sys.stderr)
         return 2
     try:
         verdict, ran, reason = screen(*sys.argv[1:])

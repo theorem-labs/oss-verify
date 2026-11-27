@@ -972,7 +972,7 @@ def record_in(case, text):
     case.assertLessEqual(len(text), 65_535)
     record = json.loads(text[5:-4])
     case.assertEqual(list(record), ["schema", "head", "hold", "job", "verdicts", "criticality_score", "oss_fuzz",
-                                    "sizes", "installer", "ticked_by"])
+                                    "sizes"])
     return record
 
 
@@ -1279,8 +1279,7 @@ class PostingStep(Runner):
     def test_k1_the_step_gives_review_verdict_the_head_the_verdicts_and_the_values_of_the_gather_job(self):
         """The step's case of the record of a review in the check run's output.text (ReviewVerdict's k1 and k2 check
         what review-verdict makes of each verdict, hold and value): review-verdict, as the step runs it, gets the step's
-        head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job gave. The
-        review of an enrollment is not of a setup pull request, so installer and ticked_by are null."""
+        head, the review's verdicts, and the criticality score, OSS-Fuzz and binary sizes that the gather job gave."""
         verdicts = self.verdicts(D2="fail", E="person")
         sizes = {"parse": {"plain": {"text": 1000, "exec": 1200}, "asan": {"text": 3000, "exec": 3300}},
                  "dump": {"plain": {"text": 900, "exec": None}}}
@@ -1290,7 +1289,7 @@ class PostingStep(Runner):
         record = self.kept(self.record(requests))
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07123, "oss_fuzz": False,
-                                  "sizes": sizes, "installer": None, "ticked_by": None})
+                                  "sizes": sizes})
 
     def test_k2_the_step_gives_review_verdict_the_values_of_the_gather_job_for_a_hold_too(self):
         """The step's case of the record of a hold: the review job failed after the gather job gave its values. The
@@ -1302,7 +1301,7 @@ class PostingStep(Runner):
         record = self.kept(self.record(requests))
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": self.HEAD, "hold": "failed",
                                   "job": "review", "verdicts": {}, "criticality_score": 0.5, "oss_fuzz": True,
-                                  "sizes": sizes, "installer": None, "ticked_by": None})
+                                  "sizes": sizes})
 
     def test_the_comment_stays_under_githubs_limit(self):
         _, requests = self.post(review="R" * 70_000, verdicts=self.verdicts(), CHECKS="C" * 20_000)
@@ -1343,10 +1342,10 @@ class ReviewVerdict(unittest.TestCase):
 
     def call(self, *arguments, **env):
         """Run review-verdict with `env` over a hold's values and the head HEAD40. A value of None leaves its variable
-        out, as CRITICALITY_SCORE, OSS_FUZZ, SIZES, INSTALLER and TICKED_BY are when `env` does not give them."""
+        out, as CRITICALITY_SCORE, OSS_FUZZ and SIZES are when `env` does not give them."""
         given = {**os.environ, "REVIEW_CAP": "24", "REVIEW_CAP_AUTHOR": "12", "REPO": "o/r", "PR": "8",
                  "RUN_URL": "https://github.com/o/r/actions/runs/77", "HEAD_SHA": HEAD40, "CRITICALITY_SCORE": None,
-                 "OSS_FUZZ": None, "SIZES": None, "INSTALLER": None, "TICKED_BY": None, **env}
+                 "OSS_FUZZ": None, "SIZES": None, **env}
         return subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict"), *arguments], capture_output=True,
                               text=True, env={name: value for name, value in given.items() if value is not None})
 
@@ -1375,7 +1374,7 @@ class ReviewVerdict(unittest.TestCase):
         """The record of a review at HEAD40 that gave no verdict (VERDICTS={}), with `values`."""
         return {"schema": "oss-verify/enrollment-review/1", "head": HEAD40, "hold": None, "job": None,
                 "verdicts": {check: "person" for check in check_ids("review.md")}, "criticality_score": None,
-                "oss_fuzz": None, "sizes": None, "installer": None, "ticked_by": None, **values}
+                "oss_fuzz": None, "sizes": None, **values}
 
     def test_its_ids_are_the_checklist_of_review_md_and_the_schema_requires_exactly_them(self):
         run = subprocess.run([str(ROOT / ".github" / "scripts" / "review-verdict"), "--ids"], capture_output=True,
@@ -1472,7 +1471,7 @@ class ReviewVerdict(unittest.TestCase):
         record = self.record(got)
         self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": "c" * 40, "hold": None,
                                   "job": None, "verdicts": verdicts, "criticality_score": 0.07, "oss_fuzz": False,
-                                  "sizes": sizes, "installer": None, "ticked_by": None})
+                                  "sizes": sizes})
         self.assertEqual(list(record["verdicts"]), check_ids("review.md"))
         self.assertIs(record["oss_fuzz"], False)
 
@@ -1510,53 +1509,8 @@ class ReviewVerdict(unittest.TestCase):
                                      ("action_required", title, summary))
                     record = self.record(got)
                     self.assertEqual(record, {"schema": "oss-verify/enrollment-review/1", "head": HEAD40,
-                                              "hold": env["HOLD"], "job": job, "verdicts": {}, **kept,
-                                              "installer": None, "ticked_by": None})
+                                              "hold": env["HOLD"], "job": job, "verdicts": {}, **kept})
                     self.assertIs(record["oss_fuzz"], kept["oss_fuzz"])
-
-    def test_k3_a_setup_pull_request_records_the_installer_and_the_account_that_ticked_the_box(self):
-        """INSTALLER and TICKED_BY, which only the review of a setup pull request gives. The record has each after
-        sizes, as the login or null (empty or not set), and each other value and what a maintainer reads do not
-        change. That review gets no criticality score, OSS-Fuzz or sizes, so those are null. A hold records the two
-        values too."""
-        verdicts = json.dumps({check: "pass" for check in check_ids("review.md")})
-        without = self.verdict(VERDICTS=verdicts)
-        for installer, ticked_by, kept in (("octocat", "octocat", ("octocat", "octocat")),
-                                           ("Octo-Cat-2", "", ("Octo-Cat-2", None)),
-                                           ("octocat", None, ("octocat", None)),
-                                           ("", "mona-lisa", (None, "mona-lisa")),
-                                           ("", "", (None, None))):
-            with self.subTest(installer=installer, ticked_by=ticked_by):
-                got = self.verdict(VERDICTS=verdicts, INSTALLER=installer, TICKED_BY=ticked_by)
-                self.assertEqual([got[key] for key in ("conclusion", "title", "summary")],
-                                 [without[key] for key in ("conclusion", "title", "summary")])
-                record = self.record(got)
-                self.assertEqual((record["installer"], record["ticked_by"]), kept)
-                self.assertEqual({**record, "installer": None, "ticked_by": None}, self.record(without))
-        for env in ({"HOLD": "failed", "JOB": "review"}, {"HOLD": "screen"}):
-            with self.subTest(env=env):
-                record = self.record(self.verdict(**env, INSTALLER="octocat", TICKED_BY=""))
-                self.assertEqual((record["hold"], record["installer"], record["ticked_by"]),
-                                 (env["HOLD"], "octocat", None))
-
-    def test_an_installer_or_a_ticker_that_is_not_a_login_gives_no_record(self):
-        """A GitHub login has at most 39 characters, of letters, digits and single hyphens, and does not start or end
-        with a hyphen. Any other value of INSTALLER or TICKED_BY, a newline too, stops review-verdict with exit status
-        2, and it prints nothing."""
-        longest = "a-" * 19 + "a"
-        self.assertEqual(len(longest), 39)
-        for login in (longest, "x" * 39, "a", "0", "a-b"):
-            with self.subTest(login=login):
-                record = self.record(self.verdict(VERDICTS="{}", INSTALLER=login, TICKED_BY=login))
-                self.assertEqual((record["installer"], record["ticked_by"]), (login, login))
-        for login in ("x" * 40, longest + "b", "octo--cat", "-octocat", "octocat-", "-", "a\nb", "octocat\n",
-                      "\noctocat", "octo cat", " octocat", "octo_cat", "octocat[bot]", "\u00f6ctocat", "octo.cat"):
-            for name in ("INSTALLER", "TICKED_BY"):
-                for env in ({"VERDICTS": "{}"}, {"HOLD": "screen"}):
-                    with self.subTest(login=login, name=name, env=env):
-                        run = self.call(**env, **{name: login})
-                        self.assertEqual((run.returncode, run.stdout), (2, ""), run.stderr)
-                        self.assertIn(f"review-verdict: {name} ", run.stderr)
 
     def test_a_value_of_another_kind_is_null(self):
         """Only a finite JSON number that is not a boolean is a CRITICALITY_SCORE, only the text true or false is an
@@ -2489,9 +2443,7 @@ class SinceLastReview(unittest.TestCase):
     def gathered(self, status, last=None):
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
         keep = re.search(r"^keep\(\) \{.*\}$", gather, re.M).group(0)
-        # The block reads LAST_REVIEW through last_review(), which the script defines with its other functions.
-        last_review = re.search(r"^last_review\(\) \{$.*?^\}$", gather, re.M | re.S).group(0)
-        block = gather[gather.index("last=$(last_review)"):gather.index('ls -la "$out"')]
+        block = gather[gather.index("last=$(sed"):gather.index('ls -la "$out"')]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             for sub in ("bin", "out"):
@@ -2504,8 +2456,7 @@ class SinceLastReview(unittest.TestCase):
                           '  *) printf "diff --git a/projects/p/f b/projects/p/f\\n+x\\ndiff --git a/o b/o\\n+y\\n" ;;\n'
                           "esac\n")
             gh.chmod(0o755)
-            script = f"set -euo pipefail\nout={root / 'out'}\ndir=projects/p\n{keep}\n{last_review}\n{block}"
-            run = subprocess.run(["bash", "-c", script],
+            run = subprocess.run(["bash", "-c", f"set -euo pipefail\nout={root / 'out'}\ndir=projects/p\n{keep}\n{block}"],
                                  env={**os.environ, "PATH": f"{root / 'bin'}:{os.environ['PATH']}", "REPO": "o/r",
                                       "HEAD_SHA": "1" * 40, "LAST_REVIEW": str(root / "last-review"),
                                       "GITHUB_OUTPUT": str(root / "output")},
@@ -2546,14 +2497,6 @@ class SeedHex(unittest.TestCase):
     """review-gather's seeds/<target>.hex.txt: the first 512 bytes of each of the first 200 inputs of a seed corpus, in
     hexadecimal. The seed corpus is a zip in the pull request's projects/<name>/."""
 
-    @staticmethod
-    def script():
-        """The python script of review-gather's seed_listings, which it runs as python3 -P - <zip> <hex file>."""
-        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
-        opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
-        start = gather.index(opener) + len(opener)
-        return gather[start:gather.index("\nEOF\n", start) + 1]
-
     def test_a_member_of_64_mib_in_a_small_zip_is_read_in_little_memory(self):
         """A deflated member and a bzip2 member each hold 64 MiB of spaces, in a zip of less than 1 MiB. The script of
         review-gather runs in this process, so that tracemalloc sees its memory. It takes less than 16 MiB: a read of
@@ -2563,7 +2506,10 @@ class SeedHex(unittest.TestCase):
         password."""
         import tracemalloc
         from unittest import mock
-        script = self.script()
+        gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
+        opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
+        start = gather.index(opener) + len(opener)
+        script = gather[start:gather.index("\nEOF\n", start) + 1]
         stored, deflated, spaces, size = bytes(range(256)) * 3, b"seed " * 200, b" " * (1 << 20), 64 << 20
         with tempfile.TemporaryDirectory() as directory:
             corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
@@ -2611,156 +2557,6 @@ class SeedHex(unittest.TestCase):
         self.assertEqual(members[f"== 'bzip2-64-mib': {size} bytes"],
                          ["(not read: compression method 12, not stored or deflated)"])
         self.assertEqual(members["== 'encrypted': 768 bytes"], ["(not read: encrypted)"])
-
-    # Three deflated inputs, for the tests of an input that cannot be read: the second, between two that are read.
-    INPUTS = {"first": b"first " * 100, "second": b"second " * 100, "third": bytes(range(256)) * 2}
-
-    @staticmethod
-    def entry(raw, info):
-        """Where the central directory entry of the member `info` starts in the zip `raw`. The end of central directory
-        record, the last 22 bytes, gives the offset of the first entry 16 bytes into it. An entry is 46 bytes, then its
-        name, extra field and comment, whose lengths are 28, 30 and 32 bytes into it; it gives the offset of its
-        member's local file header 42 bytes into it."""
-        def word(at, size):
-            return int.from_bytes(raw[at:at + size], "little")
-        at = word(len(raw) - 22 + 16, 4)
-        while word(at + 42, 4) != info.header_offset:
-            at += 46 + word(at + 28, 2) + word(at + 30, 2) + word(at + 32, 2)
-        return at
-
-    def flag(self, local, central):
-        """A change for second_of_three: set the bits `local` in the general purpose bit flag of the second input's
-        local file header, 6 bytes into it, and the bits `central` in that of its central directory entry, 8 bytes into
-        it."""
-        def change(raw, info):
-            for at, bits in ((info.header_offset + 6, local), (self.entry(raw, info) + 8, central)):
-                raw[at:at + 2] = (int.from_bytes(raw[at:at + 2], "little") | bits).to_bytes(2, "little")
-        return change
-
-    def second_of_three(self, change, before=""):
-        """Run the script, as review-gather runs it, on a zip of the three INPUTS, each deflated, after `change` has
-        changed its bytes: it gets them as a bytearray, and the ZipInfo of the second input. The python `before` runs
-        first, in the same process. Check that the script exits 0, that each input gets its line "== <name>: <size>
-        bytes", and that the first and the third get their rows. Return the lines that the second gets."""
-        with tempfile.TemporaryDirectory() as directory:
-            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
-            with zipfile.ZipFile(corpus, "w") as archive:
-                for name, data in self.INPUTS.items():
-                    archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
-            raw = bytearray(corpus.read_bytes())
-            with zipfile.ZipFile(corpus) as archive:
-                change(raw, archive.getinfo("second"))
-            corpus.write_bytes(bytes(raw))
-            with zipfile.ZipFile(corpus) as archive:
-                names = [info.filename for info in archive.infolist()]
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
-                                 capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            lines = hex_file.read_text().splitlines()
-        members = {}
-        for line in lines:
-            if line.startswith("== "):
-                rows = members.setdefault(line, [])
-            else:
-                rows.append(line)
-        heads = [f"== {name!r}: {len(data)} bytes" for name, data in zip(names, self.INPUTS.values())]
-        self.assertEqual(list(members), heads)
-        for head, data in ((heads[0], self.INPUTS["first"]), (heads[2], self.INPUTS["third"])):
-            self.assertEqual(b"".join(bytes.fromhex(row[6:53]) for row in members[head]), data[:512], head)
-        return members[heads[1]]
-
-    def test_an_input_whose_data_cannot_be_read_gets_a_line_and_the_next_are_read(self):
-        """The second of three deflated inputs has a deflate stream that zlib cannot decompress (its first byte gives
-        the block type 3, which deflate does not have): it gets a line that says that it is not read, with the error,
-        and the first and the third get their rows."""
-        def corrupt(raw, info):
-            # The local header: 30 bytes, then the name and the extra field, whose lengths are at 26 and 28.
-            at = info.header_offset
-            at += 30 + int.from_bytes(raw[at + 26:at + 28], "little") + int.from_bytes(raw[at + 28:at + 30], "little")
-            raw[at:at + 4] = b"\xff" * 4
-        self.assertEqual(self.second_of_three(corrupt),
-                         ["(not read: error: Error -3 while decompressing data: invalid block type)"])
-
-    def test_an_input_of_compressed_patched_data_gets_a_line_and_the_next_are_read(self):
-        """open() raises NotImplementedError for a member whose bit 0x20 of the general purpose bit flag (compressed
-        patched data) is set. The second of three inputs has it set, in its local file header and in its central
-        directory entry, and bit 0x1 not set: it gets a line that says that it is not read, and why."""
-        self.assertEqual(self.second_of_three(self.flag(0x20, 0x20)), ["(not read: compressed patched data)"])
-
-    def test_an_input_of_strong_encryption_gets_a_line_and_the_next_are_read(self):
-        """open() raises NotImplementedError for a member whose bit 0x40 of the general purpose bit flag (strong
-        encryption) is set. The second of three inputs has it set, in its local file header and in its central
-        directory entry, and bit 0x1 not set: it gets a line that says that it is not read, and why."""
-        self.assertEqual(self.second_of_three(self.flag(0x40, 0x40)), ["(not read: strong encryption)"])
-
-    def test_an_input_whose_name_is_marked_utf_8_and_is_not_gets_a_line_and_the_next_are_read(self):
-        """open() raises UnicodeDecodeError, a ValueError, for a member whose local file header has bit 0x800 of the
-        general purpose bit flag set (its name is UTF-8) and a name that is not UTF-8. The second of three inputs has
-        the name b"s\\xffcond" in its local file header (30 bytes into it) and in its central directory entry (46 bytes
-        into it), and the bit set in its local file header alone, so that ZipFile() reads the entry's name as cp437 and
-        only open() fails: it gets a line that says that it is not read, with the error."""
-        def rename(raw, info):
-            for at in (info.header_offset + 30, self.entry(raw, info) + 46):
-                raw[at:at + 6] = b"s\xffcond"
-            self.flag(0x800, 0)(raw, info)
-        self.assertEqual(self.second_of_three(rename), [
-            "(not read: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte)"])
-
-    def test_an_input_whose_read_raises_another_error_gets_a_line_and_the_next_are_read(self):
-        """An error of any type while the script opens or reads an input. No zip that this test found makes zipfile
-        raise an error there that is not one of those of the tests above, so a few lines of python that run before the
-        script make zipfile's read of the input "second" raise RuntimeError. It gets a line that says that it is not
-        read, with the error, and the first and the third get their rows."""
-        before = ("import zipfile\n"
-                  "zipfile_read = zipfile.ZipExtFile.read\n"
-                  "def refuse(member, n=-1):\n"
-                  "    if member.name == 'second':\n"
-                  "        raise RuntimeError('the read of second fails')\n"
-                  "    return zipfile_read(member, n)\n"
-                  "zipfile.ZipExtFile.read = refuse\n")
-        self.assertEqual(self.second_of_three(lambda raw, info: None, before),
-                         ["(not read: RuntimeError: the read of second fails)"])
-
-    def test_a_corpus_whose_central_directory_holds_a_name_marked_utf_8_that_is_not_says_why_it_is_not_read(self):
-        """The same name b"s\\xffcond" with bit 0x800 set where a zip tool sets it, in the local file header and in the
-        central directory entry. Then ZipFile() itself raises UnicodeDecodeError while it reads the central directory,
-        before the loop, and unzip -l still lists every input. The hexadecimal file must still be written and say that
-        the inputs are not read, with the error: else the review reads a listing of the seed corpus with no
-        hexadecimal file and no reason."""
-        with tempfile.TemporaryDirectory() as directory:
-            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
-            with zipfile.ZipFile(corpus, "w") as archive:
-                for name, data in self.INPUTS.items():
-                    archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
-            raw = bytearray(corpus.read_bytes())
-            with zipfile.ZipFile(corpus) as archive:
-                info = archive.getinfo("second")
-            for at in (info.header_offset + 30, self.entry(raw, info) + 46):
-                raw[at:at + 6] = b"s\xffcond"
-            self.flag(0x800, 0x800)(raw, info)
-            corpus.write_bytes(bytes(raw))
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=self.script(),
-                                 capture_output=True, text=True)
-            self.assertTrue(hex_file.is_file(), run.stderr)
-            self.assertIn("(not read: UnicodeDecodeError: ", hex_file.read_text(), run.stderr)
-
-    def test_a_corpus_that_zipfile_refuses_with_another_error_says_why_it_is_not_read(self):
-        """An error of any type while ZipFile() reads the central directory: here RuntimeError, from a few lines of
-        python that run before the script and make ZipFile() raise it. The hexadecimal file holds the one line that
-        says why, and the script exits 0."""
-        before = ("import zipfile\n"
-                  "def refuse(archive, *args, **kwargs):\n"
-                  "    raise RuntimeError('the central directory cannot be read')\n"
-                  "zipfile.ZipFile.__init__ = refuse\n")
-        with tempfile.TemporaryDirectory() as directory:
-            corpus, hex_file = pathlib.Path(directory) / "x_seed_corpus.zip", pathlib.Path(directory) / "x.hex.txt"
-            with zipfile.ZipFile(corpus, "w") as archive:
-                for name, data in self.INPUTS.items():
-                    archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
-                                 capture_output=True, text=True)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            self.assertEqual(hex_file.read_text(), "(not read: RuntimeError: the central directory cannot be read)\n")
 
 
 class ReviewJob(unittest.TestCase):
