@@ -688,7 +688,9 @@ def oss_fuzz_projects(gh: GitHub, slug: str) -> tuple[list[str], dict[str, objec
         text = gh.text(f"repos/google/oss-fuzz/contents/projects/{quote(candidate, safe='')}/project.yaml")
         try:
             project = validate.yaml.safe_load(text or "")
-        except (validate.yaml.YAMLError, RecursionError):
+        # ValueError covers what PyYAML's scalar constructors raise for a value such as the date 2026-02-31, which
+        # is not a YAMLError.
+        except (validate.yaml.YAMLError, RecursionError, ValueError):
             continue
         # A name is only a guess: main_repo is what says the project is for this repository.
         main_repo = project.get("main_repo") if isinstance(project, dict) else None

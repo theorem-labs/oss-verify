@@ -167,6 +167,26 @@ class Rows(unittest.TestCase):
         )
         self.assertEqual(facts, {"oss_fuzz": True})
 
+    def test_an_oss_fuzz_project_yaml_with_an_invalid_date_is_skipped(self):
+        gh = FakeGitHub(
+            responses={"repos/google/oss-fuzz/git/trees/HEAD:projects": {"tree": [
+                {"path": "example-other", "type": "tree"},
+                {"path": "example", "type": "tree"},
+            ]}},
+            texts={
+                "repos/google/oss-fuzz/contents/projects/example-other/project.yaml": (
+                    "main_repo: https://github.com/owner/example-other\nprimary_contact: 2026-02-31\n"
+                ),
+                "repos/google/oss-fuzz/contents/projects/example/project.yaml": (
+                    "main_repo: https://github.com/owner/example\n"
+                ),
+            },
+        )
+        self.assertEqual(
+            triage.oss_fuzz_row(gh, "owner/example"),
+            (triage.OK, "in OSS-Fuzz as `example`"),
+        )
+
     def test_proofs_index(self):
         self.assertEqual(triage.proofs_index_row(FakeGitHub(), "cjson")[0], triage.INFO)
         self.assertIn("no proofs index yet", triage.proofs_index_row(FakeGitHub(), "cjson")[1])
