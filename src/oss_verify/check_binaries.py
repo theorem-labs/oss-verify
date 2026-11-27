@@ -592,12 +592,17 @@ def report(block, uninstrumented, builds, libc, programs=()):
         for build in builds:
             results = by_build[build]
             listing = None if program else uninstrumented[target][build]
-            # A plain result with no list is a Go program (check_links.analyse): it links Go code only.
-            files = ("no list (a program)" if program
-                     else "no list (Go code only)" if listing is None and results["instrumented"]["result"] == "plain"
-                     else "not recorded" if listing is None else f"{len(listing)} files" + (
-                         f", {sum(1 for u in listing if u['kind'] == 'assembly')} assembly"
-                         if any(u["kind"] == "assembly" for u in listing) else ""))
+            if program:
+                files = "no list (a program)"
+            elif listing is None and results["instrumented"]["result"] == "plain":
+                # A plain result with no list is a Go program (check_links.analyse): it links Go code only.
+                files = "no list (Go code only)"
+            elif listing is None:
+                files = "not recorded"
+            else:
+                files = f"{len(listing)} files" + (
+                    f", {sum(1 for u in listing if u['kind'] == 'assembly')} assembly"
+                    if any(u["kind"] == "assembly" for u in listing) else "")
             cells = ["not run (a program)" if not_run_for_program(program, key, results[key]["result"])
                      else RESULT_WORDS.get(results[key]["result"], results[key]["result"]) for key, _ in CHECKS]
             name = f"{target}.{build}"

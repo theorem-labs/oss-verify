@@ -43,22 +43,23 @@ PROGRAM_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "progra
 PROGRAM, LINK_MAP = "hello", "hello.map"
 # The string literal that the program prints, and the same literal with one byte changed.
 GREETING, CHANGED_GREETING = '"hello from a whole program"', '"Hello from a whole program"'
-# oss-verify check takes the copies of tests/fixtures/program with two stand-ins, as tests/test_append_docker.py does
-# (D10): validate refuses its src/ directory (only regular files may sit beside project.yaml), and its repo,
+# oss-verify check takes the copies of tests/fixtures/program with two stand-ins, as tests/test_append_docker.py does:
+# validate refuses its src/ directory (only regular files may sit beside project.yaml), and its repo,
 # https://example.invalid/program, is no repository to resolve. Its Dockerfile copies the build context, so the commit
 # only names the image.
 COMMIT = "0" * 40
 # The two environment listings of the main run: build.sh writes env.txt to $OUT, and raw/plain is the $OUT of a build.
 ENV_FILES = ("raw/plain/env.txt", "twice/raw/plain/env.txt")
-# The variables that each container or shell sets for itself, which the comparison of two environments leaves out
-# (c-o-env). Docker sets HOSTNAME. bash sets PWD, SHLVL and _, and OLDPWD after a cd.
+# The variables that each container or shell sets for itself, which the comparison of two environments leaves out.
+# Docker sets HOSTNAME. bash sets PWD, SHLVL and _, and OLDPWD after a cd.
 OWN_VARIABLES = ("HOSTNAME", "PWD", "OLDPWD", "SHLVL", "_")
-# What the build of a program sees in addition to the toolchain image's own environment and HOME=/tmp (R5).
+# What the build of a program sees in addition to the toolchain image's own environment and HOME=/tmp
+# (docs/build-contract.md, "The environment of a program's build").
 ADDED_VARIABLES = ("SRC=/src", "WORK=/work", "OUT=/out")
-# The settings of the fuzz builds, which the build of a program must not see (R5): those that the spec's Problem names,
-# those that infra/base-builder/compile and toolchain.sh set and export, those that check_build.compile_build passes,
-# and the ENV of the port (tests/fixtures/program/Dockerfile). SOURCE_DATE_EPOCH and the PATH entry /tmp/shim have
-# checks of their own in test_no_setting_of_the_fuzz_builds.
+# The settings of the fuzz builds, which the build of a program must not see (docs/build-contract.md, "The environment
+# of a program's build"): those that infra/base-builder/compile and toolchain.sh set and export, those that
+# check_build.compile_build passes, and the ENV of the port (tests/fixtures/program/Dockerfile). SOURCE_DATE_EPOCH and
+# the PATH entry /tmp/shim have checks of their own in test_no_setting_of_the_fuzz_builds.
 FUZZ_SETTINGS = ("SANITIZER", "OV_TEST_PORT_SETTING", "OV_OWNER", "OFT_MAKE_JOBS", "OV_RECORD", "OV_RECORDS", "FLAV",
                  "CHOST", "CC", "CXX", "CFLAGS", "CXXFLAGS", "DRVCC", "DRVCXX", "BASE_CFLAGS", "SAN", "AR", "NM",
                  "RANLIB", "STRIP", "OBJCOPY", "CMAKE_TOOLCHAIN_FILE", "LIB_FUZZING_ENGINE",
@@ -208,8 +209,9 @@ def outside_build(toolchain, cflags=None):
 
 
 def expected_environment(toolchain):
-    """The environment that the build of a program must see (R5): the lines that `env` prints in a container of the
-    toolchain image `toolchain`, with no network and HOME=/tmp, with ADDED_VARIABLES, less OWN_VARIABLES."""
+    """The environment that the build of a program must see (docs/build-contract.md, "The environment of a program's
+    build"): the lines that `env` prints in a container of the toolchain image `toolchain`, with no network and
+    HOME=/tmp, with ADDED_VARIABLES, less OWN_VARIABLES."""
     done = subprocess.run(["docker", "run", "--rm", "--network", "none", "-e", "HOME=/tmp", toolchain, "env"],
                           capture_output=True, text=True)
     if done.returncode != 0:
@@ -290,9 +292,8 @@ def replace_once(path, old, new):
                     reason="set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
 class TestProgram:
     """oss-verify check of tests/fixtures/program, a port of one whole program that its own Makefile builds at a fixed
-    path (c-o-program, c-o-env). The fixture of the class does each run once, and records the exit status, the log and
-    the work directory of each run. It asserts nothing: each row reads what it needs, so that each row fails on its
-    own."""
+    path. The fixture of the class does each run once, and records the exit status, the log and the work directory of
+    each run. It asserts nothing: each row reads what it needs, so that each row fails on its own."""
 
     @pytest.fixture(scope="class", autouse=True)
     def set_up_class(self, request, tmp_path_factory):
@@ -469,7 +470,7 @@ class TestProgram:
 
     def test_one_extra_variable_fails_the_comparison(self):
         # The comparison of test_the_environment_of_both_builds reports one line more, and one line less, than the
-        # build saw (spec-review note 2).
+        # build saw.
         lines = listing(self.main, ENV_FILES[0])
         extra, missing = compared(lines, self.expected)
         more_extra, more_missing = compared([*lines, "OV_TEST_EXTRA=1"], self.expected)
@@ -482,8 +483,8 @@ class TestProgram:
         # only when the program that it builds is that file.
         assert self.main.code == 0, told(self.main)
         assert manifest_of(self.main)["targets"][PROGRAM]["builds"]["plain"]["sha256"] == self.pin
-        # The negative control of c-o-env: the same build with the CFLAGS of the plain fuzz build gives other bytes, so
-        # the comparison can fail. Run (b) is a plain fuzz build, and compile prints its CFLAGS.
+        # The negative control of the environment comparison: the same build with the CFLAGS of the plain fuzz build
+        # gives other bytes, so the comparison can fail. Run (b) is a plain fuzz build, and compile prints its CFLAGS.
         found = re.search(r"^compile: CFLAGS=(.*)$", self.no_programs.log, re.MULTILINE)
         assert found, f"the log of run (b) has no line compile: CFLAGS=... {told(self.no_programs)}"
         assert outside_build(self.toolchain, found.group(1)) != self.pin, found.group(1)
@@ -500,8 +501,8 @@ class TestProgram:
     def test_without_programs_there_is_no_fuzz_target(self):
         # Run (b) also sets sanitizers: [], so that the plain build alone runs. With no programs and no sanitizers, a C
         # port has four builds, and a sanitizer build of a program that links no driver may fail before the check looks
-        # for a fuzz target (not measured). So c-o-program's control "the programs field removed" is read with the
-        # plain build alone (the plan's Departures).
+        # for a fuzz target (not measured). So the control that removes the programs field is read with the plain build
+        # alone.
         run = self.no_programs
         assert run.code == 1, told(run)
         assert "the build produced no fuzz target" in run.log, told(run)

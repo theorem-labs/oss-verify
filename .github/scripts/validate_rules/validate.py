@@ -45,6 +45,7 @@ build-only patches (*.patch) with the series file that lists them in the order t
 build.sh, harness sources and patches belong there instead; a seed corpus may stay here.
 """
 import argparse
+import collections
 import io
 import os
 import pathlib
@@ -424,9 +425,9 @@ def check_programs(config):
     of fuzz targets. Each entry gives a program's file name, its SHA-256, and optionally the file name of the link map
     that the build writes. A project with programs has the plain build alone (check_builds), no seed corpus
     (check_corpus), no fuzz_targets and no mutants."""
-    entries = config.get("programs")
-    if entries is None:
+    if not has_programs(config):
         return
+    entries = config["programs"]
     if config.get("fuzz_targets") is not None:
         yield "programs and fuzz_targets together are not supported: a project with programs lists no fuzz target"
     if config.get("mutants") is not None:
@@ -458,13 +459,16 @@ def check_programs(config):
             files.append(entry["file"])
         if isinstance(entry.get("link_map"), str):
             link_maps.append((number, entry["link_map"]))
+    # A set and counts, not scans of the lists: through YAML aliases, a small project.yaml can give tens of thousands
+    # of entries.
+    file_names = set(files)
     for number, link_map in link_maps:
-        if link_map in files:
+        if link_map in file_names:
             yield f"programs: entry {number}: link_map {link_map!r} is also the file of a program"
-    for name in sorted({name for name in files if files.count(name) > 1}):
+    for name in sorted(name for name, count in collections.Counter(files).items() if count > 1):
         yield f"programs names the file {name!r} twice"
     maps = [link_map for _, link_map in link_maps]
-    for name in sorted({name for name in maps if maps.count(name) > 1}):
+    for name in sorted(name for name, count in collections.Counter(maps).items() if count > 1):
         yield f"programs names the link map {name!r} twice"
 
 

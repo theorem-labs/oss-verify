@@ -556,15 +556,16 @@ def toolchain_environment(image):
             printed = output(*inspect)
         except Failed as error:
             raise Failed(f"cannot read the environment of the toolchain image {image}: {error}") from None
+    not_a_list = (f"docker printed the environment of the toolchain image {image} as {printed.strip()[:200]!r}, "
+                  "which is not a list of NAME=value strings")
     try:
         entries = json.loads(printed)
     except ValueError:
-        entries = printed
+        raise Failed(not_a_list) from None
     if entries is None:  # a `null` list: the image sets no variable
         entries = []
     if not isinstance(entries, list):
-        raise Failed(f"docker printed the environment of the toolchain image {image} as {printed.strip()[:200]!r}, "
-                     "which is not a list of NAME=value strings")
+        raise Failed(not_a_list)
     for entry in entries:
         name, equals, _ = entry.partition("=") if isinstance(entry, str) else ("", "", "")
         if not equals or not name or name.startswith("-"):

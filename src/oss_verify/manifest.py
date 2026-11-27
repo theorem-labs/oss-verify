@@ -362,7 +362,7 @@ def collect_programs(directory, programs, out):
         name, link_map = program["file"], program.get("link_map")
         (out / name).mkdir(parents=True)
         path = directory / name
-        if not path.exists() and not path.is_symlink():
+        if not os.path.lexists(path):
             problems.append(f"program {name}, which project.yaml lists, is not in $OUT: build.sh did not write it")
         elif not is_executable(path):
             problems.append(f"program {name} is not an executable ELF file (a regular file, not a link, with the "

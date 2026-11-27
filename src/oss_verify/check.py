@@ -496,7 +496,7 @@ def main(argv=None):
         options.summary.write_text(summary_table(targets, job.builds, entries, layouts), encoding="utf-8")
     not_static = [(f"out/{target}/{entries[target][build]['file']}", layouts[target][build]["static"])
                   for target in targets for build in job.builds if layouts[target][build]["static"] is not True]
-    kind = "a program" if programs else "a fuzz target"
+    kind = "a program" if job.programs is not None else "a fuzz target"
     for binary, static in not_static:
         why = "is dynamically linked" if static is False else "has program headers that cannot be read"
         print(validate.printable(f"{job.name}: {binary} {why}: {kind} must be statically linked (no PT_INTERP "
@@ -555,7 +555,7 @@ def main(argv=None):
             code = DIFFERENT
         else:
             say(f"\nreproducible: all {matched} binaries are byte for byte the same in the second build")
-        if programs:
+        if job.programs is not None:
             # The log holds the SHA-256 of each program of the second build; the first build's are listed above.
             for target in targets_again:
                 for build in job.builds:

@@ -131,7 +131,7 @@ With `--checks`, the build also takes the compile records of the runtime. Thus t
 | `<fuzzer/FuzzedDataProvider.h>` | on the include path of `$CC` and `$CXX`, as in OSS-Fuzz |
 | `$SOURCE_DATE_EPOCH` | `1756684800`, for each tool that writes a date |
 
-`compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)). The `build.sh` of a project with `programs` gets the toolchain image's own environment instead ([Whole programs](#the-environment-of-a-programs-build)).
+`compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)). The `build.sh` of a project with `programs` gets the toolchain image's own environment instead ([below](#the-environment-of-a-programs-build)).
 
 ## The builds
 
