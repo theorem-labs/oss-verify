@@ -120,15 +120,17 @@ that are not the probe link's, a section that it takes or lacks), when layout.py
 that append would keep fails it (the reason is `layout.py check would fail the layout: ` and the text of check's first
 failure after its label: the function, where it comes from, and what fails) or append cannot make the entry of that
 decision from the final link or read it back (a LayoutError; the reason is `layout.py check could not read the layout: `
-and the error), and when a file or section name holds a double quote or a line break, which the script cannot quote. So
-an append build that keeps its layout passes layout.py check. append then writes no script (it removes one that is
-there), so that link-fuzz-target links normally; placement.tsv gives each .text input section of the probe link the
-place normal, its address there, the cause normal_layout and the reason; and it prints one line, `layout.py append:
-<target> (<build>): normal link: <reason>`, which names the function and its call, or the line of the script. An error
-of the machine while append writes a file (an OSError, such as a full disk), a file of the entry of that decision too,
-is no fallback: append prints `layout.py append: <error>` and exits 2, and link-fuzz-target stops the link. It exits 1
-when the probe link fails, as the normal link of the same command would; 2 when an input cannot be read or a file cannot
-be written; else 0.
+and the error), when a file or section name holds a double quote or a line break, which the script cannot quote, and
+when the file or the name of a .text input section holds a tab, which placement.tsv cannot hold. So an append build
+that keeps its layout passes layout.py check. append then writes no script (it removes one that is there), so that
+link-fuzz-target links normally; placement.tsv gives each .text input section of the probe link the place normal, its
+address there, the cause normal_layout and the reason (with a tab in such a name, append writes no placement.tsv, and
+link-fuzz-target leaves the link's record out, with a warning); and it prints one line, `layout.py append: <target>
+(<build>): normal link: <reason>`, which names the function and its call, or the line of the script. An error of the
+machine while append writes a file (an OSError, such as a full disk), a file of the entry of that decision too, is no
+fallback: append prints `layout.py append: <error>` and exits 2, and link-fuzz-target stops the link. It exits 1 when
+the probe link fails, as the normal link of the same command would; 2 when an input cannot be read or a file cannot be
+written; else 0.
 
 The builder image runs this file with its own python3, and the host runs its commands: it takes the standard library
 only, and the syntax of Python 3.9.
@@ -2090,11 +2092,11 @@ class Fallback(Exception):
     (append_link): a section that a plan keeps has a call or a thread-local access that lld may relax and that the plan
     does not test or decide, or a line of calls.tsv that only one of the two links has, a check link fails or is not
     what the plan asks, layout.py check's own decision on the layout that the append mode would keep fails it or the
-    entry of that decision cannot be made or read back (a LayoutError in check_guard), or a file or section name holds a
-    double quote or a line break, which the script cannot quote. Its text is the reason, for a person: it names the
-    function and its call, the line of the script, the cause of check's first failure, or the error. An OSError while
-    check_guard writes the entry, an error of the machine such as a full disk, is no Fallback: append exits 2, naming
-    the error, and the link stops."""
+    entry of that decision cannot be made or read back (a LayoutError in check_guard), a file or section name holds a
+    double quote or a line break, which the script cannot quote, or the file or the name of a .text input section a tab,
+    which placement.tsv cannot hold. Its text is the reason, for a person: it names the function and its call, the line
+    of the script, the cause of check's first failure, or the error. An OSError while check_guard writes the entry, an
+    error of the machine such as a full disk, is no Fallback: append exits 2, naming the error, and the link stops."""
 
 
 # Where the append mode puts a .text input section of the link: `place` (kept, hole, end, or normal for a normal
@@ -2828,9 +2830,13 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
 
     def normal_link(rows, message):
         # No script, so that link-fuzz-target links normally: each .text input section at the probe link's address.
+        # With no rows, no placement.tsv: link-fuzz-target then leaves the link's record out, with a warning.
         if os.path.lexists(script):
             os.unlink(script)
-        write_new(placement, rows)
+        if rows is not None:
+            write_new(placement, rows)
+        elif os.path.lexists(placement):
+            os.unlink(placement)
         print(f"layout.py append: {label}: {message}", file=sys.stderr)
         return 0
 
@@ -2840,12 +2846,24 @@ def append_link(label, entry, work, script, placement, wraps, renamed, command):
         # command, which the probe link is.
         scripted = planned.script is not None
         final, at_final = ("check", found) if scripted else ("probe", at_probe)
-        rows = tsv(placement_rows(at_final, planned.places, pairing, base))
+        try:
+            rows = tsv(placement_rows(at_final, planned.places, pairing, base))
+        except LayoutError as error:
+            # A file or section name that holds a tab, which no line of placement.tsv can hold.
+            raise Fallback(f"placement.tsv cannot name a section: {error}") from None
         check_guard(base, work, final, objects, key_file, wraps_data, rows)
     except Fallback as error:
         reason = re.sub(r"[\t\n\r]", " ", str(error))
         places = {i.row: Place("normal", i.address, NORMAL_LAYOUT, reason) for i in text}
-        return normal_link(tsv(placement_rows(at_probe, places, pairing, base)), f"normal link: {reason}")
+        try:
+            rows = tsv(placement_rows(at_probe, places, pairing, base))
+        except LayoutError as unnamed:
+            # A name that holds a tab: no placement.tsv, so link-fuzz-target leaves the link's record out, which
+            # collect would refuse too.
+            rows, why = None, f"placement.tsv cannot name a section: {unnamed}"
+            if reason != why:
+                reason += f"; {why}"
+        return normal_link(rows, f"normal link: {reason}")
     if not scripted:
         return normal_link(rows, f"the read-only data in front of .text grew by {planned.growth[0]} bytes, past its "
                            f"room of {planned.growth[1]} bytes, so this is a normal link, and every function whose "
@@ -3096,8 +3114,10 @@ def main(argv=None):
                     "check link fails or is not what the plan asks, when layout.py check would fail the layout it "
                     "would keep (naming the cause of check's first failure) or the entry of that decision cannot be "
                     "made or read back (naming the error), or when a file or section name holds a double quote or a "
-                    "line break, which the script cannot quote, write no script (the build falls back to its normal "
-                    "link), give each .text input section of placement.tsv the cause normal_layout and the reason, "
+                    "line break, which the script cannot quote, or the file or the name of a .text input section a "
+                    "tab, which placement.tsv cannot hold, write no "
+                    "script (the build falls back to its normal link), give each .text input section of placement.tsv "
+                    "the cause normal_layout and the reason (with a tab in a name, write no placement.tsv), "
                     "and print one line that names the function and its call, or the line of the script. So an "
                     "append build that keeps its layout passes layout.py check. An error of the machine while it "
                     "writes a file (a full disk, for one), a file of that entry too, is no fallback: it stops the "
