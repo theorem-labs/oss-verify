@@ -29,6 +29,9 @@ Fields allowed in project.yaml:
     ubsan_checks: {add, remove, reason}  optional  changes to the UBSan checks of the ubsan builds (default: OSS-Fuzz's, by language,
                                                    with strict-flex-arrays), with a toolchain that applies them; provisional format
     fuzz_targets: [<target>, ...]       optional   default: every fuzz target the build produces
+    programs: [{file, sha256}, ...]     optional   whole programs in place of fuzz targets: each file that build.sh
+                                                   writes, its pinned SHA-256 and an optional link_map; the plain build
+                                                   alone, with no fuzz_targets, mutants or seed corpus
     patch_style: <path in your repo>    optional   or a patch_style.md next to project.yaml
     budgets: {halts: ..., agrees: ...}  optional   memory budgets (docs/what-gets-proven.md)
     proofs: {repo: ..., path: ...}      optional   where the proofs are published (docs/project-yaml.md)
@@ -63,7 +66,7 @@ PROJECTS = check_build.ROOT / "projects"
 REQUIRED_KEYS = ("repo", "primary_contact", "language")
 OPTIONAL_KEYS = (
     "auto_ccs", "homepage", "pgp", "disabled", "dockerfile",
-    "sanitizers", "ubsan_checks", "fuzz_targets", "patch_style", "budgets", "proofs", "publish", "mutants",
+    "sanitizers", "ubsan_checks", "fuzz_targets", "programs", "patch_style", "budgets", "proofs", "publish", "mutants",
 )
 ALLOWED_KEYS = REQUIRED_KEYS + OPTIONAL_KEYS
 # Settings controlled by the program's operators. A pull request may not set them. There are none yet.
@@ -100,6 +103,11 @@ REPO_PATH = re.compile(r"(?!/)(?!.*\.\.)[A-Za-z0-9._/-]+")
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 SHORT_COMMIT = re.compile(r"[0-9a-f]{7,39}")
 TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,99}")
+# A file's SHA-256, as sha256sum writes it: 64 hex digits, lower case. validate.py has its own pattern, because
+# .github/scripts/copy-validate-rules copies no module of the package other than check_build.
+SHA256 = re.compile(r"[0-9a-f]{64}")
+# The fields of an entry of programs: file and sha256, which it must have, and link_map, which it may have.
+PROGRAM_KEYS = ("file", "sha256", "link_map")
 SIZE = re.compile(r"([1-9][0-9]{0,15})(KiB|MiB|GiB|TiB)?")
 # The smallest plain-side agrees budget: one page. Below it, no run is in the statement.
 MIN_PLAIN_BUDGET = 4096
@@ -238,12 +246,19 @@ def size_in_bytes(value):
     return int(match.group(1)) * unit
 
 
+def has_programs(config):
+    """Whether a project.yaml that is a mapping names whole programs (programs:) in place of fuzz targets. In YAML, an
+    empty `programs:` (or `~`, or `null`) means the key is not set."""
+    return config.get("programs") is not None
+
+
 def sanitizers_of(config):
-    """The sanitizers a valid project.yaml asks for."""
+    """The sanitizers a valid project.yaml asks for. Without sanitizers:, a go or jvm project and a project with
+    programs ask for none."""
     sanitizers = config.get("sanitizers")
     if isinstance(sanitizers, list):
         return list(sanitizers)
-    return [] if config.get("language") in PLAIN_ONLY else list(DEFAULT_SANITIZERS)
+    return [] if config.get("language") in PLAIN_ONLY or has_programs(config) else list(DEFAULT_SANITIZERS)
 
 
 def ubsan_changes_of(config):
@@ -381,6 +396,8 @@ def check_builds(config):
             if language in PLAIN_ONLY and sanitizers:
                 yield (f"a {language} project has the plain build only: give sanitizers: [] "
                        "or leave it out")
+            elif has_programs(config) and sanitizers:
+                yield "a project with programs has the plain build only: give sanitizers: [] or leave it out"
 
     changes = ubsan_changes_of(config)
     if changes is not None:
@@ -400,6 +417,55 @@ def check_builds(config):
     publish = config.get("publish")
     if isinstance(publish, str) and publish not in PUBLISH:
         yield f"publish must be one of {', '.join(PUBLISH)} (got {publish!r})"
+
+
+def check_programs(config):
+    """Yield a problem with programs: the whole programs that build.sh writes in $OUT, which a project names in place
+    of fuzz targets. Each entry gives a program's file name, its SHA-256, and optionally the file name of the link map
+    that the build writes. A project with programs has the plain build alone (check_builds), no seed corpus
+    (check_corpus), no fuzz_targets and no mutants."""
+    entries = config.get("programs")
+    if entries is None:
+        return
+    if config.get("fuzz_targets") is not None:
+        yield "programs and fuzz_targets together are not supported: a project with programs lists no fuzz target"
+    if config.get("mutants") is not None:
+        yield "mutants applies only to fuzz targets: the breakages do not run for a project with programs"
+    if not (isinstance(entries, list) and entries):
+        yield ("programs must be a non-empty list of mappings, each with file and sha256, and optionally link_map "
+               "(or left out, for a project of fuzz targets)")
+        return
+    files, link_maps = [], []
+    for number, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            yield f"programs: entry {number} must be a mapping with file and sha256, and optionally link_map"
+            continue
+        for key in entry:
+            if key not in PROGRAM_KEYS:
+                yield f"programs: entry {number}: unknown field {key!r} (allowed: {', '.join(PROGRAM_KEYS)})"
+        for key in ("file", "sha256"):
+            if entry.get(key) is None:
+                yield f"programs: entry {number}: missing {key}"
+        for key in ("file", "link_map"):
+            value = entry.get(key)
+            if value is not None and not (isinstance(value, str) and TARGET.fullmatch(value)):
+                yield (f"programs: entry {number}: {key} {value!r} is not a file name in $OUT "
+                       "(A-Z a-z 0-9 . _ + -, starting with a letter or digit, at most 100)")
+        sha256 = entry.get("sha256")
+        if sha256 is not None and not (isinstance(sha256, str) and SHA256.fullmatch(sha256)):
+            yield f"programs: entry {number}: sha256 must be the SHA-256 of the file: 64 hex digits, lower case"
+        if isinstance(entry.get("file"), str):
+            files.append(entry["file"])
+        if isinstance(entry.get("link_map"), str):
+            link_maps.append((number, entry["link_map"]))
+    for number, link_map in link_maps:
+        if link_map in files:
+            yield f"programs: entry {number}: link_map {link_map!r} is also the file of a program"
+    for name in sorted({name for name in files if files.count(name) > 1}):
+        yield f"programs names the file {name!r} twice"
+    maps = [link_map for _, link_map in link_maps]
+    for name in sorted({name for name in maps if maps.count(name) > 1}):
+        yield f"programs names the link map {name!r} twice"
 
 
 def check_budgets(config):
@@ -657,6 +723,7 @@ def check_config(config, files):
         *check_addresses(config),
         *check_pgp(config),
         *check_builds(config),
+        *check_programs(config),
         *check_budgets(config),
         *check_proofs(config),
         *check_files(config, files),
@@ -665,7 +732,11 @@ def check_config(config, files):
 
 def check_corpus(config, name, target, data):
     """Yield problems with a seed corpus: `data` is its bytes, or None if it is larger than MAX_CORPUS_BYTES. It is
-    read as untrusted input: its inputs are decompressed, but only up to MAX_CORPUS_EXPANDED bytes in all."""
+    read as untrusted input: its inputs are decompressed, but only up to MAX_CORPUS_EXPANDED bytes in all. A project
+    with programs has no seed corpus."""
+    if has_programs(config):
+        yield f"{name}: a project with programs has no seed corpus: the seed runs are for fuzz targets only"
+        return
     targets = config.get("fuzz_targets")
     if isinstance(targets, list) and target not in targets:
         yield f"{name} is the seed corpus of {target}, which fuzz_targets does not list"
@@ -779,10 +850,13 @@ def check_project(directory):
         where = f"in the repository at {config['dockerfile']}"
     else:
         where = "none yet"
-    targets = ", ".join(config["fuzz_targets"]) if config.get("fuzz_targets") else "all"
+    if has_programs(config):
+        built = f"programs: {', '.join(entry['file'] for entry in config['programs'])}"
+    else:
+        built = f"fuzz targets: {', '.join(config['fuzz_targets']) if config.get('fuzz_targets') else 'all'}"
     summary = (
         f"{name:<24} {config['repo']}  -> {config['primary_contact']}  "
-        f"(Dockerfile: {where}; builds: {' '.join(builds_of(config))}; fuzz targets: {targets})"
+        f"(Dockerfile: {where}; builds: {' '.join(builds_of(config))}; {built})"
     )
     return [], config_warnings(config, files), summary
 

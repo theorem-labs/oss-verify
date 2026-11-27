@@ -327,6 +327,111 @@ def yaml_of(text):
     return validate.yaml.safe_load(text)
 
 
+# The SHA-256 that a program's entry pins in the tests: 64 hex digits, lower case.
+PIN = "0123456789abcdef" * 4
+# A file name of 101 characters: one more than a program's file name may have.
+LONG = "h" * 101
+
+
+def programs(*entries):
+    """MINIMAL's project.yaml with a programs list of these entries, each one a mapping in YAML's flow style."""
+    return MINIMAL + "programs:\n" + "".join(f"  - {entry}\n" for entry in entries)
+
+
+HELLO = programs(f"{{file: hello, sha256: {PIN}, link_map: hello.map}}")
+
+
+class TestPrograms:
+    """programs: the whole programs that build.sh writes, which a project names in place of fuzz targets. Such a
+    project has the plain build alone, and no fuzz target, mutants or seed corpus."""
+
+    BUILD = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}
+
+    def refused(self, text, fragment, files=None):
+        """Check that validate refuses the project, with a problem that holds `fragment`."""
+        problems, _, summary = check(text, files)
+        assert summary is None
+        assert any(fragment in problem for problem in problems), f"{fragment!r} not in {problems}"
+
+    def test_a_program_port(self):
+        problems, warnings, summary = check(HELLO)
+        assert (problems, warnings) == ([], [])
+        assert "builds: plain; programs: hello)" in summary
+        assert validate.builds_of(yaml_of(HELLO)) == ["plain"]
+        # The language is not restricted.
+        for language in validate.BUILT_TODAY:
+            assert check(HELLO.replace("language: c\n", f"language: {language}\n"))[0] == [], language
+
+    def test_a_program_port_with_an_empty_sanitizers_list(self):
+        problems, _, summary = check(HELLO + "sanitizers: []\n")
+        assert problems == []
+        assert "builds: plain; programs: hello)" in summary
+
+    def test_two_programs(self):
+        text = programs(f"{{file: hello, sha256: {PIN}, link_map: hello.map}}",
+                        f"{{file: server, sha256: {'f' * 64}, link_map: server.map}}")
+        problems, _, summary = check(text)
+        assert problems == []
+        assert "builds: plain; programs: hello, server)" in summary
+
+    def test_a_program_port_lists_no_fuzz_target(self):
+        self.refused(HELLO + "fuzz_targets: [hello]\n", "programs and fuzz_targets together are not supported")
+
+    @pytest.mark.parametrize("sanitizers", ["[address]", "[undefined]", "[address, undefined]"])
+    def test_a_program_port_has_no_sanitizer_build(self, sanitizers):
+        self.refused(HELLO + f"sanitizers: {sanitizers}\n",
+                     "a project with programs has the plain build only: give sanitizers: [] or leave it out")
+
+    def test_a_program_port_has_no_ubsan_checks(self):
+        self.refused(HELLO + "ubsan_checks: {add: [alignment], reason: x}\n",
+                     "ubsan_checks applies only to the UBSan builds: sanitizers must contain undefined")
+
+    def test_a_program_port_has_no_mutants(self):
+        self.refused(HELLO + "mutants: breakages\n", "mutants applies only to fuzz targets")
+
+    def test_a_program_port_has_no_seed_corpus(self):
+        files = {**self.BUILD, "hello_seed_corpus.zip": corpus({"x": b"1"})}
+        # The same seed corpus is valid beside a project of fuzz targets.
+        assert check(MINIMAL, files)[0] == []
+        self.refused(HELLO, "hello_seed_corpus.zip: a project with programs has no seed corpus", files)
+
+    def test_a_program_port_keeps_the_halts_budget(self):
+        assert check(HELLO + "budgets: {halts: 16GiB}\n")[0] == []
+        self.refused(HELLO + "budgets: {agrees: {address: [2GiB, 512GiB]}}\n",
+                     "budgets.agrees.address is set, but address is not one of this project's sanitizers")
+
+    @pytest.mark.parametrize("text, fragment", [
+        (MINIMAL + "programs: hello\n", "programs must be a non-empty list"),
+        (MINIMAL + "programs: []\n", "programs must be a non-empty list"),
+        (MINIMAL + "programs: [hello]\n", "programs: entry 1 must be a mapping"),
+        (programs(f"{{file: hello, sha256: {PIN}, name: hello}}"), "programs: entry 1: unknown field 'name'"),
+        (programs(f"{{sha256: {PIN}}}"), "programs: entry 1: missing file"),
+        (programs("{file: hello}"), "programs: entry 1: missing sha256"),
+        (programs(f"{{file: bin/hello, sha256: {PIN}}}"), "programs: entry 1: file 'bin/hello' is not a file name"),
+        (programs(f"{{file: .hello, sha256: {PIN}}}"), "programs: entry 1: file '.hello' is not a file name"),
+        (programs(f"{{file: {LONG}, sha256: {PIN}}}"), f"programs: entry 1: file '{LONG}' is not a file name"),
+        (programs(f"{{file: hello, sha256: {PIN.upper()}}}"), "programs: entry 1: sha256 must be"),
+        (programs(f"{{file: hello, sha256: {PIN[:63]}}}"), "programs: entry 1: sha256 must be"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: maps/hello.map}}"),
+         "programs: entry 1: link_map 'maps/hello.map' is not a file name"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: hello}}"),
+         "programs: entry 1: link_map 'hello' is also the file of a program"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: server}}", f"{{file: server, sha256: {PIN}}}"),
+         "programs: entry 1: link_map 'server' is also the file of a program"),
+        (programs(f"{{file: hello, sha256: {PIN}}}", f"{{file: hello, sha256: {PIN}}}"),
+         "programs names the file 'hello' twice"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: out.map}}",
+                  f"{{file: server, sha256: {PIN}, link_map: out.map}}"),
+         "programs names the link map 'out.map' twice"),
+    ], ids=["not a list", "an empty list", "an entry that is not a mapping", "an unknown key", "no file", "no sha256",
+            "a file with a slash", "a file that starts with a dot", "a file of 101 characters",
+            "a sha256 in upper case", "a sha256 of 63 digits", "a link map with a slash",
+            "a link map that is its own file", "a link map that is the file of another program", "one file twice",
+            "two programs with one link map"])
+    def test_bad_program_entries(self, text, fragment):
+        self.refused(text, fragment)
+
+
 class TestProblems:
     def expect_problem(self, text, fragment, files=None, name="example"):
         problems, _, summary = check(text, files, name)
