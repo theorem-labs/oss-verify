@@ -743,6 +743,23 @@ def test_check_does_not_list_a_section_the_binary_does_not_load_that_begins_with
         "  moved, same bytes: .rodata.table (/work/a.o): 0x10200 -> 0x10240"]
 
 
+@pytest.mark.parametrize("gamma, status", [(dict(GAMMA, address=0x11040), 1), (dict(GAMMA, sha256=sha(b"gamma 2")), 0)],
+                         ids=["fails", "changed"])
+def test_check_prints_a_file_name_that_is_not_utf8_with_its_bytes(tmp_path, gamma, status):
+    # gamma's file is /work/caf<0xe9>.o, which is not UTF-8. check prints its line with that byte, and decides as it
+    # does for any other name, also when its standard output is strict UTF-8, as under en_US.UTF-8.
+    for side, rows in (("base", BASE_ROWS), ("new", [TABLE, ALPHA, BETA, gamma, COMMENT])):
+        entry = write_entry(tmp_path / side, [dict(r, file="/work/cafX.o") if r["section"] == ".text.gamma" else r
+                                              for r in rows])
+        for name in ("map", "sections.tsv"):
+            (entry / name).write_bytes((entry / name).read_bytes().replace(b"cafX", b"caf\xe9"))
+    done = subprocess.run([sys.executable, str(SCRIPT), "check", str(tmp_path / "base"), str(tmp_path / "new")],
+                          capture_output=True, env={**os.environ, "PYTHONIOENCODING": "utf-8:strict"})
+    assert (done.returncode, done.stderr) == (status, b"")
+    assert b"gamma (/work/caf\xe9.o)" in done.stdout
+    assert done.stdout.endswith(b"(build, target) pass\n")
+
+
 def jal_lost():
     alpha = dict(ALPHA, address=0x211000, sha256=sha(b"alpha 2"))
     beta = dict(BETA, address=0x11100)
