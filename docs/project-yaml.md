@@ -2,7 +2,7 @@
 
 This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory. A project can also enroll from its own repository, with the folder `.theorem/` ([below](#theorem-on-your-repository)).
 
-Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. We use the same rules when we import a project.
+Start from [templates/project.yaml](../templates/project.yaml). The rules of this page are for `projects/<name>/`, where this repository's CI checks them, and `theorem app setup` checks them for `.theorem/` ([below](#theorem-on-your-repository)). We use the same rules when we import a project.
 
 The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. We made new names only for fields that neither has.
 
@@ -239,7 +239,7 @@ Theorem's agents write the files of `statements/` and `contracts/`, and the App 
 * [The build context](#the-build-context) takes the place of what [dockerfile](#dockerfile) says about the build context. In `.theorem/`, the build context is always the root of the repository.
 * With `dockerfile` set, `.theorem/` can still hold each file of [its table](#theorem-on-your-repository), because the `Dockerfile` reads the whole repository. So the last two sentences of the second item of [dockerfile](#dockerfile), on where the fuzz target sources, the build patches and `sources` go and on the files that the project directory can then hold, apply only to `projects/<name>/`.
 * In `.theorem/`, a fuzz target of [fuzz_targets](#fuzz_targets) that the build does not make yet does not fail the build when `statements/` holds its file. Its statements need a proof, and the check "Theorem Verify" says that it is not built yet ([statements/](#statements)).
-* [Limits](#limits) takes the place of the rules of [Rules for each file](#rules-for-each-file) on folders, on names, on sizes and on the number of files, and of its rule on the name of the project directory: the folder is `.theorem/`. `.theorem/` holds the folders `statements/` and `contracts/`, its 64 files are the files beside these folders, and a file in these folders has the size that its part gives. The rule of that part on `OFT_FRAME_POINTERS` applies to `.theorem/`.
+* [Limits](#limits) takes the place of the rules of [Rules for each file](#rules-for-each-file) on folders, on names, on sizes and on the number of files, and of its rule on the name of the project directory: the folder is `.theorem/`. `.theorem/` holds the folders `statements/` and `contracts/`, its 64 files are the files beside these folders, and a file of `statements/` has the size that its part gives. The rule of that part on `OFT_FRAME_POINTERS` applies to `.theorem/`.
 
 Each other rule of this page applies to `.theorem/` as it applies to `projects/<name>/`.
 
@@ -275,7 +275,7 @@ The fuzz target must be in `fuzz_targets`. It can be a fuzz target that the buil
 * `<function>.contract.md` is the contract of the function.
 * `<function>.check.<ext>` is the contract check of the function.
 
-`<function>` is the name of the function, with `_` in place of each character outside `A-Z a-z 0-9 _`. `<ext>` is the source extension of the language of the fuzz target: `c`, `cc`, `rs`, `py` or `go`. Each file is at most 256 KiB.
+`<function>` is the name of the function, with `_` in place of each character outside `A-Z a-z 0-9 _`. `<ext>` is the source extension of the language of the fuzz target: `c`, `cc`, `rs`, `py` or `go`.
 
 The contract is a Markdown file. It has these four parts, in this order:
 

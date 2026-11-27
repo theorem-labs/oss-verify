@@ -101,9 +101,9 @@ The statements use [Linux Process Semantics](https://github.com/theorem-labs/roc
 - -1 can also refuse an input outside a property's domain, for few inputs only (4.3).
 - Everything else returns 0. Turn each expected outcome into `return 0` narrowly: check the library's error code, or catch the one exception type that the API documents.
 
-### 4.8 Give each file its licence lines
+### 4.8 Keep the licence lines of each copied file
 
-Each file of code in `.theorem/` (fuzz targets, `Dockerfile`, `build.sh`, scripts) begins with licence lines, below only a `#!`, `# syntax=` or `coding:` line. Build patches, the patches of a C library that the build declares (`docs/build-contract.md`, "The C library"), `config.yml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. No check reads them. Before you write the first file, read [references/licence-lines.md](references/licence-lines.md) for the case of each kind of file. Add no licence file to `.theorem/`, and change no file outside it.
+A file that the maintainer writes in `.theorem/` carries the licence of the repository, as each other file of the repository does. It needs no licence lines, and you do not ask the maintainer to add any. A file of code (a fuzz target, the `Dockerfile`, `build.sh`, a script) that holds lines copied from elsewhere keeps their licence lines, below only a `#!`, `# syntax=` or `coding:` line. Build patches, the patches of a C library that the build declares (`docs/build-contract.md`, "The C library"), `config.yml`, `sources`, `series`, `patch_style.md`, locks and seed inputs need none. No check reads them. Before you write the first file, read [references/licence-lines.md](references/licence-lines.md) for the case of each kind of file. Add no licence file to `.theorem/`, and change no file outside it.
 
 ## 5. Port the build
 
