@@ -1,6 +1,6 @@
 # Licence lines of a file in .theorem/
 
-A file that the maintainer writes in `.theorem/` carries the licence of their repository, as each other file of the repository does (case 4). A file copied from elsewhere keeps its licence lines (cases 1 to 3).
+A file that the maintainer writes in `.theorem/` carries the licence of their repository, as each other file of the repository does (case 4). A file copied from elsewhere keeps its licence lines (cases 1 and 3).
 When a case adds a `Modified` line, the maintainer is the author of the change: ask them which name to give, their own or their organisation's.
 Use the first case that fits.
 

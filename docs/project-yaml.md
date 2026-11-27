@@ -1,6 +1,6 @@
 # project.yaml
 
-This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory. A project can also enroll from its own repository, with the folder `.theorem/` ([below](#theorem-on-your-repository)).
+This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory. A project will also be able to enroll from its own repository, with the folder `.theorem/` ([below](#theorem-on-your-repository)). The GitHub App Theorem Verify that this needs is not made yet, and setup refuses each setup pull request until it is made.
 
 Start from [templates/project.yaml](../templates/project.yaml). The rules of this page are for `projects/<name>/`, where this repository's CI checks them, and `theorem app setup` checks them for `.theorem/` ([below](#theorem-on-your-repository)). We use the same rules when we import a project.
 
@@ -218,7 +218,7 @@ With `never`, we publish neither the proofs nor the theorem statements. With eac
 
 ## `.theorem/` on your repository
 
-A project can also enroll from its own repository, with the GitHub App Theorem Verify. The maintainer installs the App. The maintainer's coding agent writes the folder `.theorem/` at the root of the repository, with the skill [`theorem-setup`](../.claude/skills/theorem-setup/SKILL.md). The maintainer opens the setup pull request from the branch `theorem/setup`. `theorem app setup` checks the folder, and `theorem app build` builds the project from it. Start from [templates/.theorem/](../templates/.theorem/).
+A project will also be able to enroll from its own repository, with the GitHub App Theorem Verify. The App is not made yet, and until it is made, setup refuses each setup pull request. You can write `.theorem/` now. When the App is made, the maintainer installs it. The maintainer's coding agent writes the folder `.theorem/` at the root of the repository, with the skill [`theorem-setup`](../.claude/skills/theorem-setup/SKILL.md). The maintainer opens the setup pull request from the branch `theorem/setup`. `theorem app setup` checks the folder, and `theorem app build` builds the project from it. Start from [templates/.theorem/](../templates/.theorem/).
 
 `.theorem/` holds the files of a project directory, and two folders:
 
