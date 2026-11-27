@@ -231,7 +231,7 @@ A project can also enroll from its own repository, with the GitHub App Theorem V
 | `statements/<target>.<ext>` | optional: the statements of the fuzz target `<target>`, which Theorem's agents write ([below](#statements)) |
 | `contracts/<target>/` | optional: the contracts of the functions of the fuzz target `<target>`, which Theorem's agents write ([below](#contracts)) |
 
-Theorem's agents write the files of `statements/` and `contracts/`. The App commits them after a person at Theorem approves them. The maintainer's agent writes each other file.
+Theorem's agents write the files of `statements/` and `contracts/`, and the App commits them. A person at Theorem approves the contracts and the contract checks before the App commits them. The maintainer's agent writes each other file.
 
 `theorem app setup` checks this form. The rules of this page for `projects/<name>/` apply to `.theorem/` too, with these changes:
 
@@ -274,7 +274,23 @@ The fuzz target must be in `fuzz_targets`. It can be a fuzz target that the buil
 * `<function>.contract.md` is the contract of the function.
 * `<function>.check.<ext>` is the contract check of the function.
 
-`<function>` is the name of the function, with `_` in place of each character outside `A-Z a-z 0-9 _`. `<ext>` is the source extension of the language of the fuzz target: `c`, `cc`, `rs`, `py` or `go`. [rules.md](rules.md) tells what each of the two files must be. Each file is at most 256 KiB.
+`<function>` is the name of the function, with `_` in place of each character outside `A-Z a-z 0-9 _`. `<ext>` is the source extension of the language of the fuzz target: `c`, `cc`, `rs`, `py` or `go`. Each file is at most 256 KiB.
+
+The contract is a Markdown file. It has these four parts, in this order:
+
+1. `## Declaration`: the declaration of the function, in a fenced block in the language of the source.
+2. `## Requires`: what the function requires.
+3. `## Promises`: what the function promises.
+4. `## May change`: what the function may change.
+
+The contract check is a small fuzz harness:
+
+* It defines the entry point of the fuzz target, for example `LLVMFuzzerTestOneInput` in C and C++.
+* It calls the function with inputs that meet what the contract requires.
+* It builds with the project's own build.
+* It calls `abort()` when a promise of the contract does not hold.
+
+`theorem app setup` checks the form of the two files.
 
 ### Limits
 

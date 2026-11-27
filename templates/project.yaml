@@ -62,7 +62,8 @@ dockerfile: .oss-verify/Dockerfile
 patch_style: .oss-verify/patch_style.md
 
 # Optional. A limit on when we may publish the proofs about your project. We decide whether to publish them, and we
-# do not promise to (docs/project-yaml.md):
+# do not promise to. We never publish them before the pull request that enrolls your project merges
+# (docs/project-yaml.md):
 #   after_fixes  (the default) once every patch we sent you is public or upstreamed
 #   eager        as the proofs progress
 #   never        never outside Theorem

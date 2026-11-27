@@ -1,6 +1,6 @@
 ---
 name: theorem-setup
-description: Use when a maintainer asks to set up OSS Verify on their own repository, or to write or correct its .theorem/ folder, its fuzz targets (DSL ones included), its patch_style.md, its port of an OSS-Fuzz build, or the move of a project that projects/<name>/ of theorem-labs/oss-verify enrolls today.
+description: Use when a maintainer sets up OSS Verify on their own repository with the folder .theorem/ and the GitHub App Theorem Verify, or asks to write or correct a file of .theorem/, or to move an enrolled project into .theorem/.
 ---
 
 # Set up OSS Verify on a project's own repository
@@ -10,14 +10,14 @@ You are the maintainer's coding agent. You help the maintainer set up OSS Verify
 Who writes what:
 
 - You write each file of `.theorem/` outside `statements/` and `contracts/`.
-- Theorem's agents write the statements, the contracts and the contract checks, in `.theorem/statements/` and `.theorem/contracts/`, after the merge. A person at Theorem approves them before the App Theorem Verify commits them. Write no file of `statements/` or `contracts/`.
+- Theorem's agents write the statements, the contracts and the contract checks, in `.theorem/statements/` and `.theorem/contracts/`, after the merge. The App Theorem Verify commits them. A person at Theorem approves the contracts and the contract checks before the App commits them. Write no file of `statements/` or `contracts/`.
 - No agent of Theorem writes or opens the setup pull request.
 
-> **WARNING:** The App Theorem Verify is not made yet. Until it is made, setup refuses each setup pull request, and this skill gives no id of the App for the ruleset (step 8). You can write `.theorem/` now.
+> **WARNING:** The App Theorem Verify is not made yet. Until it is made, setup refuses each setup pull request, and this skill gives no id of the App for the ruleset (step 8). You can write `.theorem/` now. Then stop when the branch and the description are ready (step 7).
 
-Each relative link in this skill, and each path that starts with `docs/`, `templates/` or `app/`, is a file of [theorem-labs/oss-verify](https://github.com/theorem-labs/oss-verify). First read [docs/project-yaml.md](../../../docs/project-yaml.md), with its section [`.theorem/` on your repository](../../../docs/project-yaml.md#theorem-on-your-repository), [docs/rules.md](../../../docs/rules.md), [docs/build-contract.md](../../../docs/build-contract.md), [docs/what-gets-proven.md](../../../docs/what-gets-proven.md) and, for API-level fuzz targets, [docs/dsl.md](../../../docs/dsl.md). Tell the maintainer what the README's ["Who can enroll"](../../../README.md#who-can-enroll) says about Theorem's capacity.
+Each relative link in this skill, and each path that starts with `docs/`, `templates/` or `app/`, is a file of [theorem-labs/oss-verify](https://github.com/theorem-labs/oss-verify). First read [docs/project-yaml.md](../../../docs/project-yaml.md), with its section [`.theorem/` on your repository](../../../docs/project-yaml.md#theorem-on-your-repository), [docs/build-contract.md](../../../docs/build-contract.md), [docs/what-gets-proven.md](../../../docs/what-gets-proven.md) and, for API-level fuzz targets, [docs/dsl.md](../../../docs/dsl.md). Tell the maintainer what the README's ["Who can enroll"](../../../README.md#who-can-enroll) says about Theorem's capacity.
 
-`theorem app setup` checks `.theorem/`, and `theorem app build` builds the project from it. You cannot run them, and the maintainer cannot run them: `theorem` is not public yet. The setup check runs them on the setup pull request (step 9).
+The setup check is `theorem app setup`. It checks `.theorem/`, and `theorem app build` builds the project from it. The setup check is the statement of the rules: each refusal says what is wrong and how to fix it. So run the setup check, and follow its messages (step 9).
 
 ## 1. Start the branch
 
@@ -44,7 +44,7 @@ A project is enrolled today when theorem-labs/oss-verify has `projects/<name>/`,
 7. Change no other build step. Then the build makes the same binaries as the pins only while the files that the build compiles are the same as at the pinned commit. The source that the build copies is now the head of the setup pull request, so a change that the repository made since the pin changes the binaries and the pins too. When the default branch moved since the pinned commit, say so in the description of the setup pull request.
 8. Correct each comment of a moved file that the move makes false, for example a comment that names `fetch-commit` or says that the build copies only `build.sh`. In the description of the setup pull request, say what items 5, 6 and 8 changed in each file.
 
-The maintainer answered the questions of step 3 when the project enrolled. Ask only about what they want to change. Do the items above for each project that is enrolled today. Do steps 4, 5 and 6 of this skill (the fuzz targets, the build and `config.yml`) only for a file that is missing or that breaks a rule. A change to a fuzz target, to a build step or to the built source changes the binaries, so the pins change too. Make a change to a fuzz target or a build step only when a fuzz target breaks a rule of [docs/rules.md](../../../docs/rules.md), or when the maintainer asks for it, and say in the description of the setup pull request what changed and why.
+The maintainer answered the questions of step 3 when the project enrolled. Ask only about what they want to change. Do the items above for each project that is enrolled today. Do steps 4, 5 and 6 of this skill (the fuzz targets, the build and `config.yml`) only for a file that is missing or that breaks a rule. A change to a fuzz target, to a build step or to the built source changes the binaries, so the pins change too. Make a change to a fuzz target or a build step only when a fuzz target breaks a rule of step 4, when a message of the setup check asks for it (step 9), or when the maintainer asks for it. Say in the description of the setup pull request what changed and why.
 
 ## 3. Ask the maintainer
 
@@ -52,7 +52,7 @@ Before you talk to the maintainer, read [references/maintainer-questions.md](ref
 
 ## 4. Write the fuzz targets
 
-[docs/rules.md](../../../docs/rules.md) gives the rules of a fuzz target, and the checks that the setup check applies to it. This step tells how to meet them.
+This step gives the rules of a fuzz target, and tells how to meet them. The setup check measures parts of 4.3 and 4.4 for each fuzz target, with its checks "reach" and "breakages" (step 9).
 
 Start from the fuzz targets that the maintainer keeps (the project's own and its OSS-Fuzz ones), then write those that step 3 needs. A fuzz target defines `int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)`. For an API-level entry point, start from the DSL (`docs/dsl.md`). Any shape that obeys this step is fine.
 
@@ -74,7 +74,7 @@ A small set of inputs, the coverage witness, must run each API call and each pro
 
 ### 4.4 Show that each property can fail
 
-For each property, find a breakage: a one-line change, in the library or the fuzz target, that makes the property fail on an input of the seed corpus. The same reference tells how. Undo the change, and record it with the input in the property's comment. The path starts at the `WORKDIR` of the `Dockerfile`. With `templates/.theorem/Dockerfile`, the `WORKDIR` is the copy of the repository root, so a file in `.theorem/` is `.theorem/<file>`. The line is its number at the commit that the setup check builds, and the old text occurs once on it (`docs/rules.md`, "What the checks of a fuzz target find"):
+For each property, find a breakage: a one-line change, in the library or the fuzz target, that makes the property fail on an input of the seed corpus. The same reference tells how. Undo the change, and record it with the input in the property's comment. The path starts at the `WORKDIR` of the `Dockerfile`. With `templates/.theorem/Dockerfile`, the `WORKDIR` is the copy of the repository root, so a file in `.theorem/` is `.theorem/<file>`. The line is its number at the commit that the setup check builds, and the old text occurs once on it (`docs/build-contract.md`, "The checks of a fuzz target"):
 
        /* The checksum of the block closes.
         * mutant: src/checksum.c:51 `return sum == 0;` -> `return 1;`
@@ -122,7 +122,9 @@ Start from [templates/.theorem/config.yml](../../../templates/.theorem/config.ym
        - [ ] I accept the [OSS Verify terms](https://theorem.dev/oss-verify/terms/)
 
    This line is `- [ ] ` followed by `setup_pull_request.terms_line` of [app/sentences.yaml](../../../app/sentences.yaml). Do not tick the box. The account that installed the App ticks it later (step 10). The setup check reads which account ticked it from the edits of the description.
-2. Show the branch and the description to the maintainer. The maintainer pushes the branch to the repository, and opens the setup pull request from it into the default branch. The App then shows the check "Theorem Verify" with the title "Not checked yet." on the setup pull request.
+2. Show the branch and the description to the maintainer.
+3. While step 8 gives no id of the App, stop here, before the push: the App is not made yet. Tell the maintainer that the branch and the description are ready, and that setup refuses each setup pull request until the App is made.
+4. The maintainer pushes the branch to the repository, and opens the setup pull request from it into the default branch. The App then shows the check "Theorem Verify" with the title "Not checked yet." on the setup pull request.
 
 ## 8. Add the ruleset
 
@@ -175,11 +177,13 @@ In GitHub's settings, the maintainer does these steps:
 6. Add the check `Theorem Verify`. Set its source to the App Theorem Verify, not to "any source". GitHub offers the App only after the App showed a check on the repository, so open the setup pull request first (step 7).
 7. Click **Create**.
 
-## 9. Ask for the setup check, and correct `.theorem/`
+## 9. Run the setup check, and correct `.theorem/`
 
-The maintainer asks for the check with the button "Check" on the check run "Theorem Verify", or with a comment `@theorem-verify check` on the setup pull request, as for every check. The setup check runs `theorem app setup` on `.theorem/`, and builds each fuzz target once with `theorem app build`.
+The setup check, `theorem app setup`, is the statement of the rules. Each refusal says what is wrong and how to fix it. So run the setup check, and follow its messages:
 
-When a check of setup fails, the check run has the title "<failed> of <count> setup checks failed." Its summary has one line for each check that failed, which says what to change. Correct `.theorem/` from these lines, and commit on `theorem/setup`. Then the maintainer asks for the check again. Each new commit shows "Not checked yet." until the maintainer asks. This is the only loop. Do not tell the maintainer to run a tool that they cannot get.
+1. Where `theorem` with its `app` plug-in is on your `PATH`, run `theorem app setup` in the root of the repository first. Correct `.theorem/` from each message. Run it again until it passes.
+2. On the setup pull request, the App runs the setup check when the maintainer asks for it, with the button "Check" on the check run "Theorem Verify", or with a comment `@theorem-verify check`, as for every check. The setup check runs `theorem app setup` on `.theorem/`, and builds each fuzz target once with `theorem app build`.
+3. When a check of setup fails, the check run has the title "<failed> of <count> setup checks failed." Its summary has one line for each check that failed, which says what to change. Correct `.theorem/` from these lines, and commit on `theorem/setup`. Then the maintainer asks for the check again. Each new commit shows "Not checked yet." until the maintainer asks. Do this until the check passes.
 
 | check of setup | it passes when |
 |---|---|
@@ -193,7 +197,9 @@ When a check of setup fails, the check run has the title "<failed> of <count> se
 | `statements` | no file of `.theorem/statements/` loads a module that a statement may not load. You write no such file |
 | `build` | the fuzz targets build from the build steps in `.theorem/` |
 
-The summary also has one line for each fuzz target, with the results of the checks of `docs/rules.md`: "ELF and instructions", "system calls", "quiet and loud", "instrumented code", "reach" and "breakages". Correct each check that failed.
+The summary also has one line for each fuzz target, with the results of the checks of `theorem app build checks`: "ELF and instructions", "system calls", "quiet and loud", "instrumented code", "reach" and "breakages". Correct each check that failed.
+
+Do not tell the maintainer to run a tool that they cannot get.
 
 ## 10. Tick the box and merge
 
@@ -201,4 +207,4 @@ The check `terms` passes only when the box of the terms is ticked. So the accoun
 
 Only the account that installed the App ticks the box and merges. A merge that changes `.theorem/`, or a merge before the check passed at the head of the setup pull request, does not enroll the repository.
 
-After the merge, Theorem's agents write the statements, the contracts and the contract checks. A person at Theorem approves them before the App commits them.
+After the merge, Theorem's agents write the statements, the contracts and the contract checks, and the App commits them. A person at Theorem approves the contracts and the contract checks before the App commits them.
