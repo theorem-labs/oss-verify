@@ -2644,6 +2644,12 @@ class SeedHex(unittest.TestCase):
         directory entry, and bit 0x1 not set: it gets a line that says that it is not read, and why."""
         self.assertEqual(self.second_of_three(self.flag(0x40, 0x40)), ["(not read: strong encryption)"])
 
+    def test_an_input_that_is_encrypted_and_of_strong_encryption_gets_the_line_encrypted(self):
+        """The reasons are tested in an order, and the first that holds is written: bit 0x1 (encrypted) comes before bit
+        0x40 (strong encryption). The second of three inputs has both bits set, in its local file header and in its
+        central directory entry: it gets the line of bit 0x1, and the next input is read."""
+        self.assertEqual(self.second_of_three(self.flag(0x41, 0x41)), ["(not read: encrypted)"])
+
     def test_an_input_whose_name_is_marked_utf_8_and_is_not_gets_a_line_and_the_next_are_read(self):
         """open() raises UnicodeDecodeError, a ValueError, for a member whose local file header has bit 0x800 of the
         general purpose bit flag set (its name is UTF-8) and a name that is not UTF-8. The second of three inputs has
