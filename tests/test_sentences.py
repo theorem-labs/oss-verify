@@ -241,16 +241,8 @@ def long_buttons(text):
 
 def missing_keys(text):
     """Each key of REQUIRED that the file does not hold."""
-    data = yaml.safe_load(text)
-    problems = []
-    for path in REQUIRED:
-        node = data
-        for key in path.split("."):
-            if not isinstance(node, dict) or key not in node:
-                problems.append(f"{path}: the key is missing")
-                break
-            node = node[key]
-    return problems
+    held = {path for path, _ in keys(yaml.safe_load(text))}
+    return [f"{path}: the key is missing" for path in REQUIRED if path not in held]
 
 
 def dropped_keys(text):
@@ -270,7 +262,8 @@ def check_run_states(text):
     the key conclusion; CONCLUSIONS, BUTTONS and TITLES are for these states only. A key conclusion elsewhere, such as
     in a state of outside_proof_check_run, has the rule of ALLOWED alone. When the file does not hold a state of
     CONCLUSIONS, missing_keys names it."""
-    check_run = check_run_of(text)
+    data = yaml.safe_load(text)
+    check_run = mapping(mapping(data).get("check_run"))
     states = [*CONCLUSIONS, *(key for key, value in check_run.items()
                                if "conclusion" in mapping(value) and key not in CONCLUSIONS)]
     allowed = f"{', '.join(ALLOWED[:-1])} or {ALLOWED[-1]}"
@@ -291,7 +284,7 @@ def check_run_states(text):
             problems.append(f"check_run.{state}.title: \"{value.get('title')}\", not \"{TITLES[state]}\"")
     # The loop above names each state of check_run whose conclusion is outside ALLOWED, so this loop skips them.
     named = {f"check_run.{key}.conclusion" for key in check_run}
-    for path, conclusion in keys(yaml.safe_load(text)):
+    for path, conclusion in keys(data):
         if path.rpartition(".")[2] == "conclusion" and path not in named and conclusion not in ALLOWED:
             problems.append(f"{path}: {conclusion}, but the conclusion of a state is {allowed}")
     return problems
@@ -326,7 +319,7 @@ CHECKS = (part_kinds, long_buttons, missing_keys, dropped_keys, check_run_states
           check_lines)
 
 
-def problems(text):
+def all_problems(text):
     """The problems of each check of CHECKS, in the order of CHECKS."""
     return [problem for check in CHECKS for problem in check(text)]
 
@@ -353,6 +346,10 @@ NEUTRAL = "neutral, but the conclusion of a state is success, failure or action_
                    'title: "All {count} statements hold."  # {count}: a text, from the pull request')],
                  ["check_run.holds.title: the part {count} has the kind \"a text\", which is not in KINDS"],
                  id="a kind outside the list"),
+    pytest.param([('    check: "Check this commit"\n', '    check: "Check this commit and each of its targets"\n')],
+                 ["check_run.button_descriptions.check: \"Check this commit and each of its targets\" has 41 "
+                  "characters, more than 40"],
+                 id="a button description of 41 characters"),
     pytest.param([("  our_fault:\n    conclusion: failure\n", "  our_fault:\n    conclusion: neutral\n")],
                  [f"check_run.our_fault.conclusion: {NEUTRAL}"], id="a state with the conclusion neutral"),
     # R1 of OSSV-660: no key has the conclusion neutral, because GitHub counts a neutral required check as passed. The
@@ -360,6 +357,18 @@ NEUTRAL = "neutral, but the conclusion of a state is success, failure or action_
     pytest.param([("  fails:\n    conclusion: failure\n", "  fails:\n    conclusion: neutral\n")],
                  [f"outside_proof_check_run.fails.conclusion: {NEUTRAL}"],
                  id="a state of the outside proof check with the conclusion neutral"),
+    # An allowed conclusion, a button and a title that are not those that R1 of OSSV-660 gives the state.
+    pytest.param([('    conclusion: success\n    title: "All {count} statements hold."',
+                   '    conclusion: failure\n    title: "All {count} statements hold."')],
+                 ["check_run.holds.conclusion: failure, not success"],
+                 id="the state holds with the conclusion failure"),
+    pytest.param([("  did_not_build:\n    conclusion: failure\n    button: rerun\n",
+                   "  did_not_build:\n    conclusion: failure\n    button: check\n")],
+                 ["check_run.did_not_build.button: check, not rerun"],
+                 id="the state did_not_build with the button check"),
+    pytest.param([('title: "Not checked yet."', 'title: "Waiting for a check."')],
+                 ["check_run.check_needed.title: \"Waiting for a check.\", not \"Not checked yet.\""],
+                 id="the state check_needed with another title"),
     pytest.param([('  publication: "Publish the proofs of {count} fuzz targets"  # {count}: a number\n', "")],
                  ["commit_messages.publication: the key is missing"], id="a required key deleted"),
     pytest.param([("\nopen_pull_requests:",
@@ -380,6 +389,9 @@ NEUTRAL = "neutral, but the conclusion of a state is success, failure or action_
                  ["check_run.no_statements.summary: \"This statement does not hold.\" says that a statement does not "
                   "hold"],
                  id="a sentence of the check run that says a statement does not hold"),
+    pytest.param([('\\n{failing_checks}\\n{check_lines}"', '\\n{failing_checks}"')],
+                 ["check_run.setup.summary: the summary has no part {check_lines}"],
+                 id="a summary of setup without {check_lines}"),
 ])
 def test_control(tmp_path, changes, said):
     text = SENTENCES.read_text(encoding="utf-8")
@@ -388,4 +400,4 @@ def test_control(tmp_path, changes, said):
         text = text.replace(old, new)
     copy = tmp_path / "sentences.yaml"
     copy.write_text(text, encoding="utf-8")
-    assert problems(copy.read_text(encoding="utf-8")) == said
+    assert all_problems(copy.read_text(encoding="utf-8")) == said

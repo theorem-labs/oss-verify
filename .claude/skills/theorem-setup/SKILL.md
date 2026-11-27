@@ -17,7 +17,7 @@ Who writes what:
 
 Each relative link in this skill, and each path that starts with `docs/`, `templates/` or `app/`, is a file of [theorem-labs/oss-verify](https://github.com/theorem-labs/oss-verify). First read [docs/project-yaml.md](../../../docs/project-yaml.md), with its section [`.theorem/` on your repository](../../../docs/project-yaml.md#theorem-on-your-repository), [docs/build-contract.md](../../../docs/build-contract.md), [docs/what-gets-proven.md](../../../docs/what-gets-proven.md) and, for API-level fuzz targets, [docs/dsl.md](../../../docs/dsl.md). Tell the maintainer what the README's ["Who can enroll"](../../../README.md#who-can-enroll) says about Theorem's capacity.
 
-The setup check is `theorem app setup`. It checks `.theorem/`, and `theorem app build` builds the project from it. The setup check is the statement of the rules: each refusal says what is wrong and how to fix it. So run the setup check, and follow its messages (step 9).
+The setup check is `theorem app setup`. It checks `.theorem/`, and `theorem app build` builds the project from it. Step 9 runs the setup check and follows its messages.
 
 ## 1. Start the branch
 
@@ -29,7 +29,7 @@ Before you write `.theorem/`, check these three things with the maintainer. `gh 
 
 - The repository is not a fork. Set up the repository that it was forked from.
 - GitHub finds an open-source licence file in the repository. If it finds none, the maintainer adds one in a pull request of its own, before the setup pull request.
-- The maintainer installs the App Theorem Verify on the repository. Ask which account installs it, and tell the maintainer that only that account can tick the box of the terms and merge (step 10).
+- When the App Theorem Verify is made, the maintainer installs it on the repository. Ask which account will install it, and tell the maintainer that only that account can tick the box of the terms and merge (step 10). While the App is not made, go on without it.
 
 ## 2. A project that is enrolled today
 
@@ -123,14 +123,14 @@ Start from [templates/.theorem/config.yml](../../../templates/.theorem/config.ym
 
    This line is `- [ ] ` followed by `setup_pull_request.terms_line` of [app/sentences.yaml](../../../app/sentences.yaml). Do not tick the box. The account that installed the App ticks it later (step 10). The setup check reads which account ticked it from the edits of the description.
 2. Show the branch and the description to the maintainer.
-3. While step 8 gives no id of the App, stop here, before the push: the App is not made yet. Tell the maintainer that the branch and the description are ready, and that setup refuses each setup pull request until the App is made.
+3. Where `theorem` with its `app` plug-in is on your `PATH`, first run `theorem app setup` as step 9, item 1, says. While step 8 gives no id of the App, stop here, before the push: the App is not made yet. Tell the maintainer that the branch and the description are ready, and that setup refuses each setup pull request until the App is made.
 4. The maintainer pushes the branch to the repository, and opens the setup pull request from it into the default branch. The App then shows the check "Theorem Verify" with the title "Not checked yet." on the setup pull request.
 
 ## 8. Add the ruleset
 
-The maintainer who installed the App adds a ruleset on the default branch. The ruleset requires the status check "Theorem Verify" from the App Theorem Verify, by the App's `integration_id`. It also requires a branch that is up to date before the merge (`strict_required_status_checks_policy: true`). Thus no other App and no other job that shows a check with the name "Theorem Verify" counts. The setup check refuses a ruleset that requires the check with no `integration_id` or with another id, or that has no rule for a branch that is up to date.
+The maintainer who installed the App adds a ruleset on the default branch. The ruleset requires the status check "Theorem Verify" from the App Theorem Verify, by the App's `integration_id`. Thus no other App and no other job that shows a check with the name "Theorem Verify" counts. The ruleset also requires a branch that is up to date before the merge (`strict_required_status_checks_policy: true`). The setup check refuses a ruleset that requires the check with no `integration_id` or with another id, or that has no rule for a branch that is up to date.
 
-`theorem app` holds the id of the App in its constant `THEOREM_APP_VERIFY_ID`. Today this constant is 0, because the App is not made yet. So this skill gives no id, and setup refuses each setup pull request until the App is made.
+The App Theorem Verify is not made yet. So it has no id, and this skill gives none.
 
 With the GitHub CLI, the maintainer sends this body:
 
@@ -197,7 +197,7 @@ The setup check, `theorem app setup`, is the statement of the rules. Each refusa
 | `statements` | no file of `.theorem/statements/` loads a module that a statement may not load. You write no such file |
 | `build` | the fuzz targets build from the build steps in `.theorem/` |
 
-The summary also has one line for each fuzz target, with the results of the checks of `theorem app build checks`: "ELF and instructions", "system calls", "quiet and loud", "instrumented code", "reach" and "breakages". Correct each check that failed.
+The summary also has one line for each fuzz target with a decided check. Each line gives the results of the checks of `theorem app build checks`: "ELF and instructions", "system calls", "quiet and loud", "instrumented code", "reach" and "breakages". Correct each check that failed.
 
 Do not tell the maintainer to run a tool that they cannot get.
 

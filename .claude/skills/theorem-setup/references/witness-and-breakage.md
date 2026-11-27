@@ -6,11 +6,11 @@ The coverage witness:
 
 1. Compile the fuzz target for your machine with `-g -O0 -fsanitize=fuzzer -fprofile-instr-generate -fcoverage-mapping`, linked with the library. If your clang has no libFuzzer, link a small `main` that calls `LLVMFuzzerTestOneInput` on each file.
 2. Unzip the seed corpus into a folder, and run the fuzz target on each input: `LLVM_PROFILE_FILE=witness.profraw ./<target> <folder>/*`.
-3. Show the counts: `llvm-profdata merge -o witness.profdata witness.profraw`, then `llvm-cov show ./<target> -instr-profile=witness.profdata`.
+3. Show the counts: `llvm-profdata merge -o witness.profdata witness.profraw`, then `llvm-cov show ./<target> -instr-profile=witness.profdata <fuzz target source>`.
 4. The count of each API call and each property check must be more than 0. Add an input for each 0.
 
 A breakage of one property:
 
 1. Make a one-line change that breaks the property, for example flip a comparison or remove an update, and rebuild the fuzz target above.
-2. Find an input that makes the fuzz target abort. Run it as a fuzzer for a few minutes (`./<target> -max_total_time=120 <folder>`), or write the input by hand. Add the input to the seed corpus.
+2. Find an input that makes the fuzz target abort. Run it as a fuzzer for a few minutes, with an empty first folder: `mkdir -p found && ./<target> -max_total_time=120 found <folder>`. libFuzzer writes each new input that it keeps into its first folder, so the seed folder does not change. Or write the input by hand. Add to the seed corpus only the `crash-*` input that aborts.
 3. Undo the change, and record it in the property's comment, as step 4.4 shows.

@@ -235,9 +235,10 @@ Theorem's agents write the files of `statements/` and `contracts/`, and the App 
 
 `theorem app setup` checks this form. The rules of this page for `projects/<name>/` apply to `.theorem/` too, with these changes:
 
-* `config.yml` takes the place of `project.yaml`, and it has no `repo` ([below](#configyml)). So the field `repo` of [the table](#the-fields) is not required in `.theorem/`.
+* `config.yml` takes the place of `project.yaml`. It has no field `repo` of [the table](#the-fields), and `theorem app setup` refuses that field ([below](#configyml)).
 * [The build context](#the-build-context) takes the place of what [dockerfile](#dockerfile) says about the build context. In `.theorem/`, the build context is always the root of the repository.
 * With `dockerfile` set, `.theorem/` can still hold each file of [its table](#theorem-on-your-repository), because the `Dockerfile` reads the whole repository. So the last two sentences of the second item of [dockerfile](#dockerfile), on where the fuzz target sources, the build patches and `sources` go and on the files that the project directory can then hold, apply only to `projects/<name>/`.
+* In `.theorem/`, a fuzz target of [fuzz_targets](#fuzz_targets) that the build does not make yet does not fail the build when `statements/` holds its file. Its statements need a proof, and the check "Theorem Verify" says that it is not built yet ([statements/](#statements)).
 * [Limits](#limits) takes the place of the rules of [Rules for each file](#rules-for-each-file) on folders, on names, on sizes and on the number of files, and of its rule on the name of the project directory: the folder is `.theorem/`. `.theorem/` holds the folders `statements/` and `contracts/`, its 64 files are the files beside these folders, and a file in these folders has the size that its part gives. The rule of that part on `OFT_FRAME_POINTERS` applies to `.theorem/`.
 
 Each other rule of this page applies to `.theorem/` as it applies to `projects/<name>/`.
@@ -249,7 +250,7 @@ Each other rule of this page applies to `.theorem/` as it applies to `projects/<
 * It has no `repo`. The project's repository is the repository that holds `.theorem/`.
 * It can have one more field, `name`: the name of the project. The default is the name of the repository, in lower case.
 
-`proofs` keeps its form: `repo` and `path` ([above](#proofs)). `theorem app setup` refuses `repo`. It also refuses each field that is neither `name` nor in the table of fields.
+`proofs` keeps its form: `repo` and `path` ([above](#proofs)). `theorem app setup` refuses a top-level `repo`. It also refuses each field that is neither `name` nor in the table of fields.
 
 `theorem app setup` refuses a `name` that another enrolled repository holds ([below](#a-project-that-is-enrolled-today)).
 
@@ -303,11 +304,11 @@ The contract check is a small fuzz harness:
 * Each file is UTF-8 text. A seed corpus is the only exception.
 * `config.yml` is at most 128 KiB.
 * `build.sh`, a fuzz target source, a file that `sources` copies or reads, and a build patch are each at most 256 KiB.
-* Each other file beside `statements/` and `contracts/` is at most 64 KiB.
+* Each other file beside `statements/` and `contracts/`, but a seed corpus ([Seed corpora](#seed-corpora)), is at most 64 KiB.
 
 ### A project that is enrolled today
 
-A project that is enrolled today has its directory `projects/<name>/` in this repository. The repository that its `repo` field names holds the name `<name>`. Thus the project keeps its name when it moves to `.theorem/`.
+A project is enrolled today when its directory `projects/<name>/` is in this repository and its `primary_contact` is not `n/a`. The repository that its `repo` field names holds the name `<name>`. Thus the project keeps its name when it moves to `.theorem/`. A seeded project is adopted as [Seeded projects](#seeded-projects) says.
 
 In the setup pull request, the maintainer's agent moves the files of `projects/<name>/` into `.theorem/`, as the skill `theorem-setup` tells. `project.yaml` becomes `config.yml`, with no `repo`. The agent changes each `COPY` and each path of the `Dockerfile` for the new build context ([above](#the-build-context)). For example, `COPY build.sh $SRC/` becomes `COPY .theorem/build.sh $SRC/`.
 

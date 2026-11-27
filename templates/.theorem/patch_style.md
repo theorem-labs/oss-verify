@@ -1,4 +1,4 @@
-<!-- Adapted from OSS Scanner's templates/threat_model.md (https://github.com/anthropics/oss-scanner), Copyright 2026 Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: free text about the reports and patches that a project wants. -->
+<!-- Adapted from OSS Scanner's templates/threat_model.md (https://github.com/anthropics/oss-scanner), Copyright 2026 Anthropic PBC, Apache-2.0. Modified 2026 by Theorem Labs, PBC: free text about the reports and patches that a project wants. Modified 2026 by Theorem Labs, PBC: the patch_style.md of .theorem/. -->
 <!-- Template: copy to .theorem/patch_style.md in your repository, beside config.yml. -->
 # Patch style and report preferences
 

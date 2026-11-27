@@ -1,6 +1,6 @@
 # Questions for the maintainer
 
-Ask each question. Do not guess an answer.
+For a new project, ask each question. For a project that is enrolled today, ask only about what the maintainer wants to change (step 2 of the skill). Do not guess an answer.
 
 ## What "correct" means
 
