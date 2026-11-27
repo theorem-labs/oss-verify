@@ -1,0 +1,13 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# A test port of one whole program, for tests/test_binary_checks_docker.py. Its source is in src/, not in a repository.
+# The sha256 below is a placeholder: the test computes the program's SHA-256 with a build outside oss-verify check, and
+# writes that pin into its copy of this file.
+repo: https://example.invalid/program
+primary_contact: n/a
+language: c
+programs:
+  - file: hello
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    link_map: hello.map
