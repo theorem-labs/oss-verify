@@ -137,7 +137,10 @@ name: "Review"
 #            with the reason of each one that is not pass. The comment, the verdicts and the reasons
 #            are the job's outputs, from which the comment job writes the review comment and the check run Enrollment
 #            review (below); no file and no artifact holds them. When the Review step fails or runs out of its 45
-#            minutes, the step "Review again" runs once more with the same inputs; no step counts the attempts.
+#            minutes, the step "Review again" runs once more, with the same inputs, or in a fresh session when the
+#            first resumed an earlier review's (.github/scripts/review-attempt names how the first ended); no step
+#            counts the attempts. A newer run's review of the same pull request or issue cancels the one that runs
+#            (the job's concurrency group).
 #            On a later push it resumes the same Claude Code session as the last review, whoever wrote the pull
 #            request (the screen still reads the new text first), so it knows what it asked
 #            for and why, and reviews only the diff since the commit it reviewed then, with one exception: check D3 of
@@ -240,17 +243,19 @@ name: "Review"
 #            its repository and its status in the proofs index. Both inform the review and decide nothing.
 #   triage   does nothing but post the text triage-gather produced, or update the one already there, as the oss-verify
 #            App, with an installation token that can write pull requests in this repository only.
-#   collect  always runs, last, and reports the check review jobs (below).
+#   collect  runs last on every run that was not cancelled, and reports the check review jobs (below).
 #
-# collect, the check review jobs, runs .github/scripts/collect on every run, after all the other jobs whatever their
-# results. It passes only if route passed and every job route asked for passed: the gather, screen, review, session,
-# hold, comment, triage-gather and triage jobs when their own conditions call for them (the screen and the review on
-# the gather job's outputs screen and digest). Every other job must be skipped. A held item passes it when the comment
-# job recorded the hold: for an enrollment in the check run Enrollment review (the screen's hold or the daily cap),
-# for a change or an issue with the label review-held. On a run by hand for a held head whose verdict of the review
-# stands (above), the comment job records nothing and passes. A gather, screen, review (after its second
-# attempt), hold or comment job that failed fails it, held or not, which a re-run of the failed jobs clears. It is no
-# check that the ruleset requires: a check of a job of a workflow_run or workflow_dispatch run never satisfies a
+# collect, the check review jobs, runs .github/scripts/collect on every run that was not cancelled, after all the other
+# jobs whatever their results. It passes only if route passed and every job route asked for passed: the gather, screen,
+# review, session, hold, comment, triage-gather and triage jobs when their own conditions call for them (the screen and
+# the review on the gather job's outputs screen and digest). Every other job must be skipped. A review that its group
+# cancelled passes it, as cancelled, when its head is no longer the pull request's; a cancelled review of the head that
+# is still the pull request's fails it. A held item passes it when the comment job recorded the hold: for an enrollment
+# in the check run Enrollment review (the screen's hold or the daily cap), for a change or an issue with the label
+# review-held. On a run by hand for a held head whose verdict of the review stands (above), the comment job records
+# nothing and passes. A gather, screen, review (after its second attempt), hold or comment job that failed fails it,
+# held or not, which a re-run of the failed jobs clears. It is no check that the ruleset requires: a check of a job of a
+# workflow_run or workflow_dispatch run never satisfies a
 # required check
 # (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated),
 # which is why the comment job posts the required check review itself, as the oss-verify App, through the API.
@@ -504,11 +509,11 @@ env:
   HELD_LABEL: review-held
 
 concurrency:
-  # A run after a Build run: a group of its own, by the id of that run, so that nothing cancels it across pull
-  # requests. A group by the head repository and branch would be shared by a second open pull request from the same
-  # branch into another base, and the run of one would cancel the review of the other. So a newer Build run of a pull
-  # request does not cancel the review of its older head: that review runs on, and the gather job's first step reads
-  # the head again and keeps nothing when it moved (the top of this file). A run after a Triage run that ended success:
+  # A run after a Build run: a group of its own, by the id of that run, so that no run of another pull request cancels
+  # it. Its review job has a group of its own kind, review-change-<number> (that job's concurrency), so that the
+  # review of a newer head cancels the review of an older one. Its key is the pull request's number, not the head
+  # repository and branch, which a second open pull request from the same branch into another base would share.
+  # A run after a Triage run that ended success:
   # one group for the head repository and branch of that run. route triages only the pull request into the default
   # branch, so a second pull request from the same branch into another base gets no triage, and the shared group
   # cancels no triage of it. Of two Triage runs of one pull request (an edit of the description, and then one more),
@@ -1454,6 +1459,15 @@ jobs:
     # permissions cannot change with route's kind, so the job holds it for every kind, and the Review step's token has
     # it too: read-only, on the runs of a public repository.
     permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
+    # One review at a time of each pull request or issue: the review of a newer run cancels the one that runs (R6 of
+    # dispatch://INFRA-5359/spec: no run for a replaced push). The group has the comment job's key, but
+    # cancel-in-progress, where the comment job's group waits. The key is the number route read, not the head branch,
+    # so two open pull requests from one branch into two bases never share it. collect passes a cancelled review only
+    # when its head is no longer the pull request's (collect's step "Whether a newer head replaced a cancelled
+    # review"), and the comment job's post step records nothing for such a review.
+    concurrency:
+      group: review-change-${{ needs.route.outputs.pr || needs.route.outputs.issue }}
+      cancel-in-progress: true
     env:
       KIND: ${{ needs.gather.outputs.kind || needs.route.outputs.kind }}
       PR: ${{ needs.route.outputs.pr }}
@@ -1638,7 +1652,8 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0 (sha-pinned)
         with: {workload_identity_provider: "${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}", service_account: "${{ env.GATEWAY_SERVICE_ACCOUNT }}", token_format: id_token, id_token_audience: model-gateway-gce, id_token_include_email: true, create_credentials_file: false, export_environment_variables: false}
       # The first attempt. When it fails or runs out of its 45 minutes, the job goes on to one more attempt, "Review
-      # again", with the same inputs and a token of its own; no step counts or writes the attempts.
+      # again", with a token of its own: with the same inputs, or, when this attempt resumed an earlier review's
+      # session, with a fresh session (the two steps after this one).
       - name: Review
         id: review
         continue-on-error: true
@@ -1659,6 +1674,30 @@ jobs:
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
             ${{ steps.prompt.outputs.arguments }}
+      # How the first attempt ended, when it failed, named in the job's annotations and summary, so that an attempt
+      # with no result is never read as a review that found nothing: the `type: result` record of its execution file.
+      # On 2026-11-24 to 11-27, 6 of 69 reviews had a first attempt that ended with the error flag set and no
+      # structured output (the action's "--json-schema was provided but Claude did not return structured_output").
+      # Three of them had started fresh, and a fresh second attempt reviewed each. The three others had resumed the
+      # session of an earlier review of #305: each of their six attempts, the second ones too, ended after one turn
+      # at the same cost, so the second attempt of a resumed review starts a fresh session instead (the next step).
+      - name: How the first attempt ended
+        id: first
+        if: steps.review.outcome == 'failure'
+        env:
+          RESULT: ${{ steps.review.outputs.execution_file }}
+          RESUMED: ${{ needs.gather.outputs.session != '' }}
+        run: .github/scripts/review-attempt
+      # The prompt and arguments of the second attempt when the first resumed an earlier review's session: the same
+      # rules and schema, but no session, so the second attempt reviews the head from the start.
+      - name: What the second attempt reads, in a fresh session
+        id: prompt-fresh
+        if: steps.review.outcome == 'failure' && needs.gather.outputs.session != ''
+        env:
+          SESSION: ""
+          LAST: ""
+          OUTSIDE: ${{ needs.gather.outputs.outside }}
+        run: .github/scripts/review-prompt
       # The second and last attempt, only after the first failed. It signs in again: the first token lives one hour,
       # and may not outlast another 45 minutes. A failure here fails the job.
       - name: Sign in to the model gateway again
@@ -1672,15 +1711,16 @@ jobs:
         timeout-minutes: 45
         uses: anthropics/claude-code-action@d70510b174a1244958df0b03166a54912811f3e6 # v1 (v1.0.264, sha-pinned)
         with:
-          # The same inputs as the Review step's, but the token of the sign-in just before.
+          # The same inputs as the Review step's, but the token of the sign-in just before, and for a first attempt
+          # that resumed an earlier review's session, the prompt and arguments of a fresh session (prompt-fresh).
           anthropic_api_key: ${{ steps.gateway-again.outputs.id_token }}
           github_token: ${{ github.token }}
           allowed_non_write_users: "*"
           allowed_bots: ${{ env.ALLOWED_BOTS }}
-          prompt: ${{ steps.prompt.outputs.prompt }}
+          prompt: ${{ steps.prompt-fresh.outputs.prompt || steps.prompt.outputs.prompt }}
           claude_args: >-
             --tools Read,Glob,Grep --permission-mode default --model claude-opus-5-5 --effort xhigh --max-turns 300
-            ${{ steps.prompt.outputs.arguments }}
+            ${{ steps.prompt-fresh.outputs.arguments || steps.prompt.outputs.arguments }}
       # The logout deletes the ephemeral node at once, whatever the review did and whatever the join's outcome: at
       # the pinned commit the action stops waiting for `tailscale up` after its 2-minute timeout but does not stop
       # the command (src/main.ts), so a join that failed can still make the node. When the join never installed
@@ -2320,8 +2360,8 @@ jobs:
       # The review comment of a change pull request; for an enrollment pull request that RECORD names, the check run
       # Enrollment review too, from the same parsed verdicts, on every run this job runs for. The check run also keeps
       # the record of the review in its output.text, which GitHub does not show (.github/scripts/review-verdict's
-      # docstring defines it). For both, the check run review of the head this run reviewed, which main's ruleset
-      # requires (.github/scripts/review-check): from the hold, or from the review's verdicts and choices, and for an
+      # docstring defines it). For both, the check run review of the head this run reviewed (.github/scripts/review-check):
+      # from the hold, or from the review's verdicts and choices, and for an
       # enrollment whose every file is directly inside projects/<name>/, from the review having run. A change's comment
       # opens with its title. Its outputs: posted=true when it posted the review comment, and recorded=true when it
       # recorded the check run Enrollment review (the step after it then takes a hold off). Nothing on an approval or a
@@ -2370,6 +2410,16 @@ jobs:
           # A pull request's comment only: a run for an issue has no pull request, and an issue's draft is never posted.
           [[ ${PR:-} =~ ^[0-9]+$ ]] || { echo "::error::This run has no pull request, so nothing is posted."; exit 1; }
           [[ ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "::error::This run names no head commit, so nothing is posted."; exit 1; }
+          # A review that a newer head's review cancelled (the review job's concurrency group) records and posts
+          # nothing: its head is no longer the pull request's, and the newer head's run records the verdict.
+          if [ "$REVIEW_RESULT" = cancelled ]; then
+            now=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+            if [ "$now" != "$HEAD_SHA" ]; then
+              echo "The review of $HEAD_SHA was cancelled, and the pull request's head is now $now:" \
+                "the run of $now records the verdict."
+              exit 0
+            fi
+          fi
           # Why an enrollment has no verdicts of its review: the daily cap stopped it, a job failed
           # (the hold job too, when the comment says that it sent the review's held finding), or the screen held it.
           hold="" job=""
@@ -2649,7 +2699,9 @@ jobs:
     # check under it on every run. It is no check that the ruleset requires.
     name: review jobs
     needs: [route, gather, screen, review, session, hold, comment, triage-gather, triage]
-    if: always()
+    # Not on a run that was cancelled (by a person, or by a newer run of the same Build run): its jobs that had not
+    # ended were cancelled or skipped, and the run ends cancelled.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -2660,6 +2712,19 @@ jobs:
         with:
           persist-credentials: false
           sparse-checkout: .github/scripts
+
+      # For a cancelled review of a pull request: whether its head is still the pull request's
+      # (.github/scripts/review-replaced). It reads the public pull request with the job's token, which has no
+      # permission for it, as terms.yaml does.
+      - name: Whether a newer head replaced a cancelled review
+        id: replaced
+        if: needs.review.result == 'cancelled' && needs.route.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.route.outputs.pr }}
+          HEAD_SHA: ${{ needs.route.outputs.sha }}
+        run: .github/scripts/review-replaced
 
       - name: Every job route asked for passed, and no other ran
         env:
@@ -2697,6 +2762,10 @@ jobs:
                 || needs.route.outputs.trust == 'measure')
             && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
           REVIEW: ${{ needs.review.result }}
+          # A review that its group (the review job's concurrency) cancelled for a newer head passes as cancelled. A
+          # cancelled review of the head that is still the pull request's did not finish (its job ran out of time, or a
+          # run admitted later cancelled it), and fails, as a cancelled review of an issue does.
+          CANCELLABLE: ${{ steps.replaced.outputs.replaced == 'true' && 'review' || '' }}
           ASKED_REVIEW: >-
             ${{ needs.route.outputs.trust != 'cap' && needs.route.outputs.held != 'true'
             && needs.gather.result == 'success' && needs.gather.outputs.digest != ''

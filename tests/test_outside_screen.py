@@ -287,13 +287,15 @@ def required(ctx, workflow=REVIEW):
     """What the collector's step answers for this run, review.yml's collect (the check review jobs) or build.yaml's
     required (the required check project-builds): (exit status, output)."""
     collector = step(ORDERS[workflow["name"]][-1], COLLECT, workflow)
-    env = {k: as_text(evaluate(v, ctx)) for k, v in collector["env"].items()}
+    # A value with no expression is a literal (CANCELLABLE), as GitHub gives it.
+    env = {k: as_text(evaluate(v, ctx)) if "${{" in str(v) else str(v) for k, v in collector["env"].items()}
     # Each "job:$RESULT:$ASKED" argument, with its values.
     args = []
     for word in re.findall(r'"([^"]+)"', collector["run"]):
         args.append(re.sub(r"\$([A-Z_]+)", lambda m: env[m.group(1)], word))
+    # The step's env is the script's environment too (CANCELLABLE).
     run = subprocess.run([str(SCRIPTS / "collect"), *args], capture_output=True, text=True,
-                         env={**os.environ, "GITHUB_STEP_SUMMARY": os.devnull})
+                         env={**os.environ, **env, "GITHUB_STEP_SUMMARY": os.devnull})
     return run.returncode, run.stdout
 
 
@@ -2243,7 +2245,8 @@ class RunWiring(unittest.TestCase):
 
     def test_a_screened_review_that_ran_out_of_time_is_held(self):
         """A review job that runs out of its own time ends cancelled, and the run goes on (when the whole run is
-        cancelled, no job after it runs): the comment job holds the item."""
+        cancelled, no job after it runs): the comment job holds the item. Its head is still the pull request's, so the
+        check review jobs fails it (collect's step "Whether a newer head replaced a cancelled review")."""
         got, ctx = run_graph(dict(ITEMS["change"], trust="screen"), results={"review": "cancelled"},
                              outputs={"screen": {"verdict": "clean", "checks": "model_armor"}})
         self.assertEqual({n for n, r in got.items() if r != "skipped"} - {"route", "collect"},

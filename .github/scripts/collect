@@ -13,17 +13,22 @@
 # job asked for passed, and every other job was skipped. GitHub counts a skipped job as a pass where a check is
 # required, so a workflow's required check is the job that runs this, never a job that may be skipped.
 #
+# A job named in CANCELLABLE (space-separated) that the run asked for passes when it was cancelled too: review.yml's
+# review job, whose concurrency group cancels it when a newer run's review of the same pull request or issue starts.
+#
 # What did not pass goes to the log, as an error each, and to the step summary; the exit status is then 1.
 set -euo pipefail
 
 route=${1:-}
-failed=() passed=() skipped=()
+failed=() passed=() skipped=() cancellable=" ${CANCELLABLE:-} "
 [ "$route" = success ] || failed+=("route: ${route:-no result}")
 for job in "${@:2}"; do
   IFS=: read -r name result asked <<< "$job"
   want=skipped
   [ "$asked" != true ] || want=success
-  if [ "$result" != "$want" ]; then
+  if [ "$want" = success ] && [ "$result" = cancelled ] && [[ $cancellable == *" $name "* ]]; then
+    passed+=("$name (cancelled)")
+  elif [ "$result" != "$want" ]; then
     failed+=("$name: ${result:-no result}, where the run asks for $want")
   elif [ "$want" = success ]; then
     passed+=("$name")

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+# Whether a cancelled review of review.yml was of a head that its pull request no longer has, for collect:
+#
+#   GH_TOKEN=<token> REPO=<owner/repo> PR=<number> HEAD_SHA=<the head it reviewed> .github/scripts/review-replaced
+#
+# It writes replaced=true to GITHUB_OUTPUT when the pull request's head is now ANOTHER COMMIT, which is all this
+# proves: not that a newer review exists, nor that this review's cancellation caused it. A review of a head the pull
+# request no longer has is of no use to anyone, however it was cancelled, so collect passes it as cancelled.
+# Otherwise replaced=false: the review of the head that is still the pull request's did not finish (its job ran out of
+# time, or a run admitted later cancelled it), and collect fails it, because no review of the current head stands.
+# A pull request that cannot be read gives false too, with a warning: an unreadable answer cannot show the review is
+# of no use, and a false red is better than passing an unfinished review of the head someone is waiting on.
+set -uo pipefail
+replaced=false
+if [[ ${PR:-} =~ ^[1-9][0-9]*$ && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] \
+  && now=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha 2> /dev/null) && [[ $now =~ ^[0-9a-f]{40}$ ]]; then
+  if [ "$now" != "$HEAD_SHA" ]; then
+    replaced=true
+    echo "The review of $HEAD_SHA was cancelled, and the head of #$PR is now $now: a newer head's review replaced it."
+  else
+    echo "::error::The review of $HEAD_SHA, still the head of #$PR, was cancelled before it finished:" \
+      "no review of this head stands."
+  fi
+else
+  echo "::warning::The pull request #${PR:-} could not be read, so its cancelled review is not passed."
+fi
+echo "replaced=$replaced" >> "$GITHUB_OUTPUT"

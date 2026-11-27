@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+# How a failed attempt of review.yml's review ended, named, so that an attempt with no result is never read as a
+# review that found nothing:
+#
+#   RESULT=<the attempt's execution file> RESUMED=<true when it resumed an earlier review's session> \
+#     .github/scripts/review-attempt
+#
+# It reads the last `type: result` record of the execution file that anthropics/claude-code-action writes, and
+# writes one ::warning:: annotation and one line of the job's summary, and the output `ended` to GITHUB_OUTPUT:
+#
+#   no-output  the attempt ended with no structured output: the action's "--json-schema was provided but Claude did
+#              not return structured_output", after the turns, seconds and cost the record gives.
+#   no-result  the execution file holds no result record: the attempt ran out of its time, or the action failed
+#              before the model answered.
+#   failed     the action failed though the record holds a structured output.
+#   unreadable the execution file could not be read.
+#
+# It says what the second attempt does: a resumed session is not resumed again, because on 2026-11-24 every attempt
+# that resumed a failing session failed the same way (review.yml). It exits 0: the second attempt decides the job.
+set -uo pipefail
+say() {
+  local line="$*"
+  echo "::warning::$line"
+  [ -z "${GITHUB_STEP_SUMMARY:-}" ] || echo "$line" >> "$GITHUB_STEP_SUMMARY"
+}
+next="The second attempt runs with the same inputs."
+if [ "${RESUMED:-}" = true ]; then
+  next="It had resumed an earlier review's session, so the second attempt starts a fresh one."
+fi
+ended=unreadable
+if [ -n "${RESULT:-}" ] && [ -r "$RESULT" ]; then
+  record=$(jq -c 'if type == "array" then map(select(type == "object" and .type == "result")) | last // empty
+                  else empty end' \
+    "$RESULT" 2> /dev/null) || record=""
+  if [ -z "$record" ]; then
+    ended=no-result
+    say "The review's first attempt failed with no result record: it ran out of its time, or the action failed" \
+      "before the model answered. $next"
+  else
+    read -r turns seconds cost error output < <(jq -r '[(.num_turns // "?"), ((.duration_ms // 0) / 1000 | floor),
+      (.total_cost_usd // "?"), (.is_error // false), (if .structured_output then "yes" else "no" end)] | @tsv' \
+      <<< "$record")
+    if [ "$output" = no ]; then
+      ended=no-output
+      say "The review's first attempt ended with no structured output after $turns turns and $seconds s" \
+        "(cost \$$cost, error flag $error): it gave no verdict, so it found nothing either way. $next"
+    else
+      ended=failed
+      say "The review's first attempt failed after $turns turns and $seconds s (cost \$$cost, error flag $error)," \
+        "though it gave a structured output. $next"
+    fi
+  fi
+else
+  say "The review's first attempt failed, and its execution file could not be read. $next"
+fi
+[ -z "${GITHUB_OUTPUT:-}" ] || echo "ended=$ended" >> "$GITHUB_OUTPUT"

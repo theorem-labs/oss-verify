@@ -2954,10 +2954,12 @@ class ReviewJob(unittest.TestCase):
 
     def test_c3_g_a_review_that_fails_once_is_reviewed_again_and_its_second_answer_kept(self):
         """Decision 11: when the Review step fails (or runs out of its time), the second sign-in and "Review again"
-        run, with the same inputs; the result step reads the second attempt's execution file and session."""
+        run, with the same inputs, but for a first attempt that resumed an earlier review's session, with a fresh
+        session (tests/test_review_cost.py); the result step reads the second attempt's execution file and session."""
         names = [s.get("name") for s in self.jobs["review"]["steps"]]
         self.assertEqual(names[names.index("Review"):names.index("Keep the draft, and the held finding apart from it")],
-                         ["Review", *self.AGAIN, "Leave the tailnet"])
+                         ["Review", "How the first attempt ended", "What the second attempt reads, in a fresh session",
+                          *self.AGAIN, "Leave the tailnet"])
         for outcome, runs in (("failure", True), ("success", False)):
             for name in self.AGAIN:
                 with self.subTest(outcome=outcome, step=name):
@@ -2971,8 +2973,17 @@ class ReviewJob(unittest.TestCase):
             self.assertNotIn("continue-on-error", self.steps[name])
         first, again = self.steps["Review"], self.steps["Review again"]
         self.assertEqual((again["uses"], again["timeout-minutes"]), (first["uses"], first["timeout-minutes"]))
-        self.assertEqual({k: v for k, v in again["with"].items() if k != "anthropic_api_key"},
-                         {k: v for k, v in first["with"].items() if k != "anthropic_api_key"})
+        # The same inputs as written, but the key, and the prompt and arguments, which are a fresh session's when
+        # there is one and else the first attempt's (tests/test_review_cost.py evaluates them).
+        def first_or_fresh(value):
+            for field in ("prompt", "arguments"):
+                value = str(value).replace(f"steps.prompt-fresh.outputs.{field} || steps.prompt.outputs.{field}",
+                                           f"steps.prompt.outputs.{field}")
+            return value
+        self.assertEqual({k: first_or_fresh(v) for k, v in again["with"].items() if k != "anthropic_api_key"},
+                         {k: str(v) for k, v in first["with"].items() if k != "anthropic_api_key"})
+        self.assertEqual({k for k, v in again["with"].items() if first_or_fresh(v) != str(v)},
+                         {"prompt", "claude_args"})
         self.assertEqual(self.steps["Sign in to the model gateway again"]["with"],
                          self.steps["Sign in to the model gateway"]["with"])
         # The second attempt's key is the identity token of the sign-in just before it, not the first sign-in's.
