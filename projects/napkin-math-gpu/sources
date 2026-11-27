@@ -1,0 +1,5 @@
+tree	ext/napkin-math-gpu-nccl-curve/src	upstream/napkin-math-gpu
+copy	ext/napkin-math-gpu-nccl-curve/src/oss-verify-fuzz/Cargo.toml	fuzz.toml
+copy	ext/napkin-math-gpu-nccl-curve/src/oss-verify-fuzz/nccl_curve.rs	nccl_curve.rs
+copy	targets/napkin-math-gpu-nccl-curve/Cargo.lock	Cargo.lock
+crates	ext/napkin-math-gpu-nccl-curve/vendor	targets/napkin-math-gpu-nccl-curve/Cargo.lock	ext/napkin-math-gpu-nccl-curve/src	oss-verify-fuzz	nccl_curve
