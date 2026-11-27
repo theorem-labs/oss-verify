@@ -2499,7 +2499,7 @@ class SeedHex(unittest.TestCase):
 
     @staticmethod
     def script():
-        """The python script of review-gather's seed_listings, which it runs as python3 -P - <zip> <hex file>."""
+        """The python script that review-gather runs on each seed corpus, as `python3 -P - <zip> <hex file>`."""
         gather = (ROOT / ".github" / "scripts" / "review-gather").read_text()
         opener = "python3 -P - \"$zip\" \"$out/seeds/$target.hex.txt\" <<'EOF'\n"
         start = gather.index(opener) + len(opener)
@@ -2604,7 +2604,7 @@ class SeedHex(unittest.TestCase):
             corpus.write_bytes(bytes(raw))
             with zipfile.ZipFile(corpus) as archive:
                 names = [info.filename for info in archive.infolist()]
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
+            run = subprocess.run([sys.executable, "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             lines = hex_file.read_text().splitlines()
@@ -2644,11 +2644,27 @@ class SeedHex(unittest.TestCase):
         directory entry, and bit 0x1 not set: it gets a line that says that it is not read, and why."""
         self.assertEqual(self.second_of_three(self.flag(0x40, 0x40)), ["(not read: strong encryption)"])
 
-    def test_an_input_that_is_encrypted_and_of_strong_encryption_gets_the_line_encrypted(self):
-        """The reasons are tested in an order, and the first that holds is written: bit 0x1 (encrypted) comes before bit
-        0x40 (strong encryption). The second of three inputs has both bits set, in its local file header and in its
-        central directory entry: it gets the line of bit 0x1, and the next input is read."""
-        self.assertEqual(self.second_of_three(self.flag(0x41, 0x41)), ["(not read: encrypted)"])
+    def test_an_input_with_two_reasons_gets_the_line_of_the_first(self):
+        """The reasons are tested in this order, and the first that holds is written: the compression method, bit 0x1
+        (encrypted), bit 0x20 (compressed patched data), bit 0x40 (strong encryption). open() raises for bits 0x20 and
+        0x40 before it looks at bit 0x1, so the order is the script's own. The second of three inputs has two reasons,
+        in its local file header and in its central directory entry: it gets the line of the first, and the next input
+        is read. The compression method is two bytes, 8 bytes into the local file header and 10 bytes into the central
+        directory entry."""
+        def method(value, bits):
+            def change(raw, info):
+                for at in (info.header_offset + 8, self.entry(raw, info) + 10):
+                    raw[at:at + 2] = value.to_bytes(2, "little")
+                self.flag(bits, bits)(raw, info)
+            return change
+        bzip2 = "(not read: compression method 12, not stored or deflated)"
+        for why, change, line in (("method 12 and bit 0x1", method(12, 0x1), bzip2),
+                                  ("method 12 and bit 0x20", method(12, 0x20), bzip2),
+                                  ("bits 0x1 and 0x20", self.flag(0x21, 0x21), "(not read: encrypted)"),
+                                  ("bits 0x1 and 0x40", self.flag(0x41, 0x41), "(not read: encrypted)"),
+                                  ("bits 0x20 and 0x40", self.flag(0x60, 0x60), "(not read: compressed patched data)")):
+            with self.subTest(why):
+                self.assertEqual(self.second_of_three(change), [line])
 
     def test_an_input_whose_name_is_marked_utf_8_and_is_not_gets_a_line_and_the_next_are_read(self):
         """open() raises UnicodeDecodeError, a ValueError, for a member whose local file header has bit 0x800 of the
@@ -2664,9 +2680,9 @@ class SeedHex(unittest.TestCase):
             "(not read: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in position 1: invalid start byte)"])
 
     def test_an_input_whose_read_raises_another_error_gets_a_line_and_the_next_are_read(self):
-        """An error of any type while the script opens or reads an input. No zip that this test found makes zipfile
-        raise an error there that is not one of those of the tests above, so a few lines of python that run before the
-        script make zipfile's read of the input "second" raise RuntimeError. It gets a line that says that it is not
+        """An error of any type while the script opens or reads an input: RuntimeError stands for a type that no test
+        above names, so this test fails if the script catches only the types of those tests. A few lines of python that
+        run before the script make zipfile's read of the input "second" raise it. It gets a line that says that it is not
         read, with the error, and the first and the third get their rows."""
         before = ("import zipfile\n"
                   "zipfile_read = zipfile.ZipExtFile.read\n"
@@ -2696,10 +2712,11 @@ class SeedHex(unittest.TestCase):
                 raw[at:at + 6] = b"s\xffcond"
             self.flag(0x800, 0x800)(raw, info)
             corpus.write_bytes(bytes(raw))
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=self.script(),
+            run = subprocess.run([sys.executable, "-P", "-", str(corpus), str(hex_file)], input=self.script(),
                                  capture_output=True, text=True)
-            self.assertTrue(hex_file.is_file(), run.stderr)
-            self.assertIn("(not read: UnicodeDecodeError: ", hex_file.read_text(), run.stderr)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(hex_file.read_text(), "(not read: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff "
+                             "in position 1: invalid start byte)\n", run.stderr)
 
     def test_a_corpus_that_zipfile_refuses_with_another_error_says_why_it_is_not_read(self):
         """An error of any type while ZipFile() reads the central directory: here RuntimeError, from a few lines of
@@ -2714,7 +2731,7 @@ class SeedHex(unittest.TestCase):
             with zipfile.ZipFile(corpus, "w") as archive:
                 for name, data in self.INPUTS.items():
                     archive.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
-            run = subprocess.run(["python3", "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
+            run = subprocess.run([sys.executable, "-P", "-", str(corpus), str(hex_file)], input=before + self.script(),
                                  capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(hex_file.read_text(), "(not read: RuntimeError: the central directory cannot be read)\n")

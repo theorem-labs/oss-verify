@@ -238,7 +238,7 @@ keep template-history.txt git log --format='%h %cI %s' -- .github/PULL_REQUEST_T
 # name with bit 0x800 set that is not UTF-8, as a zip tool sets it (UnicodeDecodeError; unzip -l lists each member of
 # it). For a zip that ZipFile() refuses with any error, the hexadecimal file holds one line, `(not read: <the error's
 # name>: <its message>)`, the form of a member's line with an error, and no other, and the python exits 0. So no error
-# leaves the file, or an input in it, with no line that says why it is not read.
+# of zipfile leaves the file, or an input in it, with no line that says why it is not read.
 for zip in "$dir"/*_seed_corpus.zip; do
   [ -f "$zip" ] || continue
   target=$(basename "$zip" _seed_corpus.zip)
