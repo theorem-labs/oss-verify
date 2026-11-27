@@ -33,7 +33,10 @@ them when sources shows that lay-out-sources cannot lay out the port:
     at that path or in it
   - a path that follows more than 40 links
 It also cannot name them when the sources and the build.sh of the port take more than 1,000,000 steps (STEPS) to
-read. The table does not search build.sh for a key with a character that is not a word character, a dot or a dash.
+read, or when a line of build.sh that is not a comment names ov_target_begin or ov_target_build other than as its
+first word, or has a word with a character that the shell does not read as itself (SHELL): the shell then gives these
+functions other words.
+The table does not search build.sh for a key with a character that is not a word character, a dot or a dash.
 So it also cannot name the fuzz targets of a patch that a build reads through a tree of such a key. When the check
 found that the binaries match the release's, the notes also say which binaries differ, or may differ. The list of
 the fuzz targets of a patch, and the list of the binaries that differ from the release's, name a fuzz target only
@@ -118,6 +121,11 @@ WORD = re.compile(r"[\w.-]+")
 # A comment line of build.sh that marks a fuzz target that the release built: "# <fuzz target>: the release's target
 # <its name in the release>", as at the start of each block of a port made from the release's recipe.
 RELEASE_TARGET = re.compile(r"\s*# (\S+): the release's target \S")
+# A character that the shell reads as more than itself in a word, or that may end the word: a quote, an expansion, an
+# operator, a pattern, a comment or a brace (POSIX 2.2 and 2.6, and the brace expansion of bash).
+SHELL = re.compile(r"[\"'\\$`|&;<>()*?\[#~{}]")
+# The functions of release-target.sh that a block of build.sh calls.
+CALLS = {"ov_target_begin", "ov_target_build", "ov_target_build_dsl"}
 LANGUAGE_NAMES = {"rust": "Rust", "python": "Python", "go": "Go", "javascript": "JavaScript", "jvm": "JVM"}
 
 
@@ -409,13 +417,20 @@ def target_blocks(build, steps):
         and the fuzz targets that the ov_target_build and ov_target_build_dsl lines after it name.
       - other: the text of the lines that are not ov_target_begin lines, with a newline between two lines.
       - release_targets: the fuzz targets that a comment line marks as targets that the release built (RELEASE_TARGET).
-    None if `steps` run out (see text_lines)."""
+    None if `steps` run out (see text_lines). None too at a line that names ov_target_begin, ov_target_build or
+    ov_target_build_dsl (CALLS) other than as its first word, or at such a line with a word that holds a character of
+    SHELL: the table does not read these lines as the shell does."""
     lines = text_lines(build, steps)
     if lines is None:
         return None
     blocks, other, release_targets = [], [], set()
     for line in lines:
         words = line.split()
+        # The shell calls a function only at the first word of a command, and gives it other words than those of the
+        # line when a word holds a character of SHELL. A ; or a ( can start another command on the line.
+        calls = [word for word in WORD.findall(line) if word in CALLS]
+        if calls and not words[0].startswith("#") and (calls != words[:1] or any(map(SHELL.search, words))):
+            return None
         if words[:1] == ["ov_target_begin"]:
             blocks.append((list(dict.fromkeys(words[1:])), []))
         elif not words or not words[0].startswith("#"):
