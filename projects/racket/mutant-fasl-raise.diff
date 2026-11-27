@@ -1,0 +1,15 @@
+Breaks the check "`fasl->s-exp` fails only by raising `exn:fail`." in fuzz/driver.c.
+Caught by the seed input "fasl-bad-prefix" of racket_fasl_fuzzer.
+
+diff --git a/racket/collects/racket/fasl.rkt b/racket/collects/racket/fasl.rkt
+--- a/racket/collects/racket/fasl.rkt
++++ b/racket/collects/racket/fasl.rkt
+@@ -430,7 +430,7 @@
+                    [else (raise-argument-error 'fasl->s-exp "(or/c bytes? input-port?)" orig-i)]))
+   (unless skip-prefix?
+     (unless (bytes=? (read-bytes/exactly* fasl-prefix-length init-i) fasl-prefix)
+-      (read-error "unrecognized prefix")))
++      (raise "unrecognized prefix")))
+   (define shared-count (read-fasl-integer* init-i))
+   (define shared (make-vector shared-count))
+ 

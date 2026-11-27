@@ -1,0 +1,15 @@
+Breaks the check "An exact number that `string->number` reads prints with `number->string` as text that reads back as the same number." in fuzz/driver.c.
+Caught by the seed input "number-fraction" of racket_number_fuzzer.
+
+diff --git a/racket/src/cs/schemified/expander.scm b/racket/src/cs/schemified/expander.scm
+--- a/racket/src/cs/schemified/expander.scm
++++ b/racket/src/cs/schemified/expander.scm
+@@ -64568,7 +64568,7 @@
+       (if (let ((or-part_0 (lazy-expt? n_0)))
+             (if or-part_0 or-part_0 (lazy-expt? d_0)))
+         (lazy-rational10.1 n_0 d_0)
+-        (/ n_0 d_0)))))
++        (/ n_0 (+ d_0 1))))))
+ (define simplify-lazy-divide
+   (lambda (n0_0)
+     (if (lazy-rational? n0_0)
