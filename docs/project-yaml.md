@@ -2,7 +2,7 @@
 
 This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory.
 
-Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and it quotes at most the first 200 characters of a value. We use the same rules when we import a project.
+Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and it quotes at most the first 200 characters of a value of project.yaml. We use the same rules when we import a project.
 
 The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. We made new names only for fields that neither has.
 

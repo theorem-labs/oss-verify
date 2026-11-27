@@ -666,7 +666,9 @@ def check_ubsan_changes(config, changes):
             yield f"ubsan_checks.{key} names a check twice"
     added, removed = changes.get("add") or [], changes.get("remove") or []
     if isinstance(added, list) and isinstance(removed, list):
-        if set(map(str, added)) & set(map(str, removed)):
+        # Only the strings, never the text of other items: through aliases, a list of a few hundred bytes of YAML can
+        # hold millions of strings.
+        if {item for item in added if isinstance(item, str)} & {item for item in removed if isinstance(item, str)}:
             yield "ubsan_checks adds and removes the same check"
         if not added and not removed:
             yield "ubsan_checks changes nothing: leave it out for the default"
