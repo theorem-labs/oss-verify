@@ -5,7 +5,8 @@
 # Else it uses its own. Its CC is the toolchain's clang for static riscv64 musl programs: /opt/asan-static/musl.cfg is
 # the config of the builder's plain compiler shim, and it links with -static, so the program is static and not PIE
 # (ET_EXEC). Its CFLAGS: -march=rv64g has no compressed instruction, which the ELF check refuses; -g puts the path of
-# the build in the bytes; -O2 is not the -Os of the fuzz builds, so the CFLAGS of a fuzz build give other bytes. The
+# the build in the bytes. The CFLAGS of a fuzz build define FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION and its own do
+# not, so hello.c prints another string and the CFLAGS of a fuzz build give other bytes (-Os and -O2 alone do not). The
 # link takes LDFLAGS and writes the link map hello.map. The program is hello, in this directory.
 ifeq ($(origin CC),default)
 CC = clang --config=/opt/asan-static/musl.cfg
