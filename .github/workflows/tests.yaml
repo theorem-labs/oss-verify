@@ -369,10 +369,11 @@ jobs:
     # 80c44a1, INFRA-5359), so even with the builds of each class at once one runner needs about 9 minutes for them.
     # Each shard is whole classes, or whole files, so a setUpClass builds once, and each has a runner's 4 threads: rust
     # the two classes that build Rust's standard library, c the classes of the C, Go and cJSON fixtures, and
-    # python-records PythonBuilder with the files of the link records. Each shard also costs 71-92 s of its job beside
-    # its tests (the runner, its tools, and the pull of its images, each of which holds the 1.1 GB layer of the C
-    # toolchain; the medians by shard of runs 45933112913 to 45980529993), so PythonBuilder, 91 s of tests since its
-    # CPython runtime is prebuilt, is no shard of its own: on that VM, with this change's edits of the tests,
+    # python-records PythonBuilder and CheckoutModes, the classes that build on the Python image, with the files of the
+    # link records. Each shard also costs 71-92 s of its job beside its tests (the runner, its tools, and the pull of its
+    # images, each of which holds the 1.1 GB layer of the C toolchain; the medians by shard of runs 45933112913 to
+    # 45980529993), so PythonBuilder, 91 s of tests since its CPython runtime is prebuilt, is no shard of its own: on
+    # that VM, with this change's edits of the tests,
     # python-records took 231.6 s of tests where the shards python and records took 93.8 s and 167.4 s apart. workers is
     # the shard's pytest-xdist workers: one for each class that the shard can run beside another without leaving the
     # threads to one. python-records has three: on that VM it took 231.6 s with three and 239.0 s with four. c has
@@ -402,8 +403,8 @@ jobs:
             languages: python c
             frame_pointers: ""
             tests: >-
-              tests/test_builder.py::PythonBuilder tests/test_append_docker.py tests/test_binary_checks_docker.py
-              tests/test_seed_runs_docker.py tests/test_target_settings_docker.py
+              tests/test_builder.py::PythonBuilder tests/test_builder.py::CheckoutModes tests/test_append_docker.py
+              tests/test_binary_checks_docker.py tests/test_seed_runs_docker.py tests/test_target_settings_docker.py
     permissions:
       contents: read
     services:

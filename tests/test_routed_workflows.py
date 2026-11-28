@@ -1019,8 +1019,10 @@ def test_each_class_of_a_docker_shard_finds_the_images_it_needs_there(tmp_path):
         assert set(skips) == {"::".join(test.split("::")[:2]) for test in collected(*tests)}, (shard, skips)
         assert {name: why for name, why in skips.items() if why} == {}, shard
     python = shard_skips(tmp_path / "python-on-c", "python-records", languages="c")
-    assert {name for name, why in python.items() if why} == {"tests/test_builder.py::PythonBuilder"}, python
-    assert "the Python toolchain image" in python["tests/test_builder.py::PythonBuilder"], python
+    python_classes = {"tests/test_builder.py::PythonBuilder", "tests/test_builder.py::CheckoutModes"}
+    assert {name for name, why in python.items() if why} == python_classes, python
+    for name in python_classes:
+        assert "the Python toolchain image" in python[name], python
     c = shard_skips(tmp_path / "c-without-frame-pointers", "c", frame_pointers="")
     assert {name for name, why in c.items() if why} == {"tests/test_builder.py::FramePointersC"}, c
     assert "OV_FP_TOOLCHAIN_C" in c["tests/test_builder.py::FramePointersC"], c

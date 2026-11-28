@@ -33,19 +33,13 @@ stand-in os.chown fails part of the way, and a TERM stops a build.
 and modes change, and after a file's bytes change.
 
 .github/scripts/python-runtime/make: its usage errors, which it finds before it runs docker, and its list of a
-runtime's files.
-
-infra/base-builder/Dockerfile, read as text (copied_modes): each entry that its COPY instructions put in the image gets,
-from the RUN after them, a mode that git alone decides, so the checkout's umask, whose modes COPY keeps, does not
-change the key."""
+runtime's files."""
 import contextlib
 import errno
 import hashlib
-import itertools
 import json
 import os
 import pathlib
-import posixpath
 import re
 import shutil
 import signal
@@ -57,8 +51,6 @@ import time
 from types import SimpleNamespace
 
 import pytest
-
-from oss_verify import check_build
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BUILDER = ROOT / "infra/base-builder"
@@ -1680,113 +1672,3 @@ def test_make_checks_the_files_of_runtime_sh(toolchain):
     text = (SCRIPTS / "make").read_text()
     files = re.search(r'^runtime_files="([^"]*)"', text, re.M).group(1).split()
     assert listed == files == RUNTIME_FILES
-
-
-# The builder's Dockerfile. The RUN after its COPY instructions gives each entry that they copy a mode that git alone
-# decides: with GIT_MODES, each entry under the paths that it names is read for everyone, write for the owner, and
-# execute where it is a directory or where git says so; with EXECUTABLE, each command in COMMANDS that it names is
-# 0755.
-DOCKERFILE = BUILDER / "Dockerfile"
-GIT_MODES = ["chmod", "-R", "u=rwX,go=rX"]
-EXECUTABLE = ["chmod", "0755"]
-COMMANDS = "/usr/local/bin"
-# A word that copied_modes does not read: a space (a quoted word), or an operator, a glob or an expansion of the shell.
-UNREAD = re.compile(r"[\s;&|<>$`(){}*?\[\]~\\'\"]")
-
-
-def copied_modes(text):
-    """What the builder's Dockerfile `text` copies from the checkout (infra/base-builder), and what it copies with a
-    mode that the checkout's umask decides. COPY keeps the mode of each entry of the checkout, and the umask decides
-    that mode: 664 and 775 under umask 002, 644 and 755 under 022. The RUN after the last COPY or ADD gives an entry a
-    mode that git alone decides when its chmod GIT_MODES names the entry or a directory above it, or, for a file in
-    COMMANDS, when its chmod EXECUTABLE names the file. A COPY of a directory puts what the directory holds at the
-    destination, and a COPY of a file puts the file there, or in it when the destination ends in /. Return the path in
-    the image of each entry that a COPY puts there, and the problems: each of those entries that no such chmod names,
-    and each instruction that this cannot read (a COPY with an option, a glob or the JSON form; a RUN with a word
-    of the shell but the && between its commands)."""
-    lines = check_build.instructions(text)
-    kinds = [line.split(None, 1)[0].upper() for line in lines]
-    copies = [n for n, kind in enumerate(kinds) if kind in ("COPY", "ADD")]
-    after = [n for n, kind in enumerate(kinds) if kind == "RUN" and copies and n > copies[-1]]
-    if not after:
-        return [], ["no RUN after the last COPY" if copies else "no COPY"]
-    run = check_build.words_of(lines[after[0]])
-    if run is None or any(UNREAD.search(word) for word in run if word != "&&"):
-        return [], [f"cannot read the RUN after the last COPY: `{lines[after[0]]}`"]
-    recursive, executable = [], set()
-    for separator, words in itertools.groupby(run[1:], lambda word: word == "&&"):
-        command = [] if separator else list(words)
-        if command[:3] == GIT_MODES:
-            recursive += [posixpath.normpath(path) for path in command[3:]]
-        elif command[:2] == EXECUTABLE:
-            executable.update(posixpath.normpath(path) for path in command[2:])
-    entries, problems = [], []
-    for n in copies:
-        words = check_build.words_of(lines[n])
-        if words is None or len(words) < 3 or any(word.startswith("-") or UNREAD.search(word) for word in words[1:]):
-            problems.append(f"cannot read `{lines[n]}`")
-            continue
-        *sources, destination = words[1:]
-        for source in sources:
-            path = BUILDER / source
-            if path.is_dir():
-                entry, command = posixpath.normpath(destination), False
-            elif path.is_file():
-                entry = posixpath.normpath(destination + path.name if destination.endswith("/") else destination)
-                command = posixpath.dirname(entry) == COMMANDS
-            else:
-                problems.append(f"{source}, of `{lines[n]}`, is not a file or a directory of infra/base-builder")
-                continue
-            entries.append(entry)
-            if not (any(entry == top or entry.startswith(top + "/") for top in recursive)
-                    or command and entry in executable):
-                problems.append(f"{entry}, of `{lines[n]}`: no chmod of the RUN after the last COPY gives it a mode "
-                                "that git alone decides")
-    return entries, problems
-
-
-def builder_modes_case(text):
-    """copied_modes of the Dockerfile `text` finds no problem, and what the COPYs put in the image holds each file of
-    the builder that the key reads (COPIED, runtime.sh), so the check read the entries that count."""
-    entries, problems = copied_modes(text)
-    assert not problems, ("the builder's Dockerfile copies these with a mode that the checkout's umask decides:\n"
-                          + "\n".join(problems))
-    unread = [f"/{path}" for path in [*COPIED, RUNTIME_SH]
-              if not any(f"/{path}" == entry or f"/{path}".startswith(entry + "/") for entry in entries)]
-    assert not unread, f"no COPY of the builder's Dockerfile puts these files that the key reads in the image: {unread}"
-
-
-def test_the_builder_gives_what_it_copies_modes_that_git_alone_decides():
-    """Each file and directory that infra/base-builder/Dockerfile copies from the checkout gets a mode that git alone
-    decides, and so the same key under each umask: the umask of a checkout is 002 on Ubuntu for a user with a group of
-    their own, and 022 on a GitHub runner. A mode that a later step of an image sets still changes the key
-    (change_script_mode)."""
-    builder_modes_case(DOCKERFILE.read_text())
-
-
-# The controls of builder_modes_case, each as (text of the Dockerfile, what the control puts in its place, what the
-# failure names): the chmod GIT_MODES taken out; a COPY to a directory that it does not name, /usr/local/lib/other; a
-# command, record-compile, copied to COMMANDS as well, and left out of the chmod EXECUTABLE.
-BUILDER_MODE_CONTROLS = {
-    "control-no-chmod-R": ("RUN chmod -R u=rwX,go=rX /usr/local/lib/oss-verify \\\n && chmod 0755 ", "RUN chmod 0755 ",
-                           "/usr/local/lib/oss-verify/python, of `COPY python/ /usr/local/lib/oss-verify/python/`"),
-    "control-copy-to-another-directory": (
-        "COPY go/ /usr/local/lib/oss-verify/go/\n",
-        "COPY go/ /usr/local/lib/oss-verify/go/\nCOPY python/ /usr/local/lib/other/\n",
-        "/usr/local/lib/other, of `COPY python/ /usr/local/lib/other/`"),
-    "control-command-not-in-0755": (
-        "COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/\n",
-        "COPY compile fetch-commit git-credential-oss-verify lay-out-sources record-compile /usr/local/bin/\n",
-        "/usr/local/bin/record-compile, of `COPY compile fetch-commit "),
-}
-
-
-@pytest.mark.parametrize("control", list(BUILDER_MODE_CONTROLS))
-def test_a_copy_whose_mode_the_umask_decides_fails_the_check(control):
-    """builder_modes_case fails on each control of BUILDER_MODE_CONTROLS, and its message names the entry."""
-    old, new, said = BUILDER_MODE_CONTROLS[control]
-    text = DOCKERFILE.read_text()
-    assert text.count(old) == 1, f"{control}: the Dockerfile has no one {old!r}"
-    with pytest.raises(AssertionError) as caught:
-        builder_modes_case(text.replace(old, new))
-    assert said in str(caught.value), caught.value

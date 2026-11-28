@@ -11,6 +11,10 @@ fuzz targets do one thing per first input byte, and the test checks the exit sta
 docs/build-contract.md. Running the riscv64 binaries needs qemu-riscv64 (static) on this machine; without it, that part
 is skipped.
 
+CheckoutModes builds the builder itself, FROM the newest Python toolchain image, from checkouts of infra/base-builder
+made under umask 022 and 002, and makes the plain build's key decision of the CPython runtime in each
+(infra/base-builder/python/runtime.sh): the umask must change neither the key nor a mode of what the builder copies.
+
 FramePointersC and FramePointersRust also need the frame-pointer images that .github/workflows/toolchain-images.yaml
 makes, named by OV_FP_TOOLCHAIN_C and OV_FP_TOOLCHAIN_RUST: each skips unless its own is set. The job docker of
 .github/workflows/tests.yaml runs every test of this file in shards: each shard pulls the toolchain images that its
@@ -421,6 +425,163 @@ class PythonBuilder(unittest.TestCase):
         for build in BUILDS:
             # The loud build writes what the harness prints, then the driver writes the return value.
             self.assertEqual(results[(build, "printed")], "printed,0,", build)
+
+
+# CheckoutModes. git writes each file of a checkout 0666, or 0777 where it records the file as executable (mode 100755),
+# and each directory 0777, and the umask takes its bits out: 664 and 775 under 002, Ubuntu's umask for a user with a
+# group of their own, and 644 and 755 under 022, a GitHub runner's. COPY keeps those modes, and the key of the CPython
+# runtime reads the mode of each builder file that it names and of each directory above it
+# (infra/base-builder/python/runtime.sh, oft_py_runtime_inputs).
+#
+# The build.sh that CheckoutModes gives compile as $SRC/build.sh, mounted under /src as
+# .github/scripts/python-runtime/make mounts its own, since the key leaves /src out. It makes the plain build's key
+# decision as a Python fuzz target's build makes it (python/recipes.sh): oft_py_source, then oft_py_shipped, which
+# prints the key line and whether the build takes the shipped runtime, and builds nothing. It keeps the manifest of
+# the key's inputs, whose last line is the key, in $OUT/manifest.
+KEY_SH = r'''#!/bin/sh -e
+[ -z "${BASH_VERSION:-}" ] || exec sh -e "$0"
+. /usr/local/lib/oss-verify/release-target.sh
+mkdir -p /work/ext/oft-py-key/src
+(
+ov_target_begin oft-py-key
+. /usr/local/lib/oss-verify/python/recipes.sh
+oft_py_source
+rt=/work/build/pyrt/$FLAV
+oft_py_shipped
+cp "$rt.manifest" "$OUT/manifest"
+)
+'''
+# What the COPYs of infra/base-builder/Dockerfile fill: each entry there as `<mode> <uid>:<gid> <path>`.
+MODES_SH = "find /usr/local/lib/oss-verify /usr/local/bin -exec stat -c '%a %u:%g %n' {} +"
+# A file that the key reads by its bytes and its mode, and that the runtime's build, as nobody, reads again
+# (runtime.sh's OFT_PY_BUILD).
+KEYED_SCRIPT = "/usr/local/lib/oss-verify/python/runtime.sh"
+
+
+def checkout(destination, umask):
+    """Write at `destination` infra/base-builder as a checkout made under `umask` holds it: each file that git tracks
+    there, with its bytes in this tree, and the modes that git and the umask give a checkout (above)."""
+    listed = subprocess.run(["git", "-C", str(check_build.ROOT), "ls-files", "-s", "-z", "--", "infra/base-builder"],
+                            capture_output=True, text=True, check=True).stdout
+    entries = [entry.split("\t", 1) for entry in listed.split("\0") if entry]
+    assert entries, "git lists no file of infra/base-builder"
+    for stage, name in entries:
+        mode = stage.split()[0]
+        assert mode in ("100644", "100755"), f"{name}: git's mode {mode} is no regular file's"
+        path = destination / pathlib.Path(name).relative_to("infra/base-builder")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = (check_build.ROOT / name).read_bytes()
+        path.write_bytes(data)
+        path.chmod((0o777 if mode == "100755" else 0o666) & ~umask)
+    for path in [destination, *destination.rglob("*")]:
+        if path.is_dir():
+            path.chmod(0o777 & ~umask)
+
+
+def docker_build(tag, context, *options):
+    """docker build of the directory `context` as `tag`, with `options`. It fails with the build's output."""
+    done = subprocess.run(["docker", "build", "--progress=plain", *options, "-t", tag, str(context)],
+                          capture_output=True, text=True)
+    assert done.returncode == 0, f"docker build of {context} failed:\n{done.stdout[-4000:]}{done.stderr[-4000:]}"
+
+
+def listed_modes(tag):
+    """The lines of MODES_SH in a container of `tag`, sorted."""
+    done = subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", "--entrypoint", "sh", tag, "-c",
+                           MODES_SH], capture_output=True, text=True, check=True)
+    return sorted(done.stdout.splitlines())
+
+
+@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and toolchain_ready("python"),
+                     "set OV_DOCKER_TESTS=1, with Docker and the Python toolchain image, to build the builder from "
+                     "checkouts made under two umasks")
+class CheckoutModes(unittest.TestCase):
+    """The umask that a checkout was made under changes neither the modes of the builder nor the key of the CPython
+    runtime: infra/base-builder/Dockerfile gives what it copies modes that git alone decides. The builder is built FROM
+    the newest Python toolchain image from checkouts of infra/base-builder made under 022 and 002 (checkout), and in a
+    container of each, compile runs KEY_SH, and MODES_SH lists the modes of what the COPYs fill. Two more images are the
+    controls, each of what the test must be able to see:
+    - FROM the same toolchain image, a Dockerfile of one COPY, of python/ where the builder copies it, built from the
+      checkout under 002: the checkout's modes reach an image that does not change them, as the test reads it;
+    - FROM the builder of 022, runtime.sh without the read of others, as a project's Dockerfile can take it: the
+      runtime's build, as nobody, could not read it, and the key reads that mode."""
+
+    @classmethod
+    def setUpClass(cls):
+        check_build.require_buildkit()
+        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-checkout-modes.")
+        cls.addClassCleanup(cls.scratch.cleanup)
+        cls.work = pathlib.Path(cls.scratch.name)
+        names = ("022", "002", "copy", "unreadable")
+        cls.tags = {name: f"oss-verify-test/checkout-modes-{name}:{RUN}" for name in names}
+        for tag in cls.tags.values():
+            cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
+        umasks = {"022": 0o022, "002": 0o002}
+        for name, umask in umasks.items():
+            checkout(cls.work / name, umask)
+        toolchain = check_build.newest_toolchain("python")
+        at_once(lambda name: docker_build(cls.tags[name], cls.work / name, "--build-arg", f"TOOLCHAIN={toolchain}"),
+                umasks)
+        controls = {"copy": (f"FROM {toolchain}\nCOPY python/ /usr/local/lib/oss-verify/python/\n", cls.work / "002"),
+                    "unreadable": (f"FROM {cls.tags['022']}\nRUN chmod o-r {KEYED_SCRIPT}\n", cls.work / "empty")}
+        (cls.work / "empty").mkdir()
+        for name, (text, _) in controls.items():
+            (cls.work / f"{name}.Dockerfile").write_text(text)
+        at_once(lambda name: docker_build(cls.tags[name], controls[name][1], "-f", cls.work / f"{name}.Dockerfile"),
+                controls)
+        (cls.work / "key.sh").write_text(KEY_SH)
+        keyed = ("022", "002", "unreadable")
+        cls.decisions = dict(zip(keyed, at_once(cls.decide, keyed)))
+        cls.modes = {name: listed_modes(cls.tags[name]) for name in ("022", "002", "copy")}
+
+    @classmethod
+    def decide(cls, name):
+        """compile runs KEY_SH in a container of the image `name`: (the lines `oft-py: runtime plain: ...` that it
+        printed, the key line without the time it took, and the lines of its manifest). It asserts one key line, of the
+        manifest's key."""
+        out = cls.work / "out" / name
+        out.mkdir(parents=True)
+        done = subprocess.run(["docker", "run", "--rm", "--init", "--network=none", "--pull=never",
+                               *check_build.work_label(cls.work), "-e", "SANITIZER=none",
+                               "-e", f"OV_OWNER={os.getuid()}:{os.getgid()}",
+                               "-v", f"{cls.work / 'key.sh'}:/src/build.sh:ro", "-v", f"{out}:/out", cls.tags[name],
+                               "compile"], capture_output=True, text=True)
+        assert done.returncode == 0, (f"compile of KEY_SH in {name} exited {done.returncode}:\n"
+                                      f"{done.stdout[-4000:]}{done.stderr[-4000:]}")
+        lines = [line for line in done.stdout.splitlines() if line.startswith("oft-py: runtime plain: ")]
+        keys = [re.fullmatch(r"(oft-py: runtime plain: key ([0-9a-f]{12})) in \d+\.\d s", line) for line in lines]
+        found = [key for key in keys if key]
+        assert len(found) == 1, f"{name}: not one key line in {lines}"
+        manifest = (out / "manifest").read_text().splitlines()
+        assert re.fullmatch(f"key {found[0].group(2)}[0-9a-f]{{52}}", manifest[-1]), (name, found[0].group(0),
+                                                                                      manifest[-1:])
+        return [key.group(1) if key else line for key, line in zip(keys, lines)], manifest
+
+    def test_what_the_builder_copies_has_the_same_modes_under_each_umask(self):
+        """Each entry that the COPYs fill has the same mode and owner in the builder of the checkout under 002 as in
+        that of 022. The control: in the image of one COPY, runtime.sh and the directory of the patches keep the modes
+        of the checkout under 002. (COPY gives the directory that it fills, python/, 755, and keeps the mode of each
+        directory under it.)"""
+        patches = f"{KEYED_SCRIPT.rsplit('/', 1)[0]}/patches"
+        self.assertLessEqual({f"644 0:0 {KEYED_SCRIPT}", f"755 0:0 {patches}"}, set(self.modes["022"]))
+        self.assertEqual(self.modes["002"], self.modes["022"])
+        self.assertLessEqual({f"664 0:0 {KEYED_SCRIPT}", f"775 0:0 {patches}"}, set(self.modes["copy"]))
+
+    def test_the_umask_of_the_checkout_changes_no_key(self):
+        """The plain build makes the same key decision in the builder of the checkout under 002 as in that of 022: the
+        same manifest, each input and the key, and the same lines of oft_py_shipped, its key line and whether it takes
+        the shipped runtime."""
+        lines, manifest = self.decisions["002"]
+        self.assertEqual(manifest, self.decisions["022"][1])
+        self.assertEqual(lines, self.decisions["022"][0])
+
+    def test_a_keyed_file_that_the_build_user_cannot_read_changes_the_key(self):
+        """The control of the key: runtime.sh without the read of others, which the runtime's build, as nobody, needs.
+        Its key differs from that of the builder it is made FROM, and the one input that differs is runtime.sh's meta
+        line."""
+        before, after = self.decisions["022"][1], self.decisions["unreadable"][1]
+        self.assertEqual([line for line in before if line not in after], [f"meta {KEYED_SCRIPT} 644 0:0", before[-1]])
+        self.assertEqual([line for line in after if line not in before], [f"meta {KEYED_SCRIPT} 640 0:0", after[-1]])
 
 
 RUST_FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "rust-example"
