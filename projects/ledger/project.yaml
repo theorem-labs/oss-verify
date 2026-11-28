@@ -1,0 +1,11 @@
+# The ledger: a small C99 command-line ledger with a record/category/filter core.
+# Pinned to the commit that contains the C conversion; update the ref when the project moves.
+repo: https://github.com/EmptyEmptySet/SoftwareEngineering#00d62035f9945fba627bc998a24d169e9561828a
+primary_contact: 231840166@smail.nju.edu.cn
+homepage: https://github.com/EmptyEmptySet/SoftwareEngineering
+language: c
+sanitizers: [address, undefined]
+fuzz_targets:
+  - fuzz_main
+  - ledger_api
+publish: after_fixes
