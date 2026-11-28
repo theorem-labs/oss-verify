@@ -46,7 +46,10 @@ build.sh, harness sources and patches belong there instead; a seed corpus may st
 """
 import argparse
 import collections
+import datetime
 import io
+import itertools
+import math
 import os
 import pathlib
 import re
@@ -112,6 +115,15 @@ PROGRAM_KEYS = ("file", "sha256", "link_map")
 # The most characters of a string of project.yaml that a problem quotes. Through YAML aliases, a small project.yaml
 # can put one long string in many places.
 MAX_QUOTED = 200
+# The most bits of an integer that a problem quotes by its digits: it then has at most MAX_QUOTED decimal digits. A
+# mapping key of a small project.yaml can be an integer of more than 4,300 digits, which Python does not give as text.
+MAX_QUOTED_BITS = int(MAX_QUOTED * math.log2(10))
+# The most problems that validate gives for one project, and the most warnings. Through YAML aliases and merge keys, a
+# small project.yaml can give one bad value at thousands of places, and each place makes a new problem. After the
+# first MAX_PROBLEMS, one more line says that validate does not show the others.
+MAX_PROBLEMS = 100
+MORE_PROBLEMS = f"more problems are not shown: validate gives the first {MAX_PROBLEMS}"
+MORE_WARNINGS = f"more warnings are not shown: validate gives the first {MAX_PROBLEMS}"
 SIZE = re.compile(r"([1-9][0-9]{0,15})(KiB|MiB|GiB|TiB)?")
 # The smallest plain-side agrees budget: one page. Below it, no run is in the statement.
 MIN_PLAIN_BUDGET = 4096
@@ -308,11 +320,24 @@ def builds_of(config):
 
 
 def quoted(value):
-    """`value`, a string or a mapping key of project.yaml, as a problem quotes it: its repr. Of a string longer than
-    MAX_QUOTED characters, or of such bytes (a !!binary key), it gives the first MAX_QUOTED, then `...`."""
-    if isinstance(value, (str, bytes)) and len(value) > MAX_QUOTED:
-        return f"{value[:MAX_QUOTED]!r}..."
-    return repr(value)
+    """`value`, a value of project.yaml or a name in a file beside it (a line of series, an input of a seed corpus), as
+    a problem or a warning quotes it. Each form is short, whatever the value:
+
+    - a string, or bytes (a !!binary value): its repr. Of more than MAX_QUOTED characters or bytes, it gives the first
+      MAX_QUOTED, then `...`.
+    - an integer of more than MAX_QUOTED_BITS bits: `an integer of <N> bits`. Python gives no integer of more than
+      4,300 digits as text.
+    - null, true or false, another number, a date or a timestamp: its repr.
+    - another value (a list, a mapping or a set): its type, for example `a list`. Through aliases, a list of a few
+      hundred bytes of YAML can hold millions of strings.
+    """
+    if isinstance(value, (str, bytes)):
+        return f"{value[:MAX_QUOTED]!r}..." if len(value) > MAX_QUOTED else repr(value)
+    if isinstance(value, int) and value.bit_length() > MAX_QUOTED_BITS:
+        return f"an integer of {value.bit_length()} bits"
+    if value is None or isinstance(value, (bool, int, float, datetime.date)):
+        return repr(value)
+    return f"a {type(value).__name__}"
 
 
 def check_keys(config):
@@ -372,7 +397,8 @@ def check_addresses(config):
     ccs = config.get("auto_ccs")
     if ccs is not None and not is_address_list(ccs):
         yield "auto_ccs must be a list of addresses"
-    for address in finding_addresses(config):
+    # Each address once: through YAML aliases, auto_ccs can name one long address thousands of times.
+    for address in dict.fromkeys(finding_addresses(config)):
         if not EMAIL.fullmatch(address):
             yield f"bad email {quoted(address)}"
 
@@ -448,21 +474,22 @@ def check_programs(config):
                "(or left out, for a project of fuzz targets)")
         return
     # Through YAML aliases, a small project.yaml can give tens of thousands of entries, and one entry object can be at
-    # many places. The keys and values of an entry object are checked at its first place only. Its file and link map
-    # count at each place, so that the checks of names given twice see them.
+    # many places. An entry that is not a mapping is refused at each place (check_config shows at most MAX_PROBLEMS
+    # problems). The keys and values of a mapping are checked at its first place only. A merge key (<<) makes a new
+    # mapping, which is checked at its own place. The file and link map of a mapping count at each place, so that the
+    # checks of names given twice see them.
     files, link_maps, first_maps, checked = [], [], [], set()
     for number, entry in enumerate(entries, 1):
-        if isinstance(entry, dict):
-            if isinstance(entry.get("file"), str):
-                files.append(entry["file"])
-            if isinstance(entry.get("link_map"), str):
-                link_maps.append(entry["link_map"])
-        if id(entry) in checked:
-            continue
-        checked.add(id(entry))
         if not isinstance(entry, dict):
             yield f"programs: entry {number} must be a mapping with file and sha256, and optionally link_map"
             continue
+        if isinstance(entry.get("file"), str):
+            files.append(entry["file"])
+        if isinstance(entry.get("link_map"), str):
+            link_maps.append(entry["link_map"])
+        if id(entry) in checked:
+            continue
+        checked.add(id(entry))
         for key in entry:
             if key not in PROGRAM_KEYS:
                 yield f"programs: entry {number}: unknown field {quoted(key)} (allowed: {', '.join(PROGRAM_KEYS)})"
@@ -634,9 +661,10 @@ def check_files(config, files):
         listed = series_entries(files[SERIES])
         for name in listed:
             if name not in files or not name.endswith(PATCH_SUFFIX):
-                yield f"series lists {name!r}, which is not a .patch file beside project.yaml"
-        for name in sorted({name for name in listed if listed.count(name) > 1}):
-            yield f"series lists {name!r} more than once"
+                yield f"series lists {quoted(name)}, which is not a .patch file beside project.yaml"
+        # Counts, not a scan of the list for each name: a series of 64 KiB has more than 20,000 lines.
+        for name in sorted(name for name, count in collections.Counter(listed).items() if count > 1):
+            yield f"series lists {quoted(name)} more than once"
         for name in patches:
             if name not in listed:
                 yield f"{name} is not listed in series (it says the order patches are applied in)"
@@ -693,74 +721,91 @@ def newest_toolchain_applies_ubsan_checks():
         return False
 
 
-def config_warnings(config, files):
-    """Return warnings: things that are allowed but worth a second look."""
-    warnings = []
+def first_distinct(lines, more):
+    """The lines that the iterable `lines` gives, each distinct line once, in the order found, and at most MAX_PROBLEMS
+    of them. When one more distinct line comes, the list ends with the line `more`, and no more of `lines` is read: the
+    checks after it do no work. Through YAML aliases and merge keys, a small project.yaml can give one bad item at
+    thousands of places."""
+    found = {}
+    for line in lines:
+        if line not in found:
+            if len(found) == MAX_PROBLEMS:
+                return [*found, more]
+            found[line] = None
+    return list(found)
+
+
+def warnings_of(config, files):
+    """Yield warnings: things that are allowed but worth a second look. The project.yaml and the files have no problem
+    (check_config), so each value that a warning gives without quoted() is one of a fixed list, or short."""
     changes = ubsan_changes_of(config)
     if isinstance(changes, dict):
         added = changes.get("add") if isinstance(changes.get("add"), list) else []
         removed = changes.get("remove") if isinstance(changes.get("remove"), list) else []
         for item in sorted(set(map(str, added)) & set(TRAP_EXCEPTIONS)):
-            warnings.append(f"ubsan_checks: {item}: {TRAP_EXCEPTIONS[item]}")
+            yield f"ubsan_checks: {item}: {TRAP_EXCEPTIONS[item]}"
         default = default_ubsan_checks(config.get("language"))
         for item in sorted(set(map(str, added)) & set(default)):
-            warnings.append(f"ubsan_checks.add: {item} is in the default already")
+            yield f"ubsan_checks.add: {item} is in the default already"
         for item in sorted(set(map(str, removed)) - set(default)):
-            warnings.append(f"ubsan_checks.remove: {item} is not in the default, so there is nothing to remove")
+            yield f"ubsan_checks.remove: {item} is not in the default, so there is nothing to remove"
         if not (set(map(str, added)) | set(map(str, removed))) - set(UBSAN_NAMES) - set(NOT_CLANG_CHECKS):
             in_effect = ubsan_checks_in_effect(config)
             if STRICT_FLEX_ARRAYS in in_effect and not {"array-bounds", "bounds", "undefined"} & set(in_effect):
-                warnings.append(f"ubsan_checks: {STRICT_FLEX_ARRAYS} adds no check without array-bounds, which the "
-                                "checks leave out; it still changes how clang optimizes the code of the two UBSan "
-                                "builds")
+                yield (f"ubsan_checks: {STRICT_FLEX_ARRAYS} adds no check without array-bounds, which the checks leave "
+                       "out; it still changes how clang optimizes the code of the two UBSan builds")
         if not newest_toolchain_applies_ubsan_checks():
-            warnings.append("ubsan_checks has no effect yet: the newest toolchain keeps the release's fixed UBSan flags, "
-                            "and oss-verify check refuses the field with it")
+            yield ("ubsan_checks has no effect yet: the newest toolchain keeps the release's fixed UBSan flags, and "
+                   "oss-verify check refuses the field with it")
     if config.get("primary_contact") == NO_CONTACT:
-        warnings.append(
-            "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
-        )
-    for address in finding_addresses(config):
+        yield "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
+    # Each address once: through YAML aliases, auto_ccs can name one long address thousands of times.
+    for address in dict.fromkeys(finding_addresses(config)):
         if RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
-            warnings.append(f"{address} is a placeholder: its domain is reserved for examples, so no report reaches it")
+            yield f"{quoted(address)} is a placeholder: its domain is reserved for examples, so no report reaches it"
     repo = config.get("repo")
     if isinstance(repo, str) and "#" in repo:
         ref = repo.split("#", 1)[1]
         if SHORT_COMMIT.fullmatch(ref) and not FULL_COMMIT.fullmatch(ref):
-            warnings.append(f"#{ref} looks like a shortened commit id; give a commit in full, or this names a branch or tag")
+            yield f"#{ref} looks like a shortened commit id; give a commit in full, or this names a branch or tag"
     language = config.get("language")
     if language in LANGUAGES and language not in BUILT_TODAY:
-        warnings.append(f"language {language}: the builder cannot build it yet (docs/project-yaml.md#language), so "
-                        "oss-verify check refuses it")
+        yield (f"language {language}: the builder cannot build it yet (docs/project-yaml.md#language), so "
+               "oss-verify check refuses it")
     if "Dockerfile" not in files and config.get("dockerfile") is None:
-        warnings.append("no build files yet (a seeded project): it cannot be built until a Dockerfile and build.sh are added")
+        yield "no build files yet (a seeded project): it cannot be built until a Dockerfile and build.sh are added"
     if "Dockerfile" in files and "build.sh" not in files:
-        warnings.append("there is a Dockerfile but no build.sh beside it: the Dockerfile must create $SRC/build.sh itself")
+        yield "there is a Dockerfile but no build.sh beside it: the Dockerfile must create $SRC/build.sh itself"
     for name in sorted(files):
         text = files[name]
         if name.endswith(PATCH_SUFFIX) and text is not None and not re.search(r"^(--- |\+\+\+ |diff )", text, re.M):
-            warnings.append(f"{name} does not look like a patch (no diff, --- or +++ line)")
-    # Each distinct warning once, in the order found: through YAML aliases, auto_ccs can name one address many times.
-    return list(dict.fromkeys(warnings))
+            yield f"{name} does not look like a patch (no diff, --- or +++ line)"
+
+
+def config_warnings(config, files):
+    """Return the warnings of a project.yaml with no problem and of the files next to it: each distinct warning once, in
+    the order found, and at most MAX_PROBLEMS of them, then MORE_WARNINGS (first_distinct)."""
+    return first_distinct(warnings_of(config, files), MORE_WARNINGS)
 
 
 def check_config(config, files):
-    """Return a list of every problem with a parsed project.yaml and the files next to it, each distinct problem once,
-    in the order found: through YAML aliases, a small project.yaml can give one bad item thousands of times."""
+    """Return the problems with a parsed project.yaml and the files next to it: each distinct problem once, in the order
+    found, and at most MAX_PROBLEMS of them, then MORE_PROBLEMS (first_distinct). The checks give their problems one at
+    a time, so a check after the last problem shown does no work."""
     if not isinstance(config, dict):
         return [f"not a mapping (top level is a {type(config).__name__})"]
-    return list(dict.fromkeys([
-        *check_keys(config),
-        *check_types(config),
-        *check_urls(config),
-        *check_addresses(config),
-        *check_pgp(config),
-        *check_builds(config),
-        *check_programs(config),
-        *check_budgets(config),
-        *check_proofs(config),
-        *check_files(config, files),
-    ]))
+    return first_distinct(itertools.chain(
+        check_keys(config),
+        check_types(config),
+        check_urls(config),
+        check_addresses(config),
+        check_pgp(config),
+        check_builds(config),
+        check_programs(config),
+        check_budgets(config),
+        check_proofs(config),
+        check_files(config, files),
+    ), MORE_PROBLEMS)
 
 
 def check_corpus(config, name, target, data):
@@ -788,7 +833,7 @@ def check_corpus(config, name, target, data):
             for entry in entries:
                 plain = entry.filename not in ("", ".", "..") and not any(c in entry.filename for c in "/\\:")
                 if entry.is_dir() or not plain:
-                    yield printable(f"{name}: {entry.filename!r} is not a file at the top level of the zip file")
+                    yield printable(f"{name}: {quoted(entry.filename)} is not a file at the top level of the zip file")
                     continue
                 with archive.open(entry) as stream:
                     while chunk := stream.read(1 << 16):

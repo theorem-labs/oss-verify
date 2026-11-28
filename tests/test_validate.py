@@ -120,12 +120,12 @@ class TestValidProjects:
         for address in ("dry-run@example.invalid", "security@example.org", "a@mail.example.com", "x@host.test"):
             problems, warnings, _ = check(MINIMAL.replace(CONTACT, address))
             assert problems == []
-            assert any(f"{address} is a placeholder" in warning for warning in warnings), warnings
+            assert any(f"'{address}' is a placeholder" in warning for warning in warnings), warnings
         _, warnings, _ = check(MINIMAL + "auto_ccs: [team@example.net]\n")
-        assert any("team@example.net is a placeholder" in warning for warning in warnings), warnings
+        assert any("'team@example.net' is a placeholder" in warning for warning in warnings), warnings
         # Aliases of one address give one warning, not one for each place.
         _, warnings, _ = check(MINIMAL + "auto_ccs: [&cc team@example.net" + ", *cc" * 1999 + "]\n")
-        assert warnings == ["team@example.net is a placeholder: its domain is reserved for examples, so no report "
+        assert warnings == ["'team@example.net' is a placeholder: its domain is reserved for examples, so no report "
                             "reaches it"]
         # A real domain that only contains "example" is not one.
         assert check(MINIMAL.replace(CONTACT, "security@myexample.org"))[1] == []
@@ -447,6 +447,14 @@ class TestPrograms:
     def test_bad_program_entries(self, text, fragment):
         self.refused(text, fragment)
 
+    def test_an_entry_that_is_not_a_mapping_is_refused_at_each_place(self):
+        """Python gives the integer 1 at both of its places as one object, so a check of the object's id() would join
+        them. Each place is an entry, and validate refuses each entry that is not a mapping."""
+        problems, _, summary = check(MINIMAL + "programs: [1, 1, 2]\n")
+        assert summary is None
+        assert problems == [f"programs: entry {number} must be a mapping with file and sha256, and optionally link_map"
+                            for number in (1, 2, 3)]
+
     def test_a_file_that_aliases_make_a_large_list(self):
         """A value of file that is not a string is named by its type. Its repr would hold each string of the list: for
         6 levels, 4,782,969 strings in 25 MB, from a project.yaml of 500 bytes."""
@@ -459,31 +467,39 @@ class TestPrograms:
 
     def test_an_entry_that_aliases_repeat_is_checked_once(self):
         """The keys and values of one entry object are checked at its first place alone. Its file and link map still
-        count at each place, so that the names given twice are found."""
-        unknown = ", ".join(f"k{number}: 1" for number in range(200))
+        count at each place, so that the names given twice are found. The entry has 20 unknown keys, fewer than the 100
+        problems that validate gives. A check at each of the 200 places would give 4,000 problems."""
+        unknown = ", ".join(f"k{number}: 1" for number in range(20))
         text = (MINIMAL + f"programs:\n  - &entry {{file: hello, sha256: {PIN}, link_map: hello.map, {unknown}}}\n"
                 + "  - *entry\n" * 199)
         problems, _, summary = check(text)
         assert len(problems) < 1000
         assert summary is None
-        for number in range(200):
+        for number in range(20):
             assert sum(f"unknown field 'k{number}'" in problem for problem in problems) == 1, number
         assert "programs names the file 'hello' twice" in problems
         assert "programs names the link map 'hello.map' twice" in problems
 
     def test_a_long_string_that_aliases_repeat_is_cut(self):
         """A problem quotes at most the first 200 characters of a string. Through aliases, the entries of a small
-        project.yaml can each name one long string: here 1,000 entries, with a file name of 20,000 characters."""
+        project.yaml can each name one long string: here 1,000 entries, with a file name of 20,000 characters. Each
+        entry gives its problems, and validate gives the first 100 of them, then one line that says that more are not
+        shown."""
         text = (MINIMAL + f"programs:\n  - {{file: &long {'x' * 20000}, sha256: &pin {PIN}}}\n"
                 + "  - {file: *long, sha256: *pin, *long : 1}\n" * 999)
         problems, _, summary = check(text)
         cut = f"'{'x' * 200}'..."
         assert max(len(problem) for problem in problems) < 500
         assert summary is None
-        for number in (1, 1000):
+        assert len(problems) == 101
+        assert problems[-1] == "more problems are not shown: validate gives the first 100"
+        for number in (1, 50):
             assert any(problem.startswith(f"programs: entry {number}: file {cut} is not a file name")
                        for problem in problems), number
-        assert any(problem.startswith(f"programs: entry 1000: unknown field {cut} (allowed: ") for problem in problems)
+        assert any(problem.startswith(f"programs: entry 50: unknown field {cut} (allowed: ") for problem in problems)
+        # The problem of a file given twice comes after those of each entry. With two entries, validate shows it.
+        problems, _, _ = check(MINIMAL + f"programs:\n  - {{file: &long {'x' * 20000}, sha256: {PIN}}}\n"
+                               f"  - {{file: *long, sha256: {PIN}}}\n")
         assert f"programs names the file {cut} twice" in problems
 
 

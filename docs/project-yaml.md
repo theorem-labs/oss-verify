@@ -2,7 +2,9 @@
 
 This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory.
 
-Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and it quotes at most the first 200 characters of a value of project.yaml. We use the same rules when we import a project.
+Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and at most 100 problems. If there are more, it then gives one line that says that more problems are not shown. It gives warnings in the same way. We use the same rules when we import a project.
+
+A problem or a warning quotes at most the first 200 characters of a string of project.yaml, or the first 200 bytes of a `!!binary` value. It names an integer of more than 664 bits by its size, for example `an integer of 16000 bits`. It names another value by its type, for example `a list`, if the value is not a number, a date, `true`, `false` or `null`. The summary line of a valid project gives its values whole.
 
 The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. We made new names only for fields that neither has.
 
@@ -174,7 +176,7 @@ A project can list more than one program. `oss-verify validate` refuses `program
 * `sha256` has exactly 64 hexadecimal digits, in lower case.
 * No two entries have the same `file`, and no two entries have the same `link_map`. A `link_map` is not the `file` of a program, also not of its own entry.
 
-For a `file` or a `link_map` that is not a string, the problem gives the type of the value, for example `(it is a list)`, and not the value. A YAML alias can put one entry at more than one place of the list. `oss-verify validate` then checks the keys and values of that entry at its first place only. Each place still counts for the rule that no two entries have the same `file` or the same `link_map`.
+For a `file` or a `link_map` that is not a string, the problem gives the type of the value, for example `(it is a list)`, and not the value. A YAML alias can put one entry at more than one place of the list. `oss-verify validate` refuses an entry that is not a mapping at each place. It checks the keys and values of a mapping at its first place only. A merge key (`<<`) makes a new mapping, which it checks at its own place. Each place still counts for the rule that no two entries have the same `file` or the same `link_map`.
 
 A project with `programs` has the plain build only, as a `go` or `jvm` project has ([above](#language)). Thus `oss-verify validate` refuses each field and file that is for fuzz targets or for a sanitizer build:
 
