@@ -1388,6 +1388,9 @@ class Hold(Runner):
         self.assertTrue(bodies[0].endswith("\n\n<!-- oss-verify-held-run 100 -->\n"), bodies[0])
         self.assertIn("the screen did not pass it", bodies[0])
         self.assertIn(f"gh workflow run review.yml -R {REPO} -f pr=7", bodies[0])
+        # A person's approval of the head passes the check run review of a pull request
+        # (dispatch://INFRA-5359/ask/605104e3-b85c-4c22-9a54-b254ba0e3c10).
+        self.assertIn("can also approve this head on GitHub: the check review then passes with no review.", bodies[0])
         # nothing that notifies anyone or links an issue
         self.assertNotIn("@", bodies[0])
         self.assertNotRegex(bodies[0], r"#[0-9]|(?i:gh-)[0-9]")
@@ -1395,13 +1398,16 @@ class Hold(Runner):
     def test_an_issue_is_told_how_to_start_its_review(self):
         _calls, bodies, _ = self.hold("screen", pr="", number="9")
         self.assertIn(f"-f issue=9", bodies[0])
+        self.assertNotIn("approve this head", bodies[0])
 
     def test_a_capped_item_is_told_the_cap_and_when_it_frees(self):
         """c3 (f), and an issue or a change pull request held at the daily cap: the cap and the time it frees, and
         that a push (for an issue, an edit of it) or a run by hand reviews it from then. No marker that anything tries
         it again."""
-        for pr, number, start, change in (("", "9", "-f issue=9", "an edit of the issue"),
-                                          ("7", "7", "-f pr=7", "a push")):
+        approve = (" A person with write access who is not its author can also approve this head on GitHub: the "
+                   "check review then passes with no review.")
+        for pr, number, start, change, more in (("", "9", "-f issue=9", "an edit of the issue", ""),
+                                                ("7", "7", "-f pr=7", "a push", approve)):
             with self.subTest(number=number):
                 self.api.joinpath("args").unlink(missing_ok=True)
                 _calls, bodies, _ = self.hold("cap", pr=pr, number=number, free="2026-11-10T00:00:00Z")
@@ -1410,7 +1416,7 @@ class Hold(Runner):
                     f"access to this repository, and the automated reviews of such accounts reached their cap of "
                     f"{REVIEW['env']['REVIEW_CAP']} in 24 hours, {REVIEW['env']['REVIEW_CAP_AUTHOR']} for one author. "
                     f"From 2026-11-10 00:00 UTC, {change} or `gh workflow run review.yml -R {REPO} {start}` reviews "
-                    "it.\n\n"
+                    f"it.{more}\n\n"
                     "<!-- oss-verify-held-run 100 -->\n"])
         # A cap with no time it frees holds nothing.
         rc, out, _ = self.run_script(step("comment", self.STEP)["run"], PR="", NUMBER="9", TRUST="cap", HEAD_SHA="a" * 40,
