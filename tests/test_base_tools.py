@@ -33,7 +33,8 @@ runs a step with no shell:. A stand-in gh answers the compare API with the statu
     or diverged), a compare that fails, a base branch that git ls-remote does not list, and a merge commit with one
     parent or three.
   - The step does not run on a run by hand of validate.yaml.
-  - Each job runs its scripts, and src/oss_verify/, from P1, and terms-accepted gets P1 as BASE_SHA.
+  - Each job runs its scripts, and src/oss_verify/, from P1, and terms-accepted gets P1 as BASE_SHA. Its first
+    checkout has no sparse-checkout, so P1 is checked out whole.
 
 test_binary_sizes runs the build step of build.yaml with a stand-in oss-verify check and binary-sizes. When oss-verify
 check passes and a run of binary-sizes fails, the step writes a warning and a summary sentence with the exit status.
@@ -733,6 +734,12 @@ def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
     p1 = scratch.commits["P1"]
     run = JobRun(tmp_path, scratch, WORKFLOWS, label)
     job = JOBS[label]
+    # The run below reaches the job's tools alone, and the job's later steps read more of P1 than its tools:
+    # build.yaml's oss-verify check runs from src/. git keeps a sparse-checkout's lines when the step with id: parent
+    # checks out P1, so lines in the first checkout would leave out of P1 every path they do not name.
+    checkout = run.steps[0].get("with") or {}
+    assert "sparse-checkout" not in checkout, \
+        f"{label}: the first checkout has sparse-checkout: {checkout['sparse-checkout']!r}, so P1 is checked out sparse"
     tools = job.tools
     found = [step for step in run.steps if tools[0] in str(step.get("run", ""))]
     assert found, f"{label}: no step runs {tools[0]}"

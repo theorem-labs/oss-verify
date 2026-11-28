@@ -3439,6 +3439,33 @@ class SessionCache(unittest.TestCase):
         landed = [str(pathlib.PurePosixPath(take["with"]["path"]) / path.relative_to(root)) for path in kept]
         self.assertEqual(landed, save["with"]["path"].split("\n"))
 
+    def test_the_session_job_saves_a_kept_session_whatever_the_review_jobs_result(self):
+        """The session job runs when the review job kept a session (its output session), whether the review job then
+        succeeded or failed, and not when it kept none: a step that fails after the upload loses no session."""
+        for kind in ("enrollment", "change"):
+            for result in ("success", "failure"):
+                for session, runs in (("4242", True), ("", False)):
+                    with self.subTest(kind=kind, review=result, session=session):
+                        review = {"comment": "Thanks.", "held_object": "", "session": session, "kind": kind}
+                        got, _ = run_graph(dict(ITEMS[kind], trust="writer"), results={"review": result},
+                                           outputs={"review": review})
+                        self.assertEqual(got["review"], result)
+                        self.assertEqual(got["session"] != "skipped", runs, got)
+
+    def test_the_save_takes_each_input_of_each_restore_but_the_keys(self):
+        """actions/cache finds an entry only under the version that its inputs make (the paths, and
+        enableCrossOsArchive with the compression), and an input of a restore alone changes what it restores
+        (lookup-only restores nothing, fail-on-cache-miss fails the gather job before any session was saved). So the
+        save's with:, but its key, is each restore's, but its key and restore-keys: an input added to or dropped from
+        either side fails here."""
+        save = step("session", "Keep it for the next push's review")["with"]
+        saved = {name: value for name, value in save.items() if name != "key"}
+        for name in ("Restore the last review's session and the head it reviewed",
+                     "Restore the last change review's session"):
+            with self.subTest(restore=name):
+                restore = step("gather", name)["with"]
+                self.assertEqual({k: v for k, v in restore.items() if k not in ("key", "restore-keys")}, saved)
+
     def test_the_collector_collects_the_session_job(self):
         """When the review job kept a session, the check review jobs asks for the session job: it fails when that job
         failed, and passes when it passed."""

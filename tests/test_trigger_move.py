@@ -2133,6 +2133,11 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
                  for p in sorted((ROOT / ".github" / "workflows").iterdir()) if p.suffix in (".yml", ".yaml")]
         self.assertEqual(names.count(images["name"]), 1, names)
 
+    def test_publish_starts_when_a_run_of_toolchain_images_completes(self):
+        # A requested or an in-progress run has no conclusion yet, so the if of each job of publish's file (its
+        # conclusion is success) is false there, and nothing would be published, with no error.
+        self.assertEqual(triggers(self.workflow(ROOT, self.PUBLISH))["workflow_run"]["types"], ["completed"])
+
     def tracked(self):
         """The path of each file of this repository that git tracks: what a checkout of the whole tree gives."""
         done = subprocess.run([REAL_GIT, "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True)
@@ -5456,11 +5461,37 @@ class HeldRuns(Stand):
             self.assertEqual(bool(test_outside_screen.evaluate(job["if"], {"github.event_name": event,
                                                                            "github.ref": ref})), runs, (event, ref))
 
+    def test_held_runs_workflow_starts_on_events_alone_and_runs_no_action(self):
+        # Events only, never a schedule: a run of Build, Triage or Tests that ended (not Terms: the file says why), a
+        # push to main, an issue opened or reopened, and a run by hand. Each of them runs main's copy of the file. No
+        # job runs an action or calls a workflow: a job may hold actions: write (the test above), which can approve
+        # held runs, and an action is code that this file does not hold.
+        workflow = parse(self.workflow_text)
+        self.assertEqual(triggers(workflow), {
+            "workflow_run": {"workflows": ["Build", "Triage", "Tests"], "types": ["completed"]},
+            "push": {"branches": ["main"]},
+            "issues": {"types": ["opened", "reopened"]},
+            "workflow_dispatch": None})
+        self.assertTrue(workflow["jobs"])
+        for name, job in workflow["jobs"].items():
+            self.assertNotIn("uses", job, name)
+            self.assertEqual([s for s in job.get("steps") or [] if "uses" in s], [], name)
+
 
 class ReviewThatPasses(Stand):
     """d10: the review job of an enrollment whose review passes has the model read review.md, and hands the comment
     and the verdicts that the model gave on to the comment job as they are. PostingStep of tests/test_check_checks.py
-    runs the comment job's step that posts them."""
+    runs the comment job's step that posts them. review.md says nothing that the comment of a pass must not say."""
+
+    # A pointer to a comment of a label: Enroll dispatch puts a label on and posts no comment. For example "the comment
+    # on the label", "the label's comment", or "Enroll dispatch (then) posts a comment". The true sentence "Enroll
+    # dispatch posts no comment." does not match.
+    LABEL_COMMENT = re.compile(r"\bcomments? (?:of|on|for|with|from|about) (?:the |a |each |its |this |that |one )?"
+                               r"label|\blabel(?:'s|s'|s)? comments?\b"
+                               r"|\benroll dispatch (?:\w+ )?(?:posts|writes|leaves) (?:a|its) comment", re.I)
+    # What neither review.md nor the comment of a pass says: that Theorem decides the next step, that a maintainer
+    # will look at or review the pull request, or anything of held bugs.
+    MUST_NOT_SAY = re.compile(r"theorem decides|decides the next step|maintainer will (look|review)|held bug", re.I)
 
     # The stand-in model's comment.
     COMMENT = ("Every check of review.md passes for projects/libreac/.\n\nYou need to do nothing more, unless the pull "
@@ -5498,6 +5529,14 @@ class ReviewThatPasses(Stand):
         self.assertEqual(rc, 0, log)
         self.assertEqual((kept["comment"], json.loads(kept["verdicts"]), json.loads(kept["reasons"])),
                          (self.COMMENT, {check: "pass" for check in ids}, {}), log)
+
+    def test_passes_review_md_says_nothing_the_comment_of_a_pass_must_not_say(self):
+        """No text of review.md, which the model reads, says what MUST_NOT_SAY matches or points to a comment of a
+        label (LABEL_COMMENT). It is read with each run of white space as one space, so a line break does not split a
+        phrase. This guards the phrases of the two patterns alone, not every way to say the same."""
+        text = " ".join((ROOT / "review.md").read_text().split())
+        self.assertEqual([m.group(0) for m in self.MUST_NOT_SAY.finditer(text)], [])
+        self.assertEqual([m.group(0) for m in self.LABEL_COMMENT.finditer(text)], [])
 
 
 if __name__ == "__main__":

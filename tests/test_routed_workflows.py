@@ -1278,6 +1278,15 @@ def test_triage_starts_only_for_projects_and_no_required_check_is_path_filtered_
                 assert not {"paths", "paths-ignore"} & set(spec or {}), f"{name}: {event} has a paths filter"
 
 
+def test_build_starts_only_for_a_pull_request_into_main():
+    """build.yaml's branch filter, either key: review.yml takes each Build run as a run of the open pull request into
+    the default branch from the run's head repository and branch, at its head commit. So a run for a pull request into
+    another branch would give the pull request into main from the same branch and commit a second review, and a second
+    count of the daily cap."""
+    pull_request = workflow("build.yaml")[True]["pull_request"]
+    assert {key: value for key, value in pull_request.items() if key.startswith("branches")} == {"branches": ["main"]}
+
+
 @pytest.mark.parametrize("files, want", [
     (["projects/p/project.yaml"], ["triage=true"]),
     (["README.md", "projects/p/build.sh"], ["triage=true"]),
