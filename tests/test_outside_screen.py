@@ -1200,18 +1200,24 @@ class Holdings(unittest.TestCase):
                     self.assertEqual(step_env("screen", s)["SCREEN_MODEL"], self.MEASURED_MODEL)
         self.assertLessEqual({"Screen", "Measure"}, set(ran))
 
+    # Every attempt a run can have: GitHub runs at most 50 re-runs of a run (held-runs.yml's comment), so its
+    # run_attempt is 1 to 51. Two run ids of today's length.
+    ATTEMPTS = tuple(str(n) for n in range(1, 52))
+    RUN_IDS = ("46129892577", "46129892578")
+
     def test_each_attempt_of_each_run_stores_its_screen_record_under_a_name_of_its_own(self):
         """screen.py stores the reason of a screen (the Screen step's REASON_OBJECT) and the record of a measurement
         (the Measure step's MEASURE_OBJECT) as a new object, never over one (ifGenerationMatch=0, test_screen.py). A
-        name that a re-run, or another run, gives again would lose that run's record. Each name differs for two
-        attempts of one run, and for two runs."""
+        name that a re-run, or another run, gives again would lose that run's record. Each name differs for every
+        attempt of a run and for two runs, and holds its run's id."""
         for name, variable in (("Screen", "REASON_OBJECT"), ("Measure", "MEASURE_OBJECT")):
             value = step_env("screen", step("screen", name))[variable]
-            names = {interpolated(value, {"github.repository": REPO, "github.run_id": run,
-                                          "github.run_attempt": attempt})
-                     for run in ("9001", "9002") for attempt in ("1", "2")}
+            names = {(run, attempt): interpolated(value, {"github.repository": REPO, "github.run_id": run,
+                                                          "github.run_attempt": attempt})
+                     for run in self.RUN_IDS for attempt in self.ATTEMPTS}
             with self.subTest(step=name):
-                self.assertEqual(len(names), 4, names)
+                self.assertEqual(len(set(names.values())), len(names), sorted(names.values()))
+                self.assertEqual([key for key, said in names.items() if key[0] not in said], [])
 
 
 class TakeReviewData(Runner):

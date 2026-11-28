@@ -30,7 +30,7 @@ from oss_verify import validate
 from test_enroll_dispatch import marked_encrypted  # noqa: E402
 # The workflow tests' workflow reader, expression evaluator, job graph, collector and step runner with a stand-in gh,
 # review.yml and its jobs, and route's outputs for each kind of item.
-from test_outside_screen import (ITEMS, REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate,  # noqa: E402
+from test_outside_screen import (ITEMS, REVIEW, REVIEW_JOBS, Runner, as_text, comment_job_env, evaluate,  # noqa: E402
                                  interpolated, read_workflow, required, run_graph, step)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -3452,19 +3452,27 @@ class SessionCache(unittest.TestCase):
                         self.assertEqual(got["review"], result)
                         self.assertEqual(got["session"] != "skipped", runs, got)
 
+    # The inputs of the pinned actions/cache/save and actions/cache/restore (v6.1.0) that have a default, and that
+    # default (their action.yml): an input set to its default changes nothing.
+    CACHE_DEFAULTS = {"enableCrossOsArchive": "false", "fail-on-cache-miss": "false", "lookup-only": "false"}
+
     def test_the_save_takes_each_input_of_each_restore_but_the_keys(self):
         """actions/cache finds an entry only under the version that its inputs make (the paths, and
-        enableCrossOsArchive with the compression), and an input of a restore alone changes what it restores
-        (lookup-only restores nothing, fail-on-cache-miss fails the gather job before any session was saved). So the
-        save's with:, but its key, is each restore's, but its key and restore-keys: an input added to or dropped from
-        either side fails here."""
-        save = step("session", "Keep it for the next push's review")["with"]
-        saved = {name: value for name, value in save.items() if name != "key"}
+        enableCrossOsArchive with the compression), and an input of a restore alone, set away from its default,
+        changes what it restores (lookup-only: true restores nothing, fail-on-cache-miss: true fails the gather job
+        before any session was saved). So the save's with:, but its key, is each restore's, but its key and
+        restore-keys, once the inputs set to their defaults are left out: an input added to or dropped from either
+        side fails here."""
+        def inputs(given, keys):
+            return {k: v for k, v in given.items()
+                    if k not in keys and as_text(v).lower() != self.CACHE_DEFAULTS.get(k)}
+
+        saved = inputs(step("session", "Keep it for the next push's review")["with"], ("key",))
+        self.assertIn("path", saved)
         for name in ("Restore the last review's session and the head it reviewed",
                      "Restore the last change review's session"):
             with self.subTest(restore=name):
-                restore = step("gather", name)["with"]
-                self.assertEqual({k: v for k, v in restore.items() if k not in ("key", "restore-keys")}, saved)
+                self.assertEqual(inputs(step("gather", name)["with"], ("key", "restore-keys")), saved)
 
     def test_the_collector_collects_the_session_job(self):
         """When the review job kept a session, the check review jobs asks for the session job: it fails when that job

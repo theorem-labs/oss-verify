@@ -736,10 +736,11 @@ def test_the_job_runs_the_first_parents_tools(tmp_path, scratch, label):
     job = JOBS[label]
     # The run below reaches the job's tools alone, and the job's later steps read more of P1 than its tools:
     # build.yaml's oss-verify check runs from src/. git keeps a sparse-checkout's lines when the step with id: parent
-    # checks out P1, so lines in the first checkout would leave out of P1 every path they do not name.
-    checkout = run.steps[0].get("with") or {}
-    assert "sparse-checkout" not in checkout, \
-        f"{label}: the first checkout has sparse-checkout: {checkout['sparse-checkout']!r}, so P1 is checked out sparse"
+    # checks out P1, so lines in the first checkout would leave out of P1 every path they do not name. actions/checkout
+    # makes a checkout sparse only when the input has a line, as the checkout model here does.
+    sparse = str((run.steps[0].get("with") or {}).get("sparse-checkout") or "").split()
+    assert sparse == [], \
+        f"{label}: the first checkout's sparse-checkout lines are {sparse}, so P1 is checked out sparse"
     tools = job.tools
     found = [step for step in run.steps if tools[0] in str(step.get("run", ""))]
     assert found, f"{label}: no step runs {tools[0]}"
