@@ -46,12 +46,36 @@ class ProjectDir:
         self.scratch.cleanup()
 
 
+# The files beside project.yaml that check() and traced_check() give by default.
+BUILD_FILES = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}
+# The most memory that check_project may take at the peak for a hostile project.yaml (TestHostileYaml, and the ubsan
+# items of TestProblems). Before their fixes, these spellings took much more: the repr of a nested alias took 25 MB, the
+# ubsan items as text took 192 MiB, and an aliased address took 63 MiB. The merge keys need no bound: the test asserts
+# the problem that refuses them. Measured with Python 3.12 and PyYAML 6.0.3, validate takes at most 0.42 MiB
+# now (a merge key as a value). The bound is far above that, so that only a real regression goes past it.
+MAX_PEAK = 8 * 2**20
+
+
 def check(yaml_text, files=None, name="example"):
     """Run check_project on a directory holding project.yaml and `files` (default: a Dockerfile and a build.sh)."""
     if files is None:
-        files = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}
+        files = BUILD_FILES
     with ProjectDir({"project.yaml": yaml_text, **files}, name) as directory:
         return validate.check_project(directory)
+
+
+def traced_check(yaml_text):
+    """check(yaml_text), with the peak of the memory that check_project takes: (problems, warnings, summary, peak).
+    The directory is made before tracemalloc starts. pathlib interns each part of a path (sys.intern), and when the
+    table of interned strings grows, tracemalloc charges the whole larger table (about 1 MB) to the open window."""
+    with ProjectDir({"project.yaml": yaml_text, **BUILD_FILES}) as directory:
+        tracemalloc.start()
+        try:
+            problems, warnings, summary = validate.check_project(directory)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    return problems, warnings, summary, peak
 
 
 class TestValidProjects:
@@ -129,6 +153,17 @@ class TestValidProjects:
                             "reaches it"]
         # A real domain that only contains "example" is not one.
         assert check(MINIMAL.replace(CONTACT, "security@myexample.org"))[1] == []
+
+    @pytest.mark.parametrize("count, more", [(100, []), (101, [validate.MORE_WARNINGS])],
+                             ids=["100 warnings", "101 warnings"])
+    def test_at_most_100_warnings_are_shown(self, count, more):
+        """Each distinct placeholder address of auto_ccs gives a warning. validate gives all of 100 warnings. Of 101, it
+        gives the first 100, then one line that says that more are not shown."""
+        addresses = [f"cc{number}@example.com" for number in range(count)]
+        problems, warnings, _ = check(MINIMAL + f"auto_ccs: [{', '.join(addresses)}]\n")
+        assert problems == []
+        placeholder = "is a placeholder: its domain is reserved for examples, so no report reaches it"
+        assert warnings == [f"'{address}' {placeholder}" for address in addresses[:100]] + more
 
 
 class TestBuilds:
@@ -517,6 +552,16 @@ class TestProblems:
             patch.setattr(validate, "OPERATOR_KEYS", ("budget_usd",))
             self.expect_problem(MINIMAL + "budget_usd: 5\n", "set by the operators")
 
+    @pytest.mark.parametrize("count, more", [(100, []), (101, [validate.MORE_PROBLEMS])],
+                             ids=["100 problems", "101 problems"])
+    def test_at_most_100_problems_are_shown(self, count, more):
+        """Each distinct unknown field gives a problem. validate gives all of 100 problems. Of 101, it gives the first
+        100, then one line that says that more are not shown."""
+        problems, _, summary = check(MINIMAL + "".join(f"k{number}: 1\n" for number in range(count)))
+        assert summary is None
+        allowed = ", ".join(validate.ALLOWED_KEYS)
+        assert problems == [f"unknown field 'k{number}' (allowed: {allowed})" for number in range(100)] + more
+
     def test_types(self):
         self.expect_problem(MINIMAL + "disabled: yes please\n", "disabled must be true or false")
         self.expect_problem(MINIMAL.replace("language: c", "language: [c]"), "language must be a string")
@@ -580,15 +625,10 @@ class TestProblems:
         each level of about 56 bytes more is 9 times as much: str() of such items made oss-verify validate take 2.3 s
         and 192 MiB for a project.yaml of 600 bytes."""
         text = MINIMAL + f"ubsan_checks: {{{key}: [{nested_list(5)}], reason: x}}\n"
-        tracemalloc.start()
-        try:
-            problems, _, summary = check(text)
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        problems, _, summary, peak = traced_check(text)
         assert summary is None
         assert f"ubsan_checks.{key} must be a list of UBSan check names" in problems, problems
-        assert peak < 2**20, f"validate allocated {peak:,} bytes at the peak for {len(text)} bytes of project.yaml"
+        assert peak < MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text)} bytes of project.yaml"
 
     def test_budgets(self):
         self.expect_problem(MINIMAL + "budgets: {oom: 1GiB}\n", "unknown field 'oom'")
@@ -795,29 +835,20 @@ class TestHostileYaml:
     many key-value pairs as it parses. A mapping key can be an integer whose repr() raises. For each spelling at each
     place, validate raises no exception. It gives at most 101 problems and at most 101 warnings: 100, then one line that
     says that more are not shown. Each line has at most 1,000 characters, and all the lines together have at most
-    101,000. validate takes at most 1 MiB at the peak. A spelling with merge keys gives one problem alone: load()
-    refuses the merge key, with its line."""
+    101,000. validate takes at most MAX_PEAK (8 MiB) at the peak. A spelling with merge keys gives one problem alone:
+    load() refuses the merge key, with its line."""
 
     MAX_LINES = 101
     # A line that quotes 200 ASCII characters of a value has fewer than 500.
     MAX_LINE = 1000
     MAX_CHARACTERS = MAX_LINES * MAX_LINE
-    # Measured with Python 3.12 and PyYAML 6.0.3: validate takes at most 0.41 MiB at the peak (a merge key as a value:
-    # PyYAML has made the nodes of the 200 keys and of the 99 mappings when load() refuses the first merge key), and at
-    # most 0.09 MiB for each other spelling. The bound is about two and a half times the most.
-    MAX_PEAK = 2**20
 
     @pytest.mark.parametrize("spelling, place", HOSTILE_CASES,
                              ids=[f"{spelling} at {place}" for spelling, place in HOSTILE_CASES])
     def test_any_spelling_at_any_place_is_bounded(self, spelling, place):
         form, build = HOSTILE_PLACES[place]
         text = build(HOSTILE_SPELLINGS[spelling][form])
-        tracemalloc.start()
-        try:
-            problems, warnings, _ = check(text)
-            _, peak = tracemalloc.get_traced_memory()
-        finally:
-            tracemalloc.stop()
+        problems, warnings, _, peak = traced_check(text)
         if form == "addresses":
             # validate gives warnings only for a valid project.yaml. With a problem, this row would not test them.
             assert problems == [], problems
@@ -827,11 +858,20 @@ class TestHostileYaml:
         assert longest <= self.MAX_LINE, f"a line of {longest:,} characters"
         characters = sum(len(line) for line in problems + warnings)
         assert characters <= self.MAX_CHARACTERS, f"{characters:,} characters of problems and warnings"
-        assert peak <= self.MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text):,} bytes of YAML"
+        assert peak <= MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text):,} bytes of YAML"
         if spelling in MERGE_SPELLINGS:
             [line] = {number for number, row in enumerate(text.splitlines(), 1) if "<<" in row}
             assert (problems, warnings) == (
                 [f"project.yaml does not parse: line {line}: a merge key (<<) is not allowed; write the keys out"], [])
+
+    def test_an_integer_key_is_named_by_its_size(self):
+        """HUGE_INT, 4,000 hex digits, is an integer of 16,000 bits. Python gives no text of it, so a problem names it
+        by its size: here as an unknown key of an entry of programs."""
+        assert validate.quoted(int(HUGE_INT, 16)) == "an integer of 16000 bits"
+        problems, _, summary = check(programs(flow(("file", "hello"), ("sha256", PIN), (HUGE_INT, "1"))))
+        assert summary is None
+        assert problems == [
+            "programs: entry 1: unknown field an integer of 16000 bits (allowed: file, sha256, link_map)"]
 
 
 class TestOutput:

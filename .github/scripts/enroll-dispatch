@@ -162,12 +162,15 @@ import yaml
 # of steering files, for the steering-file gate. artifact.py's read of one file of a Build run's artifact for the record
 # (read_member), the errors that this read does not catch (UNREADABLE), Api, and the check of a whole number (whole).
 # approval.py's person approval of a commit (person_approval), the one rule that review-check reads too, with the
-# write access, the login's shape and the time that it reads.
+# write access, the login's shape and the time that it reads. validate_rules' validate, the copy of oss-verify validate
+# that triage.py imports too: project_yaml parses project.yaml with its loader, so that one parser reads that one input,
+# and a merge key (<<) is refused here as oss-verify validate, review-gather and terms-accepted refuse it.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import steering  # noqa: E402
 import triage  # noqa: E402
 from approval import LOGIN, person_approval, time_of, write_access  # noqa: E402
 from artifact import UNREADABLE, Api, read_member, whole  # noqa: E402
+from validate_rules import validate  # noqa: E402
 
 # The size line for statements that start with no person's decision, "Up to 1 MB" of a plain binary
 # (dispatch://OSSV-141/ask/7c73eb21), the README's "less than 1 MB of code": 1 MB is 1,000,000 bytes here. It is
@@ -467,12 +470,13 @@ def open_at(pull: dict, repo: str, sha: str, head: tuple | None) -> str:
 
 
 def project_yaml(api: Api, repo: str, project: str, sha: str) -> dict | None:
-    """projects/<project>/project.yaml at `sha`, or None if it cannot be read."""
+    """projects/<project>/project.yaml at `sha`, or None if it cannot be read. It is parsed as oss-verify validate
+    parses it, with validate.ProjectLoader, which refuses a merge key (<<)."""
     try:
         data = api.raw(f"repos/{repo}/contents/projects/{project}/project.yaml?ref={sha}")
         if len(data) > MAX_PROJECT_YAML_BYTES:
             return None
-        config = yaml.safe_load(data)
+        config = yaml.load(data, Loader=validate.ProjectLoader)
     except (subprocess.CalledProcessError, yaml.YAMLError, RecursionError):
         return None
     return config if isinstance(config, dict) else None

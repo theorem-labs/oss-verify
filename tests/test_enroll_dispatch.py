@@ -731,6 +731,20 @@ class Labels(unittest.TestCase):
         self.assertEqual(got["decision"], "none")
         self.assertIn("cannot be read for its language", got["reason"])
 
+    def test_a_project_yaml_with_a_merge_key_sends_nothing(self):
+        # enroll-dispatch parses project.yaml with validate.ProjectLoader, as oss-verify validate does: it refuses a
+        # merge key (<<), so the language under the merge is not read. yaml.safe_load would read it as c.
+        world = World()
+        world.project_yaml = b"repo: https://example.invalid/x\n<<: {language: c}\n"
+        got = world.decide()
+        self.assertEqual(got["decision"], "none", got["reason"])
+        self.assertIn("cannot be read for its language", got["reason"])
+        # The control: the same project.yaml with the keys written out is read, and sent.
+        world = World()
+        world.project_yaml = b"repo: https://example.invalid/x\nlanguage: c\n"
+        got = world.decide()
+        self.assertEqual(got["decision"], "dispatch", got["reason"])
+
     def test_a_paused_language_is_labelled(self):
         for language in ("Python", "go"):
             world = World()

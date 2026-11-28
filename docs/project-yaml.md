@@ -4,7 +4,7 @@ This page describes each field of `projects/<name>/project.yaml` and each file i
 
 Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and at most 100 problems for a project. If there are more, it then gives one line that says that more problems are not shown. It gives warnings in the same way. We use the same rules when we import a project.
 
-A problem or a warning quotes at most the first 200 characters of a string of project.yaml, or the first 200 bytes of a `!!binary` value. It names an integer of more than 664 bits by its size, for example `an integer of 16000 bits`. It names another value by its type, for example `a list`, if the value is not a number, a date, `true`, `false` or `null`. The summary line of a valid project gives its values whole.
+A problem or a warning quotes at most the first 200 characters of a string of project.yaml, or the first 200 bytes of a `!!binary` value. It names an integer of more than 664 bits by its size, for example `an integer of 16000 bits`. The summary line of a valid project gives its values whole.
 
 `oss-verify validate` refuses a YAML merge key (`<<`) in `project.yaml`, with this problem: `project.yaml does not parse: line <n>: a merge key (<<) is not allowed; write the keys out`. Write the keys out in the mapping instead. Anchors (`&name`) and aliases (`*name`) are allowed.
 

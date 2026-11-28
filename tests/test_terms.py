@@ -521,10 +521,11 @@ def test_a_branch_that_sets_the_contact_of_a_project_that_is_not_seeded_needs_no
 @pytest.mark.parametrize("key", ['"primary_contact":', "'primary_contact':", "primary_contact :"],
                          ids=["double quotes", "single quotes", "a space before the colon"])
 def test_a_seeded_contact_in_another_yaml_spelling_needs_the_record(tmp_path, key):
-    # oss-verify validate reads project.yaml with yaml's SafeLoader, less merge keys. Like yaml.safe_load below, it
-    # reads each of these lines as primary_contact: the branch adopts curl as surely as with primary_contact:. With no
-    # record, the step says that the record is missing. With the adopter's record, which names curl, it passes.
-    assert yaml.safe_load(f"{key} security@curl.example\n") == {"primary_contact": "security@curl.example"}
+    # oss-verify validate reads project.yaml with yaml's SafeLoader, less merge keys (validate.ProjectLoader). It reads
+    # each of these lines as primary_contact: the branch adopts curl as surely as with primary_contact:. With no record,
+    # the step says that the record is missing. With the adopter's record, which names curl, it passes.
+    assert yaml.load(f"{key} security@curl.example\n", Loader=validate.ProjectLoader) == {
+        "primary_contact": "security@curl.example"}
     files = [{"filename": "projects/curl/project.yaml", "status": "modified",
               "patch": f"@@ -4,1 +4,1 @@\n-primary_contact: n/a\n+{key} security@curl.example\n"}]
     code, out, _ = branch(tmp_path, files=files, body="Carries the adoption of curl.\n")
