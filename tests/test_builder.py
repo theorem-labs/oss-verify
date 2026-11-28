@@ -19,6 +19,9 @@ test skips. So does toolchain-images.yaml's job docker-tests (.github/workflows/
 classes, on the images that it makes; toolchain-images.yaml's job compare-digests fails unless they are the images of
 its job make.
 """
+import contextlib
+import fcntl
+import hashlib
 import os
 import pathlib
 import re
@@ -26,7 +29,9 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
+import unittest.mock
 
 from oss_verify import check_build
 from oss_verify import manifest
@@ -440,6 +445,147 @@ RUST_EXPECTED = {
 }
 
 
+def compile_plain(tag, out, labels, settings=()):
+    """compile, the plain build, in the image `tag`, with compile_build's docker run arguments and an -e for each of
+    `settings`, into the $OUT `out`: its exit status, and its standard output and standard error together."""
+    check_build.empty_directory(out, tag, labels=labels)
+    environment = [word for setting in settings for word in ("-e", setting)]
+    done = subprocess.run(
+        ["docker", "run", "--rm", "--init", "--network=none", *labels, "-e", "SANITIZER=none",
+         "-e", f"OV_OWNER={os.getuid()}:{os.getgid()}", *environment, "-v", f"{out}:/out", tag, "compile"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
+    return done.returncode, done.stdout
+
+
+# RustBuilder's plain build and FramePointersRust's run on the base image with no setting are one compile: the same
+# project image, FROM the same toolchain image, with the same docker run arguments and no other input. A Rust compile is
+# about 175 CPU-seconds, most of it the standard library (-Zbuild-std), and the shard that runs both classes is
+# CPU-bound, so shared_rust_plain compiles it once for both. FramePointersRust's run with OFT_FRAME_POINTERS= (empty)
+# has an input of its own, and its test is for that input: it is compiled on its own, as is each other build.
+RUST_PLAIN = "ov-test-rust-plain"
+
+
+@contextlib.contextmanager
+def locked(root):
+    """The directory `root`, made if missing, with the exclusive lock on root/lock held. A lock file that the last user
+    removed with `root` while this waited is not held: this takes the new one."""
+    while True:
+        root.mkdir(exist_ok=True)
+        try:
+            handle = open(root / "lock", "a")
+        except FileNotFoundError:
+            continue
+        with handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                same = os.fstat(handle.fileno()).st_ino == os.stat(root / "lock").st_ino
+            except FileNotFoundError:
+                same = False
+            if same:
+                yield root
+                return
+
+
+def shared_rust_plain(toolchain, cls):
+    """The plain build of fixtures/rust-example FROM `toolchain`, compiled once for every class that asks for it in one
+    run of pytest, across its pytest-xdist workers (PYTEST_XDIST_TESTRUNUID, else this process's RUN): (compile's exit
+    status, its standard output and standard error together, the directory of its $OUT). The first caller builds the
+    project image and compiles (compile_plain), holding the lock that each caller takes; a caller that waited reads what
+    it left. The image goes once the compile ends. Each caller counts itself, and a class cleanup of `cls` takes its
+    count off: the last one removes the directory. A caller that comes after that compiles again."""
+    run = os.environ.get("PYTEST_XDIST_TESTRUNUID", RUN)
+    key = hashlib.sha256(f"{run} {toolchain}".encode()).hexdigest()[:16]
+    root = pathlib.Path(tempfile.gettempdir()) / f"{RUST_PLAIN}-{key}"
+    with locked(root):
+        users = root / "users"
+        users.write_text(f"{int(users.read_text()) + 1 if users.exists() else 1}")
+        cls.addClassCleanup(release_rust_plain, root)
+        result = root / "result"
+        if not (result / "status").exists():
+            # A caller that failed part of the way left no status, and what it left goes.
+            shutil.rmtree(result, ignore_errors=True)
+            result.mkdir()
+            tag = f"oss-verify-test/{RUST_PLAIN}:{key}-{RUN}"
+            job = check_build.Job(name="rust-example", directory=RUST_FIXTURE,
+                                  repo="https://example.invalid/rust-example", ref="", dockerfile="", builds=["plain"],
+                                  fuzz_targets=["example_fuzzer"], language="rust")
+            try:
+                check_build.build_project(job, "0" * 40, check_build.build_builder(toolchain), tag, result)
+                code, output = compile_plain(tag, result / "out", check_build.work_label(root))
+            finally:
+                subprocess.run(["docker", "image", "rm", tag], capture_output=True)
+            (result / "output").write_text(output)
+            # The status last: a result with a status is whole.
+            (result / "status").write_text(f"{code}")
+        return int((result / "status").read_text()), (result / "output").read_text(), result / "out"
+
+
+def release_rust_plain(root):
+    """Take one caller's count off shared_rust_plain's directory `root`, and remove it when no caller is left."""
+    with locked(root):
+        users = root / "users"
+        left = int(users.read_text()) - 1
+        if left:
+            users.write_text(f"{left}")
+        else:
+            shutil.rmtree(root)
+
+
+class RustPlainShared(unittest.TestCase):
+    """shared_rust_plain, with stand-ins for the image builds and the compile: callers at once get one compile and the
+    same result; the directory goes with the last caller's cleanup; a caller after that compiles again; another toolchain
+    is another compile. Needs no Docker, and runs in the rust shard of tests.yaml's job docker, beside the classes that
+    use it."""
+
+    class Caller:
+        def __init__(self):
+            self.cleanups = []
+
+        def addClassCleanup(self, function, *args):
+            self.cleanups.append((function, args))
+
+        def cleanup(self):
+            for function, args in reversed(self.cleanups):
+                function(*args)
+
+    def setUp(self):
+        self.compiles = []
+        patches = [unittest.mock.patch.object(check_build, "build_builder", lambda toolchain: f"builder {toolchain}"),
+                   unittest.mock.patch.object(check_build, "build_project", lambda *args, **kwargs: None),
+                   unittest.mock.patch(f"{__name__}.compile_plain", self.compile),
+                   unittest.mock.patch.object(subprocess, "run", lambda *args, **kwargs: None)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.toolchain = f"stand-in@{secrets.token_hex(6)}"
+
+    def compile(self, tag, out, labels, settings=()):
+        self.compiles.append(tag)
+        time.sleep(0.2)
+        out.mkdir()
+        (out / "binary").write_text(f"built {len(self.compiles)}")
+        return 0, f"compile {len(self.compiles)}"
+
+    def test_callers_at_once_share_one_compile_and_the_last_cleanup_removes_it(self):
+        callers = [self.Caller(), self.Caller()]
+        found = at_once(lambda caller: shared_rust_plain(self.toolchain, caller), callers)
+        self.assertEqual(len(self.compiles), 1, self.compiles)
+        self.assertEqual([(code, output) for code, output, _ in found], [(0, "compile 1")] * 2)
+        out = found[0][2]
+        self.assertEqual(found[1][2], out)
+        callers[0].cleanup()
+        self.assertEqual((out / "binary").read_text(), "built 1")
+        callers[1].cleanup()
+        self.assertFalse(out.parent.parent.exists())
+        later = self.Caller()
+        self.addCleanup(later.cleanup)
+        self.assertEqual(shared_rust_plain(self.toolchain, later)[:2], (0, "compile 2"))
+        other = self.Caller()
+        self.addCleanup(other.cleanup)
+        self.assertEqual(shared_rust_plain(self.toolchain + "0", other)[:2], (0, "compile 3"))
+
+
+
 @unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and toolchain_ready("rust"),
                      "set OV_DOCKER_TESTS=1, with Docker and the Rust toolchain image, to build the Rust fixture")
 class RustBuilder(unittest.TestCase):
@@ -454,10 +600,22 @@ class RustBuilder(unittest.TestCase):
         cls.work = pathlib.Path(cls.scratch.name)
         job = check_build.Job(name="rust-example", directory=RUST_FIXTURE, repo="https://example.invalid/rust-example",
                               ref="", dockerfile="", builds=BUILDS, fuzz_targets=["example_fuzzer"], language="rust")
-        builder = check_build.build_builder(check_build.newest_toolchain("rust"))
-        check_build.build_project(job, "0" * 40, builder, RUST_TAG, cls.work)
+        toolchain = check_build.newest_toolchain("rust")
+        check_build.build_project(job, "0" * 40, check_build.build_builder(toolchain), RUST_TAG, cls.work)
         cls.raw = {build: cls.work / "raw" / build for build in BUILDS}
-        compile_builds(RUST_TAG, cls.raw, check_build.work_label(cls.work))
+        labels = check_build.work_label(cls.work)
+
+        def compile(build):
+            if build != "plain":
+                check_build.compile_build(RUST_TAG, build, validate.BUILDS[build], cls.raw[build], labels=labels)
+                return
+            # The plain build is FramePointersRust's run on the base image too: shared_rust_plain compiles it once.
+            code, output, out = shared_rust_plain(toolchain, cls)
+            if code != 0:
+                raise check_build.Failed(f"compile exited {code} in the plain build:\n{output[-4000:]}")
+            shutil.copytree(out, cls.raw[build])
+
+        at_once(compile, BUILDS)
         found = {build: manifest.discover(directory) for build, directory in cls.raw.items()}
         cls.targets, cls.problems = manifest.resolve_targets(found, job.fuzz_targets)
         cls.entries, cls.missing = manifest.collect(cls.raw, cls.targets, cls.work / "out")
@@ -713,6 +871,7 @@ class FramePointers:
         row, variable = FRAME_POINTER_IMAGES[cls.language]
         # The project image of the fixture, on the base image ("base") and on the frame-pointer image ("fp").
         toolchains = {"base": row_image(row), "fp": os.environ[variable]}
+        cls.toolchains = toolchains
         cls.tags = {kind: f"oss-verify-test/{job.name}-frame-pointers:{kind}-{RUN}" for kind in toolchains}
         for tag in cls.tags.values():
             cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", tag], capture_output=True)
@@ -724,17 +883,15 @@ class FramePointers:
     def compile(cls, run):
         """compile, the plain build, for run = (kind, settings): in the project image on the image of `kind` ("base" or
         "fp"), with compile_build's docker run arguments and an -e for each of `settings`, into an $OUT of its own: its
-        exit status, and its standard output and standard error together."""
+        exit status, and its standard output and standard error together. The Rust run on the base image with no
+        setting is RustBuilder's plain build, which shared_rust_plain compiles once for both classes."""
         kind, settings = run
+        if cls.language == "rust" and run == ("base", ()):
+            code, output, _ = shared_rust_plain(cls.toolchains["base"], cls)
+            return code, output
         tag = cls.tags[kind]
         out = cls.work / f"out-{cls.runs.index(run)}"
-        check_build.empty_directory(out, tag, labels=cls.labels)
-        environment = [word for setting in settings for word in ("-e", setting)]
-        done = subprocess.run(
-            ["docker", "run", "--rm", "--init", "--network=none", *cls.labels, "-e", "SANITIZER=none",
-             "-e", f"OV_OWNER={os.getuid()}:{os.getgid()}", *environment, "-v", f"{out}:/out", tag, "compile"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace")
-        return done.returncode, done.stdout
+        return compile_plain(tag, out, cls.labels, settings)
 
     def flag_lines(self, output):
         """[(line, the flag it has on a frame-pointer image)] for the lines of a build's output that give its flags:
