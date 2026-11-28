@@ -1,0 +1,51 @@
+#!/bin/bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# compile-program: build this image's whole programs into $OUT, for a port whose project.yaml lists programs.
+# oss-verify check runs it in place of compile, for the plain build alone:
+#
+#     docker run --rm --network=none -e SANITIZER=none -e OV_OWNER=<uid>:<gid> \
+#       -v <env file>:/ov-program-env:ro -e OV_PROGRAM_ENV=/ov-program-env -v "$PWD/out:/out" <project image> \
+#       /usr/local/lib/oss-verify/compile-program
+#
+# OV_PROGRAM_ENV names a file of NAME=value entries, each ended by a NUL byte: the toolchain image's own environment
+# (its Config.Env), which oss-verify check reads on the host and mounts in the container. build.sh runs in that
+# environment alone, with SRC, WORK, OUT and HOME=/tmp added, and with what bash sets itself (PWD, SHLVL and _). It
+# gets none of the settings of the fuzz builds: no toolchain.sh, no compiler wrappers or shims, no driver, no CC or
+# CFLAGS, no SANITIZER, and no ENV of the builder or of the port. It runs as root, from the image's working directory,
+# with bash -eux. The build makes no stripped twin and no record ($OUT/.records). oss-verify check takes from $OUT the
+# programs that project.yaml lists (docs/build-contract.md, "Whole programs").
+#
+# Set OV_OWNER=<uid>:<gid> to have $OUT handed to that owner at the end, as compile does.
+#
+# This script is a file of its own, and not a branch of compile, because of the prebuilt CPython runtime. The key of
+# that runtime holds the SHA-256 of compile (python/runtime.sh, oft_py_runtime_inputs). Thus a change to compile gives
+# each Python build a new key, and no Python build then takes the runtime that a Python toolchain image ships. The key
+# leaves out /usr/local/lib/oss-verify, but for the files that have lines of their own, and this script is not one of
+# them. Thus this script changes no Python build.
+set -euo pipefail
+
+[ -f "$SRC/build.sh" ] || { echo "compile-program: there is no $SRC/build.sh" >&2; exit 2; }
+[ -n "${OV_PROGRAM_ENV:-}" ] || {
+  echo "compile-program: OV_PROGRAM_ENV is not set: it names the file of the toolchain image's own environment" >&2
+  exit 2
+}
+mkdir -p "$OUT" "$WORK"
+if [ -n "${OV_OWNER:-}" ]; then
+  trap 'chown -R "$OV_OWNER" "$OUT" 2>/dev/null || true' EXIT
+fi
+export -n OV_OWNER
+
+# The line of each plain build, as compile writes it. Readers of the build log take this line as the start of a build.
+echo "compile: the plain build (SANITIZER=none)"
+
+mapfile -d '' -t program_env < "$OV_PROGRAM_ENV"
+echo "compile: a program: build.sh runs in the toolchain image's own environment, with SRC, WORK, OUT and HOME=/tmp"
+for entry in "${program_env[@]}"; do
+  echo "compile: env $entry"
+done
+# No exec, so that the EXIT trap still gives $OUT to OV_OWNER. A build.sh that fails stops this script (set -e), with
+# its status.
+env -i "${program_env[@]}" SRC="$SRC" WORK="$WORK" OUT="$OUT" HOME=/tmp "$BASH" -eux "$SRC/build.sh"
+exit 0

@@ -29,6 +29,9 @@ Fields allowed in project.yaml:
     ubsan_checks: {add, remove, reason}  optional  changes to the UBSan checks of the ubsan builds (default: OSS-Fuzz's, by language,
                                                    with strict-flex-arrays), with a toolchain that applies them; provisional format
     fuzz_targets: [<target>, ...]       optional   default: every fuzz target the build produces
+    programs: [{file, sha256}, ...]     optional   whole programs in place of fuzz targets: each file that build.sh
+                                                   writes, its pinned SHA-256 and an optional link_map; the plain build
+                                                   alone, with no fuzz_targets, mutants or seed corpus
     patch_style: <path in your repo>    optional   or a patch_style.md next to project.yaml
     budgets: {halts: ..., agrees: ...}  optional   memory budgets (docs/what-gets-proven.md)
     proofs: {repo: ..., path: ...}      optional   where the proofs are published (docs/project-yaml.md)
@@ -42,7 +45,11 @@ build-only patches (*.patch) with the series file that lists them in the order t
 build.sh, harness sources and patches belong there instead; a seed corpus may stay here.
 """
 import argparse
+import collections
+import datetime
 import io
+import itertools
+import math
 import os
 import pathlib
 import re
@@ -63,7 +70,7 @@ PROJECTS = check_build.ROOT / "projects"
 REQUIRED_KEYS = ("repo", "primary_contact", "language")
 OPTIONAL_KEYS = (
     "auto_ccs", "homepage", "pgp", "disabled", "dockerfile",
-    "sanitizers", "ubsan_checks", "fuzz_targets", "patch_style", "budgets", "proofs", "publish", "mutants",
+    "sanitizers", "ubsan_checks", "fuzz_targets", "programs", "patch_style", "budgets", "proofs", "publish", "mutants",
 )
 ALLOWED_KEYS = REQUIRED_KEYS + OPTIONAL_KEYS
 # Settings controlled by the program's operators. A pull request may not set them. There are none yet.
@@ -100,6 +107,23 @@ REPO_PATH = re.compile(r"(?!/)(?!.*\.\.)[A-Za-z0-9._/-]+")
 FULL_COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 SHORT_COMMIT = re.compile(r"[0-9a-f]{7,39}")
 TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,99}")
+# A file's SHA-256, as sha256sum writes it: 64 hex digits, lower case. validate.py has its own pattern, because
+# .github/scripts/copy-validate-rules copies no module of the package other than check_build.
+SHA256 = re.compile(r"[0-9a-f]{64}")
+# The fields of an entry of programs: file and sha256, which it must have, and link_map, which it may have.
+PROGRAM_KEYS = ("file", "sha256", "link_map")
+# The most characters of a string of project.yaml that a problem quotes. Through YAML aliases, a small project.yaml
+# can put one long string in many places.
+MAX_QUOTED = 200
+# The most bits of an integer that a problem quotes by its digits: it then has at most MAX_QUOTED decimal digits. A
+# mapping key of a small project.yaml can be an integer of more than 4,300 digits, which Python does not give as text.
+MAX_QUOTED_BITS = int(MAX_QUOTED * math.log2(10))
+# The most problems that validate gives for one project, and the most warnings. Through YAML aliases, a small
+# project.yaml can give one bad value at thousands of places, and each place makes a new problem. After the first
+# MAX_LINES, one more line says that validate does not show the others.
+MAX_LINES = 100
+MORE_PROBLEMS = f"more problems are not shown: validate gives the first {MAX_LINES}"
+MORE_WARNINGS = f"more warnings are not shown: validate gives the first {MAX_LINES}"
 SIZE = re.compile(r"([1-9][0-9]{0,15})(KiB|MiB|GiB|TiB)?")
 # The smallest plain-side agrees budget: one page. Below it, no run is in the statement.
 MIN_PLAIN_BUDGET = 4096
@@ -238,12 +262,19 @@ def size_in_bytes(value):
     return int(match.group(1)) * unit
 
 
+def has_programs(config):
+    """Whether a project.yaml that is a mapping names whole programs (programs:) in place of fuzz targets. In YAML, an
+    empty `programs:` (or `~`, or `null`) means the key is not set."""
+    return config.get("programs") is not None
+
+
 def sanitizers_of(config):
-    """The sanitizers a valid project.yaml asks for."""
+    """The sanitizers a valid project.yaml asks for. Without sanitizers:, a go or jvm project and a project with
+    programs ask for none."""
     sanitizers = config.get("sanitizers")
     if isinstance(sanitizers, list):
         return list(sanitizers)
-    return [] if config.get("language") in PLAIN_ONLY else list(DEFAULT_SANITIZERS)
+    return [] if config.get("language") in PLAIN_ONLY or has_programs(config) else list(DEFAULT_SANITIZERS)
 
 
 def ubsan_changes_of(config):
@@ -288,13 +319,34 @@ def builds_of(config):
     return [build for build in BUILDS if build in wanted]
 
 
+def quoted(value):
+    """`value`, a value of project.yaml or a name in a file beside it (a line of series, an input of a seed corpus), as
+    a problem or a warning quotes it. Each form is short, whatever the value:
+
+    - a string, or bytes (a !!binary value): its repr. Of more than MAX_QUOTED characters or bytes, it gives the first
+      MAX_QUOTED, then `...`.
+    - an integer of more than MAX_QUOTED_BITS bits: `an integer of <N> bits`. Python gives no integer of more than
+      4,300 digits as text.
+    - null, true or false, another number, a date or a timestamp: its repr.
+    - another value (a list, a mapping or a set): its type, for example `a list`. Through aliases, a list of a few
+      hundred bytes of YAML can hold millions of strings.
+    """
+    if isinstance(value, (str, bytes)):
+        return f"{value[:MAX_QUOTED]!r}..." if len(value) > MAX_QUOTED else repr(value)
+    if isinstance(value, int) and value.bit_length() > MAX_QUOTED_BITS:
+        return f"an integer of {value.bit_length()} bits"
+    if value is None or isinstance(value, (bool, int, float, datetime.date)):
+        return repr(value)
+    return f"a {type(value).__name__}"
+
+
 def check_keys(config):
     """Yield a problem for each unknown, operator-only, or missing required key."""
     for key in config:
         if key in OPERATOR_KEYS:
-            yield f"{key!r} is set by the operators, not in project.yaml"
+            yield f"{quoted(key)} is set by the operators, not in project.yaml"
         elif key not in ALLOWED_KEYS:
-            yield f"unknown field {key!r} (allowed: {', '.join(ALLOWED_KEYS)})"
+            yield f"unknown field {quoted(key)} (allowed: {', '.join(ALLOWED_KEYS)})"
     for key in REQUIRED_KEYS:
         if not config.get(key):
             yield f"missing {key}"
@@ -329,15 +381,16 @@ def is_address_list(value):
 
 
 def finding_addresses(config):
-    """The addresses that get findings from a project.yaml that is a mapping: primary_contact, unless it is n/a, and
-    each address of auto_ccs. A value that is not a string, and an auto_ccs that is not a list of strings, give none.
-    .github/scripts/terms-accepted reads the addresses of a seeded project with it."""
+    """The addresses that get findings from a project.yaml that is a mapping, each address once: primary_contact,
+    unless it is n/a, and each address of auto_ccs. A value that is not a string, and an auto_ccs that is not a list of
+    strings, give none. .github/scripts/terms-accepted reads the addresses of a seeded project with it."""
     addresses = []
     if isinstance(config.get("primary_contact"), str) and config["primary_contact"] != NO_CONTACT:
         addresses.append(config["primary_contact"])
     if is_address_list(config.get("auto_ccs")):
         addresses += config["auto_ccs"]
-    return addresses
+    # Each address once: through YAML aliases, auto_ccs can name one long address thousands of times.
+    return list(dict.fromkeys(addresses))
 
 
 def check_addresses(config):
@@ -347,7 +400,7 @@ def check_addresses(config):
         yield "auto_ccs must be a list of addresses"
     for address in finding_addresses(config):
         if not EMAIL.fullmatch(address):
-            yield f"bad email {address!r}"
+            yield f"bad email {quoted(address)}"
 
 
 def check_pgp(config):
@@ -366,7 +419,7 @@ def check_builds(config):
     """Yield a problem with language, sanitizers, fuzz_targets or publish."""
     language = config.get("language")
     if isinstance(language, str) and language not in LANGUAGES:
-        yield f"language must be one of {', '.join(LANGUAGES)} (got {language!r})"
+        yield f"language must be one of {', '.join(LANGUAGES)} (got {quoted(language)})"
 
     sanitizers = config.get("sanitizers")
     if sanitizers is not None:
@@ -375,12 +428,14 @@ def check_builds(config):
         else:
             for item in sanitizers:
                 if item not in SANITIZERS:
-                    yield f"sanitizers: {item!r} is not one of {', '.join(SANITIZERS)}"
+                    yield f"sanitizers: {quoted(item)} is not one of {', '.join(SANITIZERS)}"
             if len(set(sanitizers)) != len(sanitizers):
                 yield "sanitizers names a sanitizer twice"
             if language in PLAIN_ONLY and sanitizers:
                 yield (f"a {language} project has the plain build only: give sanitizers: [] "
                        "or leave it out")
+            elif has_programs(config) and sanitizers:
+                yield "a project with programs has the plain build only: give sanitizers: [] or leave it out"
 
     changes = ubsan_changes_of(config)
     if changes is not None:
@@ -393,13 +448,79 @@ def check_builds(config):
         else:
             for item in targets:
                 if not TARGET.fullmatch(item):
-                    yield f"fuzz_targets: {item!r} is not a fuzz target name (A-Z a-z 0-9 . _ + -, at most 100)"
+                    yield f"fuzz_targets: {quoted(item)} is not a fuzz target name (A-Z a-z 0-9 . _ + -, at most 100)"
             if len(set(targets)) != len(targets):
                 yield "fuzz_targets names a fuzz target twice"
 
     publish = config.get("publish")
     if isinstance(publish, str) and publish not in PUBLISH:
-        yield f"publish must be one of {', '.join(PUBLISH)} (got {publish!r})"
+        yield f"publish must be one of {', '.join(PUBLISH)} (got {quoted(publish)})"
+
+
+def check_programs(config):
+    """Yield a problem with programs: the whole programs that build.sh writes in $OUT, which a project names in place
+    of fuzz targets. Each entry gives a program's file name, its SHA-256, and optionally the file name of the link map
+    that the build writes. A project with programs has the plain build alone (check_builds), no seed corpus
+    (check_corpus), no fuzz_targets and no mutants."""
+    if not has_programs(config):
+        return
+    entries = config["programs"]
+    if config.get("fuzz_targets") is not None:
+        yield "programs and fuzz_targets together are not supported: a project with programs lists no fuzz target"
+    if config.get("mutants") is not None:
+        yield "mutants applies only to fuzz targets: the breakages do not run for a project with programs"
+    if not (isinstance(entries, list) and entries):
+        yield ("programs must be a non-empty list of mappings, each with file and sha256, and optionally link_map "
+               "(or left out, for a project of fuzz targets)")
+        return
+    # Through YAML aliases, a small project.yaml can give tens of thousands of entries, and one entry object can be at
+    # many places. An entry that is not a mapping is refused at each place (check_config shows at most MAX_LINES
+    # problems). The keys and values of a mapping are checked at its first place only. The file and link map of a
+    # mapping count at each place, so that the checks of names given twice see them.
+    files, link_maps, first_maps, checked = [], [], [], set()
+    for number, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            yield f"programs: entry {number} must be a mapping with file and sha256, and optionally link_map"
+            continue
+        if isinstance(entry.get("file"), str):
+            files.append(entry["file"])
+        if isinstance(entry.get("link_map"), str):
+            link_maps.append(entry["link_map"])
+        if id(entry) in checked:
+            continue
+        checked.add(id(entry))
+        for key in entry:
+            if key not in PROGRAM_KEYS:
+                yield f"programs: entry {number}: unknown field {quoted(key)} (allowed: {', '.join(PROGRAM_KEYS)})"
+        for key in ("file", "sha256"):
+            if entry.get(key) is None:
+                yield f"programs: entry {number}: missing {key}"
+        for key in ("file", "link_map"):
+            value = entry.get(key)
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                # Its type, not its repr: through aliases, a list of a few hundred bytes of YAML can hold millions of
+                # strings.
+                yield (f"programs: entry {number}: {key} must be a string, the name of a file in $OUT "
+                       f"(it is a {type(value).__name__})")
+            elif not TARGET.fullmatch(value):
+                yield (f"programs: entry {number}: {key} {quoted(value)} is not a file name in $OUT "
+                       "(A-Z a-z 0-9 . _ + -, starting with a letter or digit, at most 100)")
+        sha256 = entry.get("sha256")
+        if sha256 is not None and not (isinstance(sha256, str) and SHA256.fullmatch(sha256)):
+            yield f"programs: entry {number}: sha256 must be the SHA-256 of the file: 64 hex digits, lower case"
+        if isinstance(entry.get("link_map"), str):
+            first_maps.append((number, entry["link_map"]))
+    # A set and counts, not scans of the lists, which can be long.
+    file_names = set(files)
+    for number, link_map in first_maps:
+        if link_map in file_names:
+            yield f"programs: entry {number}: link_map {quoted(link_map)} is also the file of a program"
+    for name in sorted(name for name, count in collections.Counter(files).items() if count > 1):
+        yield f"programs names the file {quoted(name)} twice"
+    for name in sorted(name for name, count in collections.Counter(link_maps).items() if count > 1):
+        yield f"programs names the link map {quoted(name)} twice"
 
 
 def check_budgets(config):
@@ -409,7 +530,7 @@ def check_budgets(config):
         return
     for key in budgets:
         if key not in ("halts", "agrees"):
-            yield f"budgets: unknown field {key!r} (allowed: halts, agrees)"
+            yield f"budgets: unknown field {quoted(key)} (allowed: halts, agrees)"
     if "halts" in budgets:
         halts = size_in_bytes(budgets["halts"])
         if halts is None:
@@ -429,7 +550,7 @@ def check_budgets(config):
     wanted = sanitizers_of(config) if sanitizers is None or isinstance(sanitizers, list) else []
     for sanitizer, pair in agrees.items():
         if sanitizer not in SANITIZERS:
-            yield f"budgets.agrees: {sanitizer!r} is not one of {', '.join(SANITIZERS)}"
+            yield f"budgets.agrees: {quoted(sanitizer)} is not one of {', '.join(SANITIZERS)}"
             continue
         if sanitizer not in wanted:
             yield f"budgets.agrees.{sanitizer} is set, but {sanitizer} is not one of this project's sanitizers"
@@ -450,7 +571,7 @@ def check_proofs(config):
         return
     for key in proofs:
         if key not in ("repo", "path"):
-            yield f"proofs: unknown field {key!r} (allowed: repo, path)"
+            yield f"proofs: unknown field {quoted(key)} (allowed: repo, path)"
     if "repo" in proofs and not is_https_url(proofs["repo"]):
         yield "proofs.repo must be ONE https:// URL of a git repository, with #branch if not the default branch"
     if "path" in proofs and not (isinstance(proofs["path"], str) and REPO_PATH.fullmatch(proofs["path"])):
@@ -539,11 +660,13 @@ def check_files(config, files):
         listed = series_entries(files[SERIES])
         for name in listed:
             if name not in files or not name.endswith(PATCH_SUFFIX):
-                yield f"series lists {name!r}, which is not a .patch file beside project.yaml"
-        for name in sorted({name for name in listed if listed.count(name) > 1}):
-            yield f"series lists {name!r} more than once"
+                yield f"series lists {quoted(name)}, which is not a .patch file beside project.yaml"
+        # Counts, not a scan of the list for each name: a series of 64 KiB has more than 20,000 lines.
+        for name in sorted(name for name, count in collections.Counter(listed).items() if count > 1):
+            yield f"series lists {quoted(name)} more than once"
+        in_series = set(listed)
         for name in patches:
-            if name not in listed:
+            if name not in in_series:
                 yield f"{name} is not listed in series (it says the order patches are applied in)"
     elif patches:
         yield "patches need a series file beside them that lists them, one per line, in the order they are applied"
@@ -556,7 +679,7 @@ def check_ubsan_changes(config, changes):
         return
     for key in changes:
         if key not in UBSAN_CHANGES:
-            yield printable(f"ubsan_checks: unknown field {key!r} (allowed: {', '.join(UBSAN_CHANGES)})")
+            yield printable(f"ubsan_checks: unknown field {quoted(key)} (allowed: {', '.join(UBSAN_CHANGES)})")
     for key in ("add", "remove"):
         checks = changes.get(key)
         if checks is None:
@@ -566,12 +689,14 @@ def check_ubsan_changes(config, changes):
             continue
         for item in checks:
             if item not in UBSAN_NAMES and item not in NOT_CLANG_CHECKS:
-                yield printable(f"ubsan_checks.{key}: {item!r} is not a UBSan check that clang knows")
+                yield printable(f"ubsan_checks.{key}: {quoted(item)} is not a UBSan check that clang knows")
         if len(set(checks)) != len(checks):
             yield f"ubsan_checks.{key} names a check twice"
     added, removed = changes.get("add") or [], changes.get("remove") or []
     if isinstance(added, list) and isinstance(removed, list):
-        if set(map(str, added)) & set(map(str, removed)):
+        # Only the strings, never the text of other items: through aliases, a list of a few hundred bytes of YAML can
+        # hold millions of strings.
+        if {item for item in added if isinstance(item, str)} & {item for item in removed if isinstance(item, str)}:
             yield "ubsan_checks adds and removes the same check"
         if not added and not removed:
             yield "ubsan_checks changes nothing: leave it out for the default"
@@ -596,76 +721,99 @@ def newest_toolchain_applies_ubsan_checks():
         return False
 
 
-def config_warnings(config, files):
-    """Return warnings: things that are allowed but worth a second look."""
-    warnings = []
+def first_distinct(lines, more):
+    """The lines that the iterable `lines` gives, each distinct line once, in the order found, and at most MAX_LINES of
+    them. When one more distinct line comes, the list ends with the line `more`, and no more of `lines` is read: the
+    checks after it do no work. Through YAML aliases, a small project.yaml can give one bad item at thousands of
+    places."""
+    found = {}
+    for line in lines:
+        if line not in found:
+            if len(found) == MAX_LINES:
+                return [*found, more]
+            found[line] = None
+    return list(found)
+
+
+def warnings_of(config, files):
+    """Yield warnings: things that are allowed but worth a second look. The project.yaml and the files have no problem
+    (check_config), so each value that a warning gives without quoted() is one of a fixed list, or short."""
     changes = ubsan_changes_of(config)
     if isinstance(changes, dict):
         added = changes.get("add") if isinstance(changes.get("add"), list) else []
         removed = changes.get("remove") if isinstance(changes.get("remove"), list) else []
         for item in sorted(set(map(str, added)) & set(TRAP_EXCEPTIONS)):
-            warnings.append(f"ubsan_checks: {item}: {TRAP_EXCEPTIONS[item]}")
+            yield f"ubsan_checks: {item}: {TRAP_EXCEPTIONS[item]}"
         default = default_ubsan_checks(config.get("language"))
         for item in sorted(set(map(str, added)) & set(default)):
-            warnings.append(f"ubsan_checks.add: {item} is in the default already")
+            yield f"ubsan_checks.add: {item} is in the default already"
         for item in sorted(set(map(str, removed)) - set(default)):
-            warnings.append(f"ubsan_checks.remove: {item} is not in the default, so there is nothing to remove")
+            yield f"ubsan_checks.remove: {item} is not in the default, so there is nothing to remove"
         if not (set(map(str, added)) | set(map(str, removed))) - set(UBSAN_NAMES) - set(NOT_CLANG_CHECKS):
             in_effect = ubsan_checks_in_effect(config)
             if STRICT_FLEX_ARRAYS in in_effect and not {"array-bounds", "bounds", "undefined"} & set(in_effect):
-                warnings.append(f"ubsan_checks: {STRICT_FLEX_ARRAYS} adds no check without array-bounds, which the "
-                                "checks leave out; it still changes how clang optimizes the code of the two UBSan "
-                                "builds")
+                yield (f"ubsan_checks: {STRICT_FLEX_ARRAYS} adds no check without array-bounds, which the checks leave "
+                       "out; it still changes how clang optimizes the code of the two UBSan builds")
         if not newest_toolchain_applies_ubsan_checks():
-            warnings.append("ubsan_checks has no effect yet: the newest toolchain keeps the release's fixed UBSan flags, "
-                            "and oss-verify check refuses the field with it")
+            yield ("ubsan_checks has no effect yet: the newest toolchain keeps the release's fixed UBSan flags, and "
+                   "oss-verify check refuses the field with it")
     if config.get("primary_contact") == NO_CONTACT:
-        warnings.append(
-            "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
-        )
+        yield "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
     for address in finding_addresses(config):
         if RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
-            warnings.append(f"{address} is a placeholder: its domain is reserved for examples, so no report reaches it")
+            yield f"{quoted(address)} is a placeholder: its domain is reserved for examples, so no report reaches it"
     repo = config.get("repo")
     if isinstance(repo, str) and "#" in repo:
         ref = repo.split("#", 1)[1]
         if SHORT_COMMIT.fullmatch(ref) and not FULL_COMMIT.fullmatch(ref):
-            warnings.append(f"#{ref} looks like a shortened commit id; give a commit in full, or this names a branch or tag")
+            yield f"#{ref} looks like a shortened commit id; give a commit in full, or this names a branch or tag"
     language = config.get("language")
     if language in LANGUAGES and language not in BUILT_TODAY:
-        warnings.append(f"language {language}: the builder cannot build it yet (docs/project-yaml.md#language), so "
-                        "oss-verify check refuses it")
+        yield (f"language {language}: the builder cannot build it yet (docs/project-yaml.md#language), so "
+               "oss-verify check refuses it")
     if "Dockerfile" not in files and config.get("dockerfile") is None:
-        warnings.append("no build files yet (a seeded project): it cannot be built until a Dockerfile and build.sh are added")
+        yield "no build files yet (a seeded project): it cannot be built until a Dockerfile and build.sh are added"
     if "Dockerfile" in files and "build.sh" not in files:
-        warnings.append("there is a Dockerfile but no build.sh beside it: the Dockerfile must create $SRC/build.sh itself")
+        yield "there is a Dockerfile but no build.sh beside it: the Dockerfile must create $SRC/build.sh itself"
     for name in sorted(files):
         text = files[name]
         if name.endswith(PATCH_SUFFIX) and text is not None and not re.search(r"^(--- |\+\+\+ |diff )", text, re.M):
-            warnings.append(f"{name} does not look like a patch (no diff, --- or +++ line)")
-    return warnings
+            yield f"{name} does not look like a patch (no diff, --- or +++ line)"
+
+
+def config_warnings(config, files):
+    """Return the warnings of a project.yaml with no problem and of the files next to it: each distinct warning once, in
+    the order found, and at most MAX_LINES of them, then MORE_WARNINGS (first_distinct)."""
+    return first_distinct(warnings_of(config, files), MORE_WARNINGS)
 
 
 def check_config(config, files):
-    """Return a list of every problem with a parsed project.yaml and the files next to it."""
+    """Return the problems with a parsed project.yaml and the files next to it: each distinct problem once, in the order
+    found, and at most MAX_LINES of them, then MORE_PROBLEMS (first_distinct). The checks give their problems one at
+    a time, so a check after the last problem shown does no work."""
     if not isinstance(config, dict):
         return [f"not a mapping (top level is a {type(config).__name__})"]
-    return [
-        *check_keys(config),
-        *check_types(config),
-        *check_urls(config),
-        *check_addresses(config),
-        *check_pgp(config),
-        *check_builds(config),
-        *check_budgets(config),
-        *check_proofs(config),
-        *check_files(config, files),
-    ]
+    return first_distinct(itertools.chain(
+        check_keys(config),
+        check_types(config),
+        check_urls(config),
+        check_addresses(config),
+        check_pgp(config),
+        check_builds(config),
+        check_programs(config),
+        check_budgets(config),
+        check_proofs(config),
+        check_files(config, files),
+    ), MORE_PROBLEMS)
 
 
 def check_corpus(config, name, target, data):
     """Yield problems with a seed corpus: `data` is its bytes, or None if it is larger than MAX_CORPUS_BYTES. It is
-    read as untrusted input: its inputs are decompressed, but only up to MAX_CORPUS_EXPANDED bytes in all."""
+    read as untrusted input: its inputs are decompressed, but only up to MAX_CORPUS_EXPANDED bytes in all. A project
+    with programs has no seed corpus."""
+    if has_programs(config):
+        yield f"{name}: a project with programs has no seed corpus: the seed runs are for fuzz targets only"
+        return
     targets = config.get("fuzz_targets")
     if isinstance(targets, list) and target not in targets:
         yield f"{name} is the seed corpus of {target}, which fuzz_targets does not list"
@@ -684,7 +832,7 @@ def check_corpus(config, name, target, data):
             for entry in entries:
                 plain = entry.filename not in ("", ".", "..") and not any(c in entry.filename for c in "/\\:")
                 if entry.is_dir() or not plain:
-                    yield printable(f"{name}: {entry.filename!r} is not a file at the top level of the zip file")
+                    yield printable(f"{name}: {quoted(entry.filename)} is not a file at the top level of the zip file")
                     continue
                 with archive.open(entry) as stream:
                     while chunk := stream.read(1 << 16):
@@ -724,13 +872,34 @@ def limit_for(name, suffixes=SOURCE_SUFFIXES):
     return MAX_FILE_BYTES
 
 
+class Refused(yaml.YAMLError):
+    """YAML that project.yaml may not use: a merge key (<<). Its text names the line."""
+
+
+class ProjectLoader(yaml.SafeLoader):
+    """yaml.safe_load's loader, less merge keys. PyYAML copies the key-value pairs of each mapping that a merge key (<<)
+    names into the mapping that holds the key, and a mapping that it merges can merge others: each level of about 65
+    bytes of YAML can make 10 times as many copies. A project.yaml of 483 bytes took 0.8 s to parse, and 128 KiB is
+    room for thousands of levels. This loader refuses the first merge key that it finds, before it copies a pair.
+    Anchors and aliases copy nothing, and stay allowed."""
+
+    def flatten_mapping(self, node):
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                line = key_node.start_mark.line + 1
+                raise Refused(f"line {line}: a merge key (<<) is not allowed; write the keys out")
+        super().flatten_mapping(node)
+
+
 def load(directory):
     """Parse projects/<name>/project.yaml. Raise ValueError with the reason if it cannot be read."""
     config_file = directory / "project.yaml"
     if config_file.lstat().st_size > MAX_CONFIG_BYTES:
         raise ValueError(f"project.yaml is larger than {MAX_CONFIG_BYTES // 1024} KiB")
     try:
-        return yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+        return yaml.load(config_file.read_text(encoding="utf-8"), Loader=ProjectLoader) or {}
+    except Refused as error:
+        raise ValueError(f"project.yaml does not parse: {error}") from None
     # ValueError covers UnicodeDecodeError, and what PyYAML's scalar constructors raise for a value such as the date
     # 2024-13-45, which is not a YAMLError.
     except (yaml.YAMLError, ValueError, RecursionError) as error:
@@ -779,10 +948,13 @@ def check_project(directory):
         where = f"in the repository at {config['dockerfile']}"
     else:
         where = "none yet"
-    targets = ", ".join(config["fuzz_targets"]) if config.get("fuzz_targets") else "all"
+    if has_programs(config):
+        built = f"programs: {', '.join(entry['file'] for entry in config['programs'])}"
+    else:
+        built = f"fuzz targets: {', '.join(config['fuzz_targets']) if config.get('fuzz_targets') else 'all'}"
     summary = (
         f"{name:<24} {config['repo']}  -> {config['primary_contact']}  "
-        f"(Dockerfile: {where}; builds: {' '.join(builds_of(config))}; fuzz targets: {targets})"
+        f"(Dockerfile: {where}; builds: {' '.join(builds_of(config))}; {built})"
     )
     return [], config_warnings(config, files), summary
 

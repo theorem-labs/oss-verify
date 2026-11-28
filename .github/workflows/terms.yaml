@@ -61,7 +61,7 @@ name: "Terms"
 # authenticated rate limit. The description reaches the program through an environment variable, never by ${{ }}
 # substitution into the run: block, so its text cannot become shell. Each value that the API gives (a description, a
 # file name, the text of a file, a login) is data too: the program only compares it and prints it, gives no shell any
-# of it, and loads the text of a file only with yaml.safe_load, which makes only plain data and runs no code.
+# of it, and loads the text of a file only with validate.ProjectLoader, which makes only plain data and runs no code.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]

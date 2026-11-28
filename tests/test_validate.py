@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for oss-verify validate:  uv run pytest"""
 import contextlib
+import functools
 import io
 import os
 import pathlib
@@ -9,6 +10,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import tracemalloc
 import zipfile
 
 import pytest
@@ -43,12 +46,36 @@ class ProjectDir:
         self.scratch.cleanup()
 
 
+# The files beside project.yaml that check() and traced_check() give by default.
+BUILD_FILES = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}
+# The most memory that check_project may take at the peak for a hostile project.yaml (TestHostileYaml, and the ubsan
+# items of TestProblems). Before their fixes, these spellings took much more: the repr of a nested alias took 25 MB, the
+# ubsan items as text took 192 MiB, and an aliased address took 63 MiB. The merge keys need no bound: the test asserts
+# the problem that refuses them. Measured with Python 3.12 and PyYAML 6.0.3, validate takes at most 0.42 MiB
+# now (a merge key as a value). The bound is far above that, so that only a real regression goes past it.
+MAX_PEAK = 8 * 2**20
+
+
 def check(yaml_text, files=None, name="example"):
     """Run check_project on a directory holding project.yaml and `files` (default: a Dockerfile and a build.sh)."""
     if files is None:
-        files = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}
+        files = BUILD_FILES
     with ProjectDir({"project.yaml": yaml_text, **files}, name) as directory:
         return validate.check_project(directory)
+
+
+def traced_check(yaml_text):
+    """check(yaml_text), with the peak of the memory that check_project takes: (problems, warnings, summary, peak).
+    The directory is made before tracemalloc starts. pathlib interns each part of a path (sys.intern), and when the
+    table of interned strings grows, tracemalloc charges the whole larger table (about 1 MB) to the open window."""
+    with ProjectDir({"project.yaml": yaml_text, **BUILD_FILES}) as directory:
+        tracemalloc.start()
+        try:
+            problems, warnings, summary = validate.check_project(directory)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+    return problems, warnings, summary, peak
 
 
 class TestValidProjects:
@@ -117,11 +144,26 @@ class TestValidProjects:
         for address in ("dry-run@example.invalid", "security@example.org", "a@mail.example.com", "x@host.test"):
             problems, warnings, _ = check(MINIMAL.replace(CONTACT, address))
             assert problems == []
-            assert any(f"{address} is a placeholder" in warning for warning in warnings), warnings
+            assert any(f"'{address}' is a placeholder" in warning for warning in warnings), warnings
         _, warnings, _ = check(MINIMAL + "auto_ccs: [team@example.net]\n")
-        assert any("team@example.net is a placeholder" in warning for warning in warnings), warnings
+        assert any("'team@example.net' is a placeholder" in warning for warning in warnings), warnings
+        # Aliases of one address give one warning, not one for each place.
+        _, warnings, _ = check(MINIMAL + "auto_ccs: [&cc team@example.net" + ", *cc" * 1999 + "]\n")
+        assert warnings == ["'team@example.net' is a placeholder: its domain is reserved for examples, so no report "
+                            "reaches it"]
         # A real domain that only contains "example" is not one.
         assert check(MINIMAL.replace(CONTACT, "security@myexample.org"))[1] == []
+
+    @pytest.mark.parametrize("count, more", [(100, []), (101, [validate.MORE_WARNINGS])],
+                             ids=["100 warnings", "101 warnings"])
+    def test_at_most_100_warnings_are_shown(self, count, more):
+        """Each distinct placeholder address of auto_ccs gives a warning. validate gives all of 100 warnings. Of 101, it
+        gives the first 100, then one line that says that more are not shown."""
+        addresses = [f"cc{number}@example.com" for number in range(count)]
+        problems, warnings, _ = check(MINIMAL + f"auto_ccs: [{', '.join(addresses)}]\n")
+        assert problems == []
+        placeholder = "is a placeholder: its domain is reserved for examples, so no report reaches it"
+        assert warnings == [f"'{address}' {placeholder}" for address in addresses[:100]] + more
 
 
 class TestBuilds:
@@ -327,6 +369,175 @@ def yaml_of(text):
     return validate.yaml.safe_load(text)
 
 
+# The SHA-256 that a program's entry pins in the tests: 64 hex digits, lower case.
+PIN = "0123456789abcdef" * 4
+# A file name of 101 characters: one more than a program's file name may have.
+LONG = "h" * 101
+
+
+def programs(*entries):
+    """MINIMAL's project.yaml with a programs list of these entries, each one a mapping in YAML's flow style."""
+    return MINIMAL + "programs:\n" + "".join(f"  - {entry}\n" for entry in entries)
+
+
+def nested_list(levels):
+    """A YAML flow list of 9 ** (levels + 1) strings, in a few bytes for each level: l0 is a list of 9 strings, and each
+    l<k> is a list of 9 aliases of l<k-1> (the first one defines it)."""
+    text = "[" + ", ".join("abcdefghi") + "]"
+    for level in range(levels):
+        text = f"[&l{level} {text}" + f", *l{level}" * 8 + "]"
+    return text
+
+
+HELLO = programs(f"{{file: hello, sha256: {PIN}, link_map: hello.map}}")
+
+
+class TestPrograms:
+    """programs: the whole programs that build.sh writes, which a project names in place of fuzz targets. Such a
+    project has the plain build alone, and no fuzz target, mutants or seed corpus."""
+
+    BUILD = {"Dockerfile": "FROM x\n", "build.sh": "#!/bin/bash\n"}
+
+    def refused(self, text, fragment, files=None):
+        """Check that validate refuses the project, with a problem that holds `fragment`."""
+        problems, _, summary = check(text, files)
+        assert summary is None
+        assert any(fragment in problem for problem in problems), f"{fragment!r} not in {problems}"
+
+    def test_a_program_port(self):
+        problems, warnings, summary = check(HELLO)
+        assert (problems, warnings) == ([], [])
+        assert "builds: plain; programs: hello)" in summary
+        assert validate.builds_of(yaml_of(HELLO)) == ["plain"]
+        # The language is not restricted.
+        for language in validate.BUILT_TODAY:
+            assert check(HELLO.replace("language: c\n", f"language: {language}\n"))[0] == [], language
+
+    def test_a_program_port_with_an_empty_sanitizers_list(self):
+        problems, _, summary = check(HELLO + "sanitizers: []\n")
+        assert problems == []
+        assert "builds: plain; programs: hello)" in summary
+
+    def test_two_programs(self):
+        text = programs(f"{{file: hello, sha256: {PIN}, link_map: hello.map}}",
+                        f"{{file: server, sha256: {'f' * 64}, link_map: server.map}}")
+        problems, _, summary = check(text)
+        assert problems == []
+        assert "builds: plain; programs: hello, server)" in summary
+
+    def test_a_program_port_lists_no_fuzz_target(self):
+        self.refused(HELLO + "fuzz_targets: [hello]\n", "programs and fuzz_targets together are not supported")
+
+    @pytest.mark.parametrize("sanitizers", ["[address]", "[undefined]", "[address, undefined]"])
+    def test_a_program_port_has_no_sanitizer_build(self, sanitizers):
+        self.refused(HELLO + f"sanitizers: {sanitizers}\n",
+                     "a project with programs has the plain build only: give sanitizers: [] or leave it out")
+
+    def test_a_program_port_has_no_ubsan_checks(self):
+        self.refused(HELLO + "ubsan_checks: {add: [alignment], reason: x}\n",
+                     "ubsan_checks applies only to the UBSan builds: sanitizers must contain undefined")
+
+    def test_a_program_port_has_no_mutants(self):
+        self.refused(HELLO + "mutants: breakages\n", "mutants applies only to fuzz targets")
+
+    def test_a_program_port_has_no_seed_corpus(self):
+        files = {**self.BUILD, "hello_seed_corpus.zip": corpus({"x": b"1"})}
+        # The same seed corpus is valid beside a project of fuzz targets.
+        assert check(MINIMAL, files)[0] == []
+        self.refused(HELLO, "hello_seed_corpus.zip: a project with programs has no seed corpus", files)
+
+    def test_a_program_port_keeps_the_halts_budget(self):
+        assert check(HELLO + "budgets: {halts: 16GiB}\n")[0] == []
+        self.refused(HELLO + "budgets: {agrees: {address: [2GiB, 512GiB]}}\n",
+                     "budgets.agrees.address is set, but address is not one of this project's sanitizers")
+
+    @pytest.mark.parametrize("text, fragment", [
+        (MINIMAL + "programs: hello\n", "programs must be a non-empty list"),
+        (MINIMAL + "programs: []\n", "programs must be a non-empty list"),
+        (MINIMAL + "programs: [hello]\n", "programs: entry 1 must be a mapping"),
+        (programs(f"{{file: hello, sha256: {PIN}, name: hello}}"), "programs: entry 1: unknown field 'name'"),
+        (programs(f"{{sha256: {PIN}}}"), "programs: entry 1: missing file"),
+        (programs("{file: hello}"), "programs: entry 1: missing sha256"),
+        (programs(f"{{file: bin/hello, sha256: {PIN}}}"), "programs: entry 1: file 'bin/hello' is not a file name"),
+        (programs(f"{{file: .hello, sha256: {PIN}}}"), "programs: entry 1: file '.hello' is not a file name"),
+        (programs(f"{{file: {LONG}, sha256: {PIN}}}"), f"programs: entry 1: file '{LONG}' is not a file name"),
+        (programs(f"{{file: hello, sha256: {PIN.upper()}}}"), "programs: entry 1: sha256 must be"),
+        (programs(f"{{file: hello, sha256: {PIN[:63]}}}"), "programs: entry 1: sha256 must be"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: maps/hello.map}}"),
+         "programs: entry 1: link_map 'maps/hello.map' is not a file name"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: hello}}"),
+         "programs: entry 1: link_map 'hello' is also the file of a program"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: server}}", f"{{file: server, sha256: {PIN}}}"),
+         "programs: entry 1: link_map 'server' is also the file of a program"),
+        (programs(f"{{file: hello, sha256: {PIN}}}", f"{{file: hello, sha256: {PIN}}}"),
+         "programs names the file 'hello' twice"),
+        (programs(f"{{file: hello, sha256: {PIN}, link_map: out.map}}",
+                  f"{{file: server, sha256: {PIN}, link_map: out.map}}"),
+         "programs names the link map 'out.map' twice"),
+    ], ids=["not a list", "an empty list", "an entry that is not a mapping", "an unknown key", "no file", "no sha256",
+            "a file with a slash", "a file that starts with a dot", "a file of 101 characters",
+            "a sha256 in upper case", "a sha256 of 63 digits", "a link map with a slash",
+            "a link map that is its own file", "a link map that is the file of another program", "one file twice",
+            "two programs with one link map"])
+    def test_bad_program_entries(self, text, fragment):
+        self.refused(text, fragment)
+
+    def test_an_entry_that_is_not_a_mapping_is_refused_at_each_place(self):
+        """Python gives the integer 1 at both of its places as one object, so a check of the object's id() would join
+        them. Each place is an entry, and validate refuses each entry that is not a mapping."""
+        problems, _, summary = check(MINIMAL + "programs: [1, 1, 2]\n")
+        assert summary is None
+        assert problems == [f"programs: entry {number} must be a mapping with file and sha256, and optionally link_map"
+                            for number in (1, 2, 3)]
+
+    def test_a_file_that_aliases_make_a_large_list(self):
+        """A value of file that is not a string is named by its type. Its repr would hold each string of the list: for
+        6 levels, 4,782,969 strings in 25 MB, from a project.yaml of 500 bytes."""
+        start = time.monotonic()
+        problems, _, summary = check(programs(f"{{file: {nested_list(6)}, sha256: {PIN}}}"))
+        assert time.monotonic() - start < 10
+        assert sum(len(problem) for problem in problems) < 2000
+        assert summary is None
+        assert any(problem.startswith("programs: ") and "(it is a list)" in problem for problem in problems), problems
+
+    def test_an_entry_that_aliases_repeat_is_checked_once(self):
+        """The keys and values of one entry object are checked at its first place alone. Its file and link map still
+        count at each place, so that the names given twice are found. The entry has 20 unknown keys, fewer than the 100
+        problems that validate gives. A check at each of the 200 places would give 4,000 problems."""
+        unknown = ", ".join(f"k{number}: 1" for number in range(20))
+        text = (MINIMAL + f"programs:\n  - &entry {{file: hello, sha256: {PIN}, link_map: hello.map, {unknown}}}\n"
+                + "  - *entry\n" * 199)
+        problems, _, summary = check(text)
+        assert validate.MORE_PROBLEMS not in problems
+        assert summary is None
+        for number in range(20):
+            assert sum(f"unknown field 'k{number}'" in problem for problem in problems) == 1, number
+        assert "programs names the file 'hello' twice" in problems
+        assert "programs names the link map 'hello.map' twice" in problems
+
+    def test_a_long_string_that_aliases_repeat_is_cut(self):
+        """A problem quotes at most the first 200 characters of a string. Through aliases, the entries of a small
+        project.yaml can each name one long string: here 1,000 entries, with a file name of 20,000 characters. Each
+        entry gives its problems, and validate gives the first 100 of them, then one line that says that more are not
+        shown."""
+        text = (MINIMAL + f"programs:\n  - {{file: &long {'x' * 20000}, sha256: &pin {PIN}}}\n"
+                + "  - {file: *long, sha256: *pin, *long : 1}\n" * 999)
+        problems, _, summary = check(text)
+        cut = f"'{'x' * 200}'..."
+        assert max(len(problem) for problem in problems) < 500
+        assert summary is None
+        assert len(problems) == 101
+        assert problems[-1] == "more problems are not shown: validate gives the first 100"
+        for number in (1, 50):
+            assert any(problem.startswith(f"programs: entry {number}: file {cut} is not a file name")
+                       for problem in problems), number
+        assert any(problem.startswith(f"programs: entry 50: unknown field {cut} (allowed: ") for problem in problems)
+        # The problem of a file given twice comes after those of each entry. With two entries, validate shows it.
+        problems, _, _ = check(MINIMAL + f"programs:\n  - {{file: &long {'x' * 20000}, sha256: {PIN}}}\n"
+                               f"  - {{file: *long, sha256: {PIN}}}\n")
+        assert f"programs names the file {cut} twice" in problems
+
+
 class TestProblems:
     def expect_problem(self, text, fragment, files=None, name="example"):
         problems, _, summary = check(text, files, name)
@@ -340,6 +551,16 @@ class TestProblems:
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(validate, "OPERATOR_KEYS", ("budget_usd",))
             self.expect_problem(MINIMAL + "budget_usd: 5\n", "set by the operators")
+
+    @pytest.mark.parametrize("count, more", [(100, []), (101, [validate.MORE_PROBLEMS])],
+                             ids=["100 problems", "101 problems"])
+    def test_at_most_100_problems_are_shown(self, count, more):
+        """Each distinct unknown field gives a problem. validate gives all of 100 problems. Of 101, it gives the first
+        100, then one line that says that more are not shown."""
+        problems, _, summary = check(MINIMAL + "".join(f"k{number}: 1\n" for number in range(count)))
+        assert summary is None
+        allowed = ", ".join(validate.ALLOWED_KEYS)
+        assert problems == [f"unknown field 'k{number}' (allowed: {allowed})" for number in range(100)] + more
 
     def test_types(self):
         self.expect_problem(MINIMAL + "disabled: yes please\n", "disabled must be true or false")
@@ -375,6 +596,41 @@ class TestProblems:
         self.expect_problem(MINIMAL + "fuzz_targets: [a, a]\n", "names a fuzz target twice")
         self.expect_problem(MINIMAL + "fuzz_targets: ['../x']\n", "is not a fuzz target name")
         self.expect_problem(MINIMAL + "publish: sometimes\n", "publish must be one of")
+
+    @pytest.mark.parametrize("field", ["fuzz_targets", "sanitizers", "auto_ccs", "ubsan_checks.add",
+                                       "ubsan_checks.remove", "language", "publish", "primary_contact"])
+    def test_a_long_bad_value_gives_short_problems(self, field):
+        """A problem quotes at most the first 200 characters of a value, and check_config gives each distinct problem
+        once. Through YAML aliases, a list of 32 KB of project.yaml can hold one string of 20,000 characters 2,000
+        times: the problems of each item were 40 MB in all."""
+        bad = "x" * 20000
+        items = f"[&bad {bad}" + ", *bad" * 1999 + "]"
+        if field.startswith("ubsan_checks."):
+            text = MINIMAL + f"ubsan_checks: {{{field.split('.')[1]}: {items}, reason: x}}\n"
+        elif field in ("language", "primary_contact"):
+            text = re.sub(rf"^{field}: .*$", f"{field}: {bad}", MINIMAL, flags=re.M)
+        elif field == "publish":
+            text = MINIMAL + f"publish: {bad}\n"
+        else:
+            text = MINIMAL + f"{field}: {items}\n"
+        problems, _, summary = check(text)
+        assert summary is None
+        assert sum(len(problem) for problem in problems) < 2000
+        assert any(f"'{'x' * 200}'..." in problem for problem in problems), problems
+
+    @pytest.mark.parametrize("key", ["add", "remove"])
+    def test_a_ubsan_item_that_aliases_make_a_large_list(self, key):
+        """An item of ubsan_checks.add or remove that is not a string is refused by its type, and validate never turns
+        it into text. Through aliases, the item here, 303 bytes of YAML, holds 4,782,969 strings, 25 MB as text, and
+        each level of about 56 bytes more is 9 times as much: str() of such items made oss-verify validate take 2.3 s
+        and 192 MiB for a project.yaml of 600 bytes. The item must be larger than MAX_PEAK as text: with
+        check_ubsan_changes' set(map(str, ...)) put back, this item makes a peak of about 34 MB, and an item of one
+        level less one of 3.8 MB, which MAX_PEAK lets pass."""
+        text = MINIMAL + f"ubsan_checks: {{{key}: [{nested_list(6)}], reason: x}}\n"
+        problems, _, summary, peak = traced_check(text)
+        assert summary is None
+        assert f"ubsan_checks.{key} must be a list of UBSan check names" in problems, problems
+        assert peak < MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text)} bytes of project.yaml"
 
     def test_budgets(self):
         self.expect_problem(MINIMAL + "budgets: {oom: 1GiB}\n", "unknown field 'oom'")
@@ -458,6 +714,9 @@ class TestProblems:
         # PyYAML raises a plain ValueError, not a YAMLError, for a date or a timestamp that does not exist.
         self.expect_problem(MINIMAL + "homepage: 2024-13-45\n", "project.yaml does not parse: ValueError")
         self.expect_problem(MINIMAL + "x: 2024-01-01T25:00:00\n", "project.yaml does not parse: ValueError")
+        # load() refuses a merge key (<<), with its line. Anchors and aliases are allowed.
+        self.expect_problem(MINIMAL + "budgets:\n  <<: {halts: 16GiB}\n",
+                            "project.yaml does not parse: line 5: a merge key (<<) is not allowed; write the keys out")
         self.expect_problem(MINIMAL + "#" * (validate.MAX_CONFIG_BYTES + 1) + "\n", "project.yaml is larger than")
 
     def test_symbolic_links_and_directories(self):
@@ -478,6 +737,143 @@ class TestProblems:
             os.symlink(directory, link)
             problems, _, _ = validate.check_project(link)
             assert any("projects/linked is one" in problem for problem in problems), problems
+
+
+# The hostile spellings of TestHostileYaml: YAML text that a small project.yaml can give at any place. The largest
+# project.yaml of the test has 10,227 bytes. LONG_TEXT is a string of 2,000 characters. HUGE_INT is 4,000 hex digits:
+# an integer of 16,000 bits. Python gives no integer of more than 4,300 decimal digits as text, so its repr() raises.
+# UNKNOWN_KEYS is a mapping of 200 unknown keys.
+LONG_TEXT = "x" * 2000
+HUGE_INT = "0x" + "f" * 4000
+UNKNOWN_KEYS = "{" + ", ".join(f"k{number}: 1" for number in range(200)) + "}"
+# An address of 2,000 characters on a domain reserved for examples. It is valid, and it makes a warning.
+LONG_ADDRESS = "x" * (2000 - len("@example.com")) + "@example.com"
+
+
+def repeated(text):
+    """A YAML flow list of `text` and 2,000 aliases of it."""
+    return f"[&e {text}" + ", *e" * 2000 + "]"
+
+
+def nested_merges(levels, merges):
+    """A YAML flow mapping of the mappings m0 to m<levels>: m0 is {k: 1}, and each other m<n> merges `merges` aliases of
+    m<n-1> (the merge key <<). PyYAML copies the key-value pairs of each mapping that a mapping merges into it, so
+    m<levels> has merges ** levels pairs."""
+    text = "{m0: &m0 {k: 1}"
+    for level in range(1, levels + 1):
+        text += f", m{level}: &m{level} {{<<: [" + ", ".join([f"*m{level - 1}"] * merges) + "]}"
+    return text + "}"
+
+
+def flow(*entries):
+    """A YAML flow mapping of these entries. Each entry is two YAML texts: a key and a value."""
+    return "{" + ", ".join(f"? {key} : {value}" for key, value in entries) + "}"
+
+
+def with_field(field, value):
+    """MINIMAL's project.yaml with `field` set to `value`, YAML text."""
+    if field in validate.REQUIRED_KEYS:
+        return re.sub(rf"^{field}: .*$", lambda _: f"{field}: {value}", MINIMAL, flags=re.M)
+    return MINIMAL + f"{field}: {value}\n"
+
+
+def in_field(field, *entries):
+    """MINIMAL's project.yaml with `field` set to a flow mapping of these entries."""
+    return with_field(field, flow(*entries))
+
+
+# Each spelling in each form that it has: "value", the value of a field; "entry", an entry of a mapping (its key and its
+# value); "addresses", the addresses of a valid auto_ccs. A list is not a mapping key (PyYAML refuses it), and a mapping
+# holds a key once (the aliases of one key in it give one entry). Thus a nested alias and a repeated alias have no entry
+# form. An address is a string. Thus only a long string and a repeated alias have an addresses form.
+HOSTILE_SPELLINGS = {
+    # 4,782,969 strings, 25 MB as text, in 303 bytes of YAML.
+    "a nested alias": {"value": nested_list(6)},
+    # 99 merges of a mapping of 200 keys: yaml.safe_load copies 19,800 key-value pairs.
+    "a merge key": {"value": f"[&e {UNKNOWN_KEYS}" + ", {<<: *e}" * 99 + "]", "entry": ("<<", UNKNOWN_KEYS)},
+    # 6 levels of 8 merges: yaml.safe_load copies 299,592 key-value pairs, from 352 bytes of YAML. Each level of 56
+    # bytes more is 8 times as much.
+    "nested merge keys": {"value": nested_merges(6, 8)},
+    "an integer key": {"value": flow((HUGE_INT, "1")), "entry": (HUGE_INT, "1")},
+    "a long string": {"value": LONG_TEXT, "entry": (LONG_TEXT, "1"), "addresses": f"[{LONG_ADDRESS}]"},
+    "a repeated alias": {"value": repeated(LONG_TEXT), "addresses": repeated(LONG_ADDRESS)},
+}
+# Each place: the form of a spelling that it takes, and a function from that form to a project.yaml.
+HOSTILE_PLACES = {
+    **{field: ("value", functools.partial(with_field, field)) for field in validate.ALLOWED_KEYS},
+    "an unknown field": ("value", functools.partial(with_field, "unknown")),
+    "budgets.halts": ("value", lambda value: in_field("budgets", ("halts", value))),
+    "budgets.agrees": ("value", lambda value: in_field("budgets", ("agrees", value))),
+    "budgets.agrees.address": ("value", lambda value: in_field("budgets", ("agrees", flow(("address", value))))),
+    "proofs.repo": ("value", lambda value: in_field("proofs", ("repo", value))),
+    "proofs.path": ("value", lambda value: in_field("proofs", ("path", value))),
+    "ubsan_checks.add": ("value", lambda value: in_field("ubsan_checks", ("add", value), ("reason", "x"))),
+    "ubsan_checks.remove": ("value", lambda value: in_field("ubsan_checks", ("remove", value), ("reason", "x"))),
+    "ubsan_checks.reason": ("value", lambda value: in_field("ubsan_checks", ("add", "[alignment]"), ("reason", value))),
+    "an entry of programs": ("value", programs),
+    "the file of a program": ("value", lambda value: programs(flow(("file", value), ("sha256", PIN)))),
+    "the sha256 of a program": ("value", lambda value: programs(flow(("file", "hello"), ("sha256", value)))),
+    "the link_map of a program": (
+        "value", lambda value: programs(flow(("file", "hello"), ("sha256", PIN), ("link_map", value)))),
+    "a key of the top level": ("entry", lambda entry: MINIMAL + "? {}\n: {}\n".format(*entry)),
+    "a key of budgets": ("entry", lambda entry: in_field("budgets", entry)),
+    "a key of budgets.agrees": ("entry", lambda entry: in_field("budgets", ("agrees", flow(entry)))),
+    "a key of proofs": ("entry", lambda entry: in_field("proofs", entry)),
+    "a key of ubsan_checks": ("entry", lambda entry: in_field("ubsan_checks", ("add", "[alignment]"), ("reason", "x"),
+                                                               entry)),
+    "a key of a program": ("entry", lambda entry: programs(flow(("file", "hello"), ("sha256", PIN), entry))),
+    # A project.yaml that is valid otherwise: it has no problem, and its addresses make warnings.
+    "auto_ccs of a valid project": ("addresses", functools.partial(with_field, "auto_ccs")),
+}
+HOSTILE_CASES = [(spelling, place) for spelling, forms in HOSTILE_SPELLINGS.items()
+                 for place, (form, _) in HOSTILE_PLACES.items() if form in forms]
+# The spellings with merge keys. Each of their project.yaml files has its merge keys on one line.
+MERGE_SPELLINGS = ("a merge key", "nested merge keys")
+
+
+class TestHostileYaml:
+    """Any YAML spelling at any field of project.yaml gives bounded work and output. Through aliases, a small
+    project.yaml can give a large value, or one value at many places. Through merge keys (<<), it can make PyYAML copy
+    many key-value pairs as it parses. A mapping key can be an integer whose repr() raises. For each spelling at each
+    place, validate raises no exception. It gives at most 101 problems and at most 101 warnings: 100, then one line that
+    says that more are not shown. Each line has at most 1,000 characters, and all the lines together have at most
+    101,000. validate takes at most MAX_PEAK (8 MiB) at the peak. A spelling with merge keys gives one problem alone:
+    load() refuses the merge key, with its line."""
+
+    MAX_LINES = 101
+    # A line that quotes 200 ASCII characters of a value has fewer than 500.
+    MAX_LINE = 1000
+    MAX_CHARACTERS = MAX_LINES * MAX_LINE
+
+    @pytest.mark.parametrize("spelling, place", HOSTILE_CASES,
+                             ids=[f"{spelling} at {place}" for spelling, place in HOSTILE_CASES])
+    def test_any_spelling_at_any_place_is_bounded(self, spelling, place):
+        form, build = HOSTILE_PLACES[place]
+        text = build(HOSTILE_SPELLINGS[spelling][form])
+        problems, warnings, _, peak = traced_check(text)
+        if form == "addresses":
+            # validate gives warnings only for a valid project.yaml. With a problem, this row would not test them.
+            assert problems == [], problems
+        assert len(problems) <= self.MAX_LINES, f"{len(problems):,} problems"
+        assert len(warnings) <= self.MAX_LINES, f"{len(warnings):,} warnings"
+        longest = max((len(line) for line in problems + warnings), default=0)
+        assert longest <= self.MAX_LINE, f"a line of {longest:,} characters"
+        characters = sum(len(line) for line in problems + warnings)
+        assert characters <= self.MAX_CHARACTERS, f"{characters:,} characters of problems and warnings"
+        assert peak <= MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text):,} bytes of YAML"
+        if spelling in MERGE_SPELLINGS:
+            [line] = {number for number, row in enumerate(text.splitlines(), 1) if "<<" in row}
+            assert (problems, warnings) == (
+                [f"project.yaml does not parse: line {line}: a merge key (<<) is not allowed; write the keys out"], [])
+
+    def test_an_integer_key_is_named_by_its_size(self):
+        """HUGE_INT, 4,000 hex digits, is an integer of 16,000 bits. Python gives no text of it, so a problem names it
+        by its size: here as an unknown key of an entry of programs."""
+        assert validate.quoted(int(HUGE_INT, 16)) == "an integer of 16000 bits"
+        problems, _, summary = check(programs(flow(("file", "hello"), ("sha256", PIN), (HUGE_INT, "1"))))
+        assert summary is None
+        assert problems == [
+            "programs: entry 1: unknown field an integer of 16000 bits (allowed: file, sha256, link_map)"]
 
 
 class TestOutput:

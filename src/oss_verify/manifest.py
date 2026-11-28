@@ -1,6 +1,6 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
-"""Fuzz targets, the build manifest, and locks: the parts of oss-verify check that need no Docker.
+"""Fuzz targets, whole programs, the build manifest, and locks: the parts of oss-verify check that need no Docker.
 
 A fuzz target is an executable in a build's $OUT whose ELF symbol table defines LLVMFuzzerTestOneInput. This is
 OSS-Fuzz's rule (infra/utils.py, is_fuzz_target_local), reading the symbol table instead of searching the bytes. A Go
@@ -9,10 +9,21 @@ target, whose driver calls target_run, so `compile` lists those in $OUT/.dsl-fuz
 `compile` saves the stripped twin of each one as $OUT/.stripped/<sha256 of the executable>, and those stripped bytes
 are what is collected, published and pinned.
 
+A program is a whole program, with its own main and no fuzz entry, that project.yaml's programs field names in place of
+fuzz targets. Its project has the plain build alone. No rule finds a program: collect_programs() takes each file that
+programs lists, and the link map that its entry names, from the plain build's $OUT as the build wrote them. Nothing is
+stripped, no stripped twin is read or made, and the recorded file keeps its symbol table.
+
 The manifest's targets.<target>.builds section has the shape of the builds: section of an oss-fuzz-theorems
 harness.yaml (file, bytes, sha256 for each build), so that the lock in the proofs repository can take it as it is.
 Its layout section gives each binary's .text size and whether it is statically linked, apart from that harness shape.
 With --twice, its rebuild block records the second build in the same shape, and whether the two are identical.
+
+A program's entry in targets has the mark kind: program; a fuzz target's entry has builds alone, and no kind. The
+program's one build, plain, has the program's own file name (for example hello, not hello.plain). When its entry in
+project.yaml names a link map, targets.<target>.link_map gives the file name, bytes and sha256 of that link map.
+fuzz_targets lists only the fuzz targets, so it is [] for a project with programs. The rebuild block compares the link
+map too.
 """
 import hashlib
 import os
@@ -329,17 +340,89 @@ def collect(raw, targets, out):
     return entries, problems
 
 
+def file_entry(path):
+    """The {file, bytes, sha256} of a file that the manifest records."""
+    path = pathlib.Path(path)
+    return {"file": path.name, "bytes": path.stat().st_size, "sha256": sha256_of(path)}
+
+
+def collect_programs(directory, programs, out):
+    """Copy each program that project.yaml lists from `directory` (the plain build's $OUT) to out/<name>/<name>, with
+    mode 0755, and the link map that its entry names to out/<name>/<link map>, with mode 0644. `programs` is the
+    entries of project.yaml's programs: file and sha256, and optionally link_map. Each file is copied as the build wrote
+    it: nothing is stripped, and no stripped twin is read or made. Each other file in $OUT is ignored.
+
+    Return ({name: {"plain": {file, bytes, sha256}}}, problems).
+    """
+    directory, out = pathlib.Path(directory), pathlib.Path(out)
+    if out.exists():
+        shutil.rmtree(out)
+    entries, problems = {}, []
+    for program in programs:
+        name, link_map = program["file"], program.get("link_map")
+        (out / name).mkdir(parents=True)
+        path = directory / name
+        if not os.path.lexists(path):
+            problems.append(f"program {name}, which project.yaml lists, is not in $OUT: build.sh did not write it")
+        elif not is_executable(path):
+            problems.append(f"program {name} is not an executable ELF file (a regular file, not a link, with the "
+                            "execute bit, of type ET_EXEC or ET_DYN)")
+        else:
+            shutil.copyfile(path, out / name / name)
+            os.chmod(out / name / name, 0o755)
+            entries[name] = {"plain": file_entry(out / name / name)}
+        if link_map is None:
+            continue
+        path = directory / link_map
+        # A link is not the build's own file, so it counts as no link map.
+        if path.is_symlink() or not path.is_file():
+            problems.append(f"the link map {link_map} of program {name}, which project.yaml names, is not in $OUT")
+            continue
+        try:
+            shutil.copyfile(path, out / name / link_map)
+        except OSError as error:
+            # For example a map that build.sh left unreadable. Remove each part of the copy.
+            (out / name / link_map).unlink(missing_ok=True)
+            problems.append(f"the link map {link_map} of program {name} cannot be copied from $OUT: {error.strerror}")
+            continue
+        os.chmod(out / name / link_map, 0o644)
+    return entries, problems
+
+
+def link_maps(out, programs):
+    """The record of each link map that collect_programs() copied to `out`, read from out/<name>/<link map>: {name:
+    {file, bytes, sha256}}. A program whose entry in `programs` names no link map has no record."""
+    out = pathlib.Path(out)
+    return {program["file"]: file_entry(out / program["file"] / program["link_map"])
+            for program in programs if program.get("link_map") is not None}
+
+
 def layouts(out, entries):
-    """The layout of each binary that collect() copied to `out`: {target: {build: {text_bytes, static}}}, with None
-    for each value that cannot be read."""
+    """The layout of each binary that collect() or collect_programs() copied to `out`: {target: {build: {text_bytes,
+    static}}}, with None for each value that cannot be read."""
     out = pathlib.Path(out)
     return {target: {build: binary_layout(out / target / entry["file"]) or {"text_bytes": None, "static": None}
                      for build, entry in builds.items()}
             for target, builds in entries.items()}
 
 
-def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds, targets, entries, layouts):
-    """The build manifest of one check, as a mapping ready for YAML."""
+def target_entry(builds, *, program=False, link_map=None):
+    """A target's entry in the targets section of a manifest, or of its rebuild block. A fuzz target's entry is
+    {"builds": builds}. A program's entry has the mark kind: program, and link_map, the record of its link map, when
+    it has one."""
+    if not program:
+        return {"builds": builds}
+    entry = {"kind": "program", "builds": builds}
+    if link_map is not None:
+        entry["link_map"] = link_map
+    return entry
+
+
+def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds, targets, entries, layouts,
+             programs=(), link_maps=None):
+    """The build manifest of one check, as a mapping ready for YAML. `programs` names the targets that are programs,
+    and `link_maps` gives the record of each program's link map (link_maps()). fuzz_targets lists the other targets."""
+    link_maps = link_maps or {}
     return {
         "schema": MANIFEST_SCHEMA,
         "project": project,
@@ -350,29 +433,45 @@ def manifest(*, project, repo, ref, commit, oss_verify, builder, sources, builds
         "builder": builder,
         "sources": sources,
         "builds": builds,
-        "fuzz_targets": targets,
-        "targets": {target: {"builds": entries[target]} for target in targets},
+        "fuzz_targets": [target for target in targets if target not in programs],
+        "targets": {target: target_entry(entries[target], program=target in programs, link_map=link_maps.get(target))
+                    for target in targets},
         "layout": {target: layouts[target] for target in targets},
     }
 
 
-def rebuild(first, second, targets, *, host, at, builder, builds):
+def rebuild(first, second, targets, *, host, at, builder, builds, programs=(), link_maps=None):
     """The rebuild block that oss-verify check --twice adds to a manifest once it has compared its second build with the
     first: where and when the second build ran, its builder, each binary that it made (as the top level's targets
-    section), and whether every binary has the first build's bytes. `first` and `second` are collect()'s entries.
+    section), and whether every binary has the first build's bytes. `first` and `second` are collect()'s entries, or
+    collect_programs()'s. `programs` names the targets that are programs, and `link_maps` is the pair (the first
+    build's, the second build's) of link_maps(): the block records the second build's.
 
-    Return (block, differences, matched): a difference is a binary that one build made and the other did not, or made
-    with other bytes; matched counts the binaries whose bytes are identical."""
+    Return (block, differences, matched): a difference is a binary, or the link map of a program, that one build made
+    and the other did not, or made with other bytes; matched counts the binaries whose bytes are identical."""
     pins = {(target, build): entry for target in first for build, entry in first[target].items()}
     differences, extras, matched = compare(second, pins, builds)
     differences += extras
+    first_maps, second_maps = link_maps or ({}, {})
+    for target in sorted(set(first_maps) | set(second_maps)):
+        before, after = first_maps.get(target), second_maps.get(target)
+        if after is None:
+            differences.append(f"{target}: the link map {before['file']} is in the first build, not in the second")
+        elif before is None:
+            differences.append(f"{target}: the link map {after['file']} is in the second build, not in the first")
+        elif after["sha256"] != before["sha256"]:
+            differences.append(
+                f"{target}: the link map {after['file']}: sha256 {after['sha256']} ({after['bytes']} bytes), the first "
+                f"build has {before['sha256']} ({before['bytes']} bytes)"
+            )
     block = {
         "kind": "same-host",
         "host": host,
         "at": at,
         "builder": builder,
         "builds": builds,
-        "targets": {target: {"builds": second[target]} for target in targets},
+        "targets": {target: target_entry(second[target], program=target in programs, link_map=second_maps.get(target))
+                    for target in targets},
         "result": "differs" if differences else "identical",
     }
     return block, differences, matched

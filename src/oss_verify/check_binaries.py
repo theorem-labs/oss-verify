@@ -28,8 +28,12 @@ no environment, as an unprivileged user, and named by the fuzz target's name. Th
 the same way. All runs together stop after BUDGET_MINUTES; a run that did not start decides nothing.
 
 Each result is pass, fail, error (the check could not decide), stale (above), plain (check 4 of the plain build), or
-for check 3, not-run (no quiet twin). What the step finds changes no exit status of oss-verify check. Its results go
-into the build manifest and its report into the --checks file.
+not-run (check 2 and check 3 of a program, and check 3 of a binary with no quiet twin). What the step finds changes
+no exit status of oss-verify check. Its results go into the build manifest and its report into the --checks file.
+
+A whole program (project.yaml's programs) has check 1 alone (program_checks). No fuzz driver runs it, and the build
+makes no link record for it, so it has no inputs, no trace, no quiet twin and no list of uninstrumented code: its
+checks 2 and 3 are not-run, and its check 4 is plain, each with a detail that says it is a program.
 """
 import hashlib
 import os
@@ -381,14 +385,11 @@ def staleness(root, module, release):
             f"the release's, the code of {', '.join(changed)} differs")
 
 
-def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, labels):
-    """Run the four checks on every binary. `tag` is the project image, whose checkouts `sources` names (the
-    manifest's sources); the runs are in the toolchain image. Return (the manifest's binary_checks block, {target:
-    {build: uninstrumented list or None}}, {target: {build: the C library that the build declares, or None}}). The
-    C library is the record's libc file (check_links.Record.libc): {file name: (real path, sha256)}."""
-    home = work / "binaries"
-    check_build.empty_directory(home, toolchain, labels=labels)
-
+def read_model():
+    """Read the process model that the published proofs use, and say why a check's rules may not match it. Return
+    (the release, the model, why check 1's rules are stale, why check 2's are). The release is None when it could not
+    be read. The model is then a text that says why; `system_calls` takes that text as it takes a model. A model that
+    cannot be read stops no step: the checks that read it give a result that decides nothing."""
     step("--checks: the model the published proofs use (their release.yaml)")
     release, root, model = None, None, "the model's version could not be read"
     try:
@@ -402,6 +403,18 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
     unknown = "the release's model could not be read, so which model the rules match is not known"
     isa_stale = staleness(root, binary_isa, release) if root is not None else unknown
     shape_stale = staleness(root, syscall_shapes, release) if root is not None else unknown
+    return release, model, isa_stale, shape_stale
+
+
+def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, labels):
+    """Run the four checks on every binary. `tag` is the project image, whose checkouts `sources` names (the
+    manifest's sources); the runs are in the toolchain image. Return (the manifest's binary_checks block, {target:
+    {build: uninstrumented list or None}}, {target: {build: the C library that the build declares, or None}}). The
+    C library is the record's libc file (check_links.Record.libc): {file name: (real path, sha256)}."""
+    home = work / "binaries"
+    check_build.empty_directory(home, toolchain, labels=labels)
+
+    release, model, isa_stale, shape_stale = read_model()
 
     step("--checks: the links of each binary")
     records, quiet = {}, {}
@@ -505,6 +518,37 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
     return block, uninstrumented, libc
 
 
+def program_results():
+    """The results of the checks that do not apply to a whole program, as a new mapping on each call. No fuzz driver
+    runs a program, so check 2 has no trace of it and check 3 has no quiet twin to compare it with. It is the plain
+    build alone and it has no link record, so check 4 has no list of uninstrumented code."""
+    return {
+        "system_calls": {"result": "not-run", "detail": "a program: no fuzz driver runs it, so no trace of its "
+                                                        "system calls is made"},
+        "quiet_loud": {"result": "not-run", "detail": "a program: no fuzz driver runs it, and it has no quiet twin "
+                                                      "to compare it with"},
+        "instrumented": {"result": "plain", "detail": "a program: the plain build alone, with no sanitizer and no "
+                                                      "link record, so it has no list of uninstrumented code"},
+    }
+
+
+def program_checks(job, targets, entries, work):
+    """Run the checks of the binaries that apply to a whole program: check 1 alone, the ELF header and the
+    instructions, on each program's out/<name>/<name>, which is the file as the build wrote it. The other checks have
+    the results of program_results(). The step reads the release's model as binary_checks does. It reads no link
+    record, starts no container and does not look for qemu. Return the manifest's binary_checks block, with the keys
+    of binary_checks' block: no qemu version, and no input for any program."""
+    release, model, isa_stale, _ = read_model()
+    block = {"model": release or {"error": model}, "qemu": "", "inputs": {target: [] for target in targets},
+             "targets": {}}
+    for target in targets:
+        block["targets"][target] = {
+            build: {"elf": guarded(elf_check, work / "out" / target / entries[target][build]["file"], isa_stale),
+                    **program_results()}
+            for build in job.builds}
+    return block
+
+
 # ── the report ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
 # A check that did not run decided nothing, so it reads as such: only pass and the plain build's "nothing to
@@ -512,10 +556,21 @@ def binary_checks(job, tag, toolchain, targets, entries, sources, work, *, label
 RESULT_WORDS = {"pass": "pass", "fail": "**fail**", "error": "**not decided**", "stale": "**stale model**",
                 "not-run": "**not decided** (not run)", "plain": "not instrumented (plain)"}
 
+# The four checks of a binary: the key of each result, and the name that the report gives it.
+CHECKS = (("elf", "ELF and instructions"), ("system_calls", "system calls"), ("quiet_loud", "quiet and loud"),
+          ("instrumented", "instrumented"))
 
-def report(block, uninstrumented, builds, libc):
+
+def not_run_for_program(program, key, result):
+    """Whether `result` of check `key` is the not-run of a check that no fuzz driver runs for a whole program."""
+    return program and key in ("system_calls", "quiet_loud") and result == "not-run"
+
+
+def report(block, uninstrumented, builds, libc, programs=()):
     """The Markdown report of the step. `libc` is binary_checks' third value: the C library that each build
-    declares, or None."""
+    declares, or None. `programs` names the targets of the block that are whole programs (program_checks): they have
+    no fuzz input, no list of uninstrumented code and no C library, and the checks that do not run for them are no
+    failure, so `uninstrumented` and `libc` need hold nothing of them."""
     code = check_checks.code
     lines = ["### The checks of the binaries", ""]
     model = block["model"]
@@ -524,39 +579,48 @@ def report(block, uninstrumented, builds, libc):
                      f"{code(model['commit'][:12])} (release {code(model['release'])}, from its release.yaml).")
     else:
         lines.append(f"The process model could not be read: {code(model.get('error', ''), 300)}.")
-    counts = {target: len(names) for target, names in block["inputs"].items()}
-    lines += [f"Each fuzz target ran on the empty input and up to {MAX_SEEDS} seed inputs ("
-              + ", ".join(f"{code(t)}: {n}" for t, n in counts.items()) + "). docs/build-contract.md, \"The checks of "
-              "the binaries\", says what each check proves.", "",
+    counts = {target: len(names) for target, names in block["inputs"].items() if target not in programs}
+    ran = [f"Each fuzz target ran on the empty input and up to {MAX_SEEDS} seed inputs ("
+           + ", ".join(f"{code(t)}: {n}" for t, n in counts.items()) + ")."] if counts else []
+    lines += [" ".join([*ran, "docs/build-contract.md, \"The checks of the binaries\", says what each check proves."]),
+              "",
               "| binary | ELF and instructions | system calls | quiet and loud | instrumented | uninstrumented code |",
               "|---|---|---|---|---|---|"]
     problems, declared = [], []
     for target, by_build in block["targets"].items():
+        program = target in programs
         for build in builds:
             results = by_build[build]
-            listing = uninstrumented[target][build]
-            # A plain result with no list is a Go program (check_links.analyse): it links Go code only.
-            files = ("no list (Go code only)" if listing is None and results["instrumented"]["result"] == "plain"
-                     else "not recorded" if listing is None else f"{len(listing)} files" + (
-                         f", {sum(1 for u in listing if u['kind'] == 'assembly')} assembly"
-                         if any(u["kind"] == "assembly" for u in listing) else ""))
-            cells = [RESULT_WORDS.get(results[key]["result"], results[key]["result"])
-                     for key in ("elf", "system_calls", "quiet_loud", "instrumented")]
+            listing = None if program else uninstrumented[target][build]
+            if program:
+                files = "no list (a program)"
+            elif listing is None and results["instrumented"]["result"] == "plain":
+                # A plain result with no list is a Go program (check_links.analyse): it links Go code only.
+                files = "no list (Go code only)"
+            elif listing is None:
+                files = "not recorded"
+            else:
+                files = f"{len(listing)} files" + (
+                    f", {sum(1 for u in listing if u['kind'] == 'assembly')} assembly"
+                    if any(u["kind"] == "assembly" for u in listing) else "")
+            cells = ["not run (a program)" if not_run_for_program(program, key, results[key]["result"])
+                     else RESULT_WORDS.get(results[key]["result"], results[key]["result"]) for key, _ in CHECKS]
             name = f"{target}.{build}"
             # The enrollment's review reads this report, which gives the detail only of a result that is not pass or
             # plain. So a build that declares its own C library says so in its cell, and a line at the end of the
             # report gives the path and the sha256 of each of its files, whatever the result. They come from the
             # record's libc file, not from the text of the detail, which the project's paths can change.
-            libc_files = libc[target][build]
+            libc_files = None if program else libc[target][build]
             if libc_files:
                 files += ", a declared C library"
                 declared.append(f"- {code(name)}: " + ", ".join(
                     f"{code(file)} {code(libc_files[file][0], 300)} sha256 {code(libc_files[file][1], 64)}"
                     for file in check_links.DECLARED_LIBC if file in libc_files))
             lines.append(f"| {check_checks.cell(name)} | {' | '.join(cells)} | {files} |")
-            for key, title in (("elf", "ELF and instructions"), ("system_calls", "system calls"),
-                               ("quiet_loud", "quiet and loud"), ("instrumented", "instrumented")):
-                if results[key]["result"] not in ("pass", "plain"):
+            for key, title in CHECKS:
+                # review.md reads each line here as a failure: a check that no fuzz driver runs for a program is none.
+                if results[key]["result"] not in ("pass", "plain") and \
+                        not not_run_for_program(program, key, results[key]["result"]):
                     problems.append(f"- {code(name)}, {title}: {code(results[key]['detail'], 600)}")
     lines.append("")
     if problems:

@@ -4,7 +4,8 @@
 # network, the fuzz targets found by their symbol table, a build manifest written), with --twice and --lock; the
 # virtual machine mode (--qemu) is not ported.
 """
-Build a project's fuzz targets the way we do, collect the binaries, and write the build manifest.
+Build a project's fuzz targets (or the whole programs that it lists) the way we do, collect the binaries, and write the
+build manifest.
 
     oss-verify check <name>                    build projects/<name>: every build its project.yaml asks for
     oss-verify check --build asan <name>       only some builds (repeat --build; plain, ubsan, asan, asan-ubsan); out/
@@ -20,7 +21,8 @@ Build a project's fuzz targets the way we do, collect the binaries, and write th
                                                and write it as Markdown to <file>: which abort() checks no seed input
                                                reaches, which breakage patches (project.yaml's mutants) no seed input
                                                catches (src/oss_verify/check_checks.py), and the four checks of each
-                                               binary (src/oss_verify/check_binaries.py)
+                                               binary (src/oss_verify/check_binaries.py). A program has its ELF check
+                                               alone: the other checks are for fuzz targets
     oss-verify check --layout-out <dir> <name> also record each fuzz target's link, and write the layout tree of the
                                                first build to <dir>: for each build and fuzz target, its linker map,
                                                the digest and calls of each input section, and its binary's sections,
@@ -54,32 +56,44 @@ It runs these steps:
        --checks, the first build also records each fuzz target's link (infra/base-builder/link-fuzz-target). With
        --layout-out, each build records them, with the functions each link wraps (OV_LAYOUT=1). With --base-layout,
        each container also gets the base layout tree, read-only, as OV_BASE_LAYOUT, and each link with an entry there
-       for its build and fuzz target is an append link: a development build, whose binaries are never pins.
+       for its build and fuzz target is an append link: a development build, whose binaries are never pins. A project
+       that lists programs has the plain build alone, which the builder's compile-program runs in place of compile:
+       its build.sh runs in the environment of the toolchain image itself (its own ENV, with SRC, WORK, OUT and
+       HOME=/tmp), with no record: the link records are for fuzz targets.
     7. Find the fuzz targets: executables in $OUT whose symbol table defines LLVMFuzzerTestOneInput, present in every
        build (or those fuzz_targets lists). Collect each one's published (stripped) bytes as
        out/<target>/<target>.<build>, and read the size of its .text section and whether it is statically linked (no
-       PT_INTERP or PT_DYNAMIC program header).
+       PT_INTERP or PT_DYNAMIC program header). For a project that lists programs, take each program that
+       project.yaml lists, and the link map that its entry names, from the plain build's $OUT instead: the file as the
+       build wrote it, nothing stripped, as out/<name>/<name> and out/<name>/<link map>. Stop, with exit code 1, if
+       $OUT does not hold one, or if a listed file is not an executable ELF file.
     8. Write manifest.yaml: the repository, ref and commit, this repository's commit, the builder and the toolchain
        image it was built FROM, the git checkouts in the image, and the file, size and SHA-256 of every target in
-       every build, with the .text size and linkage of each one. List each binary with these values; stop if one is
-       not statically linked.
+       every build, with the .text size and linkage of each one (and, for a program, the mark kind: program and the
+       SHA-256 of its link map). List each binary with these values; stop if one is not statically linked. Then
+       compare each program with the SHA-256 that project.yaml pins: a program that is not that file is named, and
+       the exit code is 3, but the check goes on.
     9. With --layout-out, write the layout tree of the build to <dir> (python3 infra/base-builder/layout.py collect,
        on the $OUT in raw/ of each build of this run alone); stop, with exit code 1, if it cannot be written, though
        the build succeeded. Before anything is built, a <dir> that is there and is not an empty directory, or that is
        or lies in the base layout, is refused: the tree must hold this build's fuzz targets alone, because
        python3 infra/base-builder/layout.py check <base> <dir>, which compares two layout trees, a base and an append
-       build, compares each entry that both hold.
+       build, compares each entry that both hold. A project that lists programs refuses --layout-out and
+       --base-layout, because it has no link record.
    10. With --twice, build everything again from scratch (steps 4 to 7, with docker build --no-cache), compare every
        byte, and only then add the rebuild block to manifest.yaml: this host, the time, the second builder, the file,
-       size and SHA-256 of every binary the second build made, and result: identical or differs. With --layout-out,
-       the second build records its links as the first did, and with --base-layout it is an append build too, so the
-       comparison tests that the append mode makes the same bytes. The layout tree is the first build's.
+       size and SHA-256 of every binary the second build made (and the SHA-256 of each program's link map), and
+       result: identical or differs. With --layout-out, the second build records its links as the first did, and with
+       --base-layout it is an append build too, so the comparison tests that the append mode makes the same bytes. The
+       layout tree is the first build's. For a project that lists programs, the log then holds the SHA-256 of each
+       program of the second build, as `second build: out/<name>/<name> sha256 <value>`.
    11. With --checks, check each binary (src/oss_verify/check_binaries.py; docs/build-contract.md, "The checks of the
        binaries"): its ELF header and instructions, its system calls against the process model of the published
        proofs, its quiet twin, and the code it links uninstrumented. Write the results into manifest.yaml (each
        build's uninstrumented list, and the binary_checks block). Then measure the fuzz targets' checks on their seed
-       inputs (src/oss_verify/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"). What --checks
-       finds changes no exit code.
+       inputs (src/oss_verify/check_checks.py; docs/build-contract.md, "The checks of a fuzz target"). A program has
+       its ELF check alone: no fuzz driver runs it, so its other results are not-run or plain, and none of the
+       fuzz targets' checks run for it. What --checks finds changes no exit code.
    12. Open a shell in the project image with no network and out/ at /out, unless --no-shell.
 
 Everything is kept in ~/.cache/oss-verify-check/<name>, or in --dir if given. Each run replaces out/ there, so the
@@ -91,10 +105,12 @@ still there: a container outlives its docker run client. Its containers keep no 
 Security note: the project's Dockerfile is built with network access, as `docker build` would. Check a project from
 someone you don't trust on a machine with nothing to lose.
 
-Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches); 1 if it does not build, or if
-the layout tree of --layout-out cannot be written; 2 if projects/<name>/ breaks the enrollment rules, a fuzz target is
-not statically linked, or the options are wrong (such as --base-layout with no --layout-out, or a --layout-out that is
-not new or empty); 3 if it builds but the bytes differ (--twice or --lock).
+Exit codes: 0 if the project builds (and, with --twice or --lock, every byte matches, and every program is the file
+that project.yaml pins); 1 if it does not build, or if the layout tree of --layout-out cannot be written; 2 if
+projects/<name>/ breaks the enrollment rules, a fuzz target or a program is not statically linked, or the options are
+wrong (such as --base-layout with no --layout-out, a --layout-out that is not new or empty, or --layout-out or
+--base-layout for a project that lists programs); 3 if it builds but the bytes differ (--twice or --lock), or a
+program is not the file that project.yaml pins.
 
 Requires git, Docker (with the toolchain image available) and PyYAML (on Ubuntu, apt install python3-yaml).
 """
@@ -160,6 +176,7 @@ def load(project):
         ubsan_checks=validate.ubsan_checks_in_effect(config) if config.get("ubsan_checks") is not None else None,
         language=config["language"],
         mutants=config.get("mutants"),
+        programs=config.get("programs"),
     )
 
 
@@ -198,6 +215,40 @@ def ubsan_settings(job, toolchain):
     return (list(checks), sorted(set(validate.TRAP_EXCEPTIONS) - set(checks)), c_left_out)
 
 
+@contextlib.contextmanager
+def taken_from_out(what):
+    """Raise Failed for an OSError of the block, a read or a copy of a file of $OUT after the compiles: for example of a
+    file that build.sh left unreadable, or of a full disk. The message names `what` the block takes, and the reason."""
+    try:
+        yield
+    except OSError as error:
+        raise Failed(f"{what} cannot be taken from $OUT: {error}") from None
+
+
+def build_programs(job, tag, work, toolchain, home):
+    """Compile the plain build of a project that lists programs, and collect them into work/out. build.sh runs in the
+    environment of the toolchain image `toolchain` alone (check_build.toolchain_environment). Its entries go to
+    work/program-env, each ended by a NUL byte, and the builder's compile-program reads that file
+    (check_build.COMPILE_PROGRAM). The build has no record, no layout and no UBSan setting.
+
+    Return (targets, entries): the programs' names, in the order of project.yaml, and the entries that
+    manifest.collect_programs gives. Raise Failed if the environment cannot be read, if collect_programs finds a
+    problem, or if a file of $OUT cannot be read or copied (an OSError, for example of a file that build.sh left
+    unreadable, or of a full disk)."""
+    work.mkdir(parents=True, exist_ok=True)
+    program_env = work / "program-env"
+    program_env.write_bytes("".join(f"{entry}\0" for entry in check_build.toolchain_environment(toolchain)).encode())
+    raw = work / "raw" / "plain"
+    check_build.compile_build(tag, "plain", validate.BUILDS["plain"], raw, labels=check_build.work_label(home),
+                              program_env=program_env)
+    step("find the programs")
+    with taken_from_out("the programs"):
+        entries, problems = manifest.collect_programs(raw, job.programs, work / "out")
+    if problems:
+        raise Failed("\n  ".join(["the programs are not right:", *problems]))
+    return [program["file"] for program in job.programs], entries
+
+
 def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, record=False, token=None, layout=False,
               base_layout=None):
     """Build the images, FROM the toolchain image `toolchain`, compile every build and collect the fuzz targets into
@@ -208,13 +259,20 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
     that keeps its addresses (check_build.compile_build). `token`, for a library in infra/private-libraries.tsv, is the
     read-only token this build fetches it with; it reaches docker as a BuildKit secret and nothing else.
 
-    Return (builder tag, project tag, targets, entries). Raise Failed if any step fails.
+    A project that lists programs (job.programs) has one build, which build_programs makes: it takes none of `record`,
+    `layout` and `base_layout`, and its targets are the programs.
+
+    Return (builder tag, project tag, targets, entries). Raise Failed if any step fails. An OSError of the steps that
+    read $OUT after the compiles, for example of a file that build.sh left unreadable, is Failed too.
     """
     ubsan = ubsan_settings(job, toolchain)
     builder = check_build.build_builder(toolchain, suffix, no_cache)
     tag = check_build.project_tag(job, commit, builder, home, suffix)
     check_build.record_image(home / check_build.IMAGES, tag)
     check_build.build_project(job, commit, builder, tag, work, no_cache, token)
+    if job.programs is not None:
+        targets, entries = build_programs(job, tag, work, toolchain, home)
+        return builder, tag, targets, entries
     raw = {}
     for build in job.builds:
         raw[build] = work / "raw" / build
@@ -223,11 +281,13 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
                                   base_layout=base_layout)
 
     step("find the fuzz targets")
-    found = {build: manifest.discover(directory) for build, directory in raw.items()}
+    with taken_from_out("the fuzz targets"):
+        found = {build: manifest.discover(directory) for build, directory in raw.items()}
     targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
     for build, names in found.items():
         say(f"{build}: {', '.join(names) or 'no fuzz target'}")
-    entries, missing = manifest.collect(raw, targets, work / "out")
+    with taken_from_out("the fuzz targets"):
+        entries, missing = manifest.collect(raw, targets, work / "out")
     if problems or missing:
         raise Failed("\n  ".join(["the fuzz targets are not right:", *problems, *missing]))
     return builder, tag, targets, entries
@@ -294,6 +354,15 @@ def summary_table(targets, builds, entries, layouts):
     return "\n".join(rows) + "\n"
 
 
+def programs_report(programs):
+    """The section of the --checks report for the fuzz targets' checks, for a project that lists the programs
+    `programs`: it names each one, and says that the checks of a fuzz target do not run for it."""
+    lines = ["### The checks of the fuzz targets", ""]
+    lines += [f"- {check_checks.code(name)}: its checks (the coverage build, the seed runs, the abort() checks and the "
+              "breakages) do not run for a program." for name in programs]
+    return "\n".join([*lines, ""])
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="oss-verify check", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -346,6 +415,10 @@ def main(argv=None):
         return 0
 
     job = load(options.project)
+    if job.programs is not None and with_layout:
+        parser.error("--layout-out and --base-layout record the links of each fuzz target "
+                     "(infra/base-builder/link-fuzz-target), and the build of a program makes none: this project "
+                     "lists programs")
     if options.build:
         unknown = [build for build in options.build if build not in job.builds]
         if unknown:
@@ -416,12 +489,15 @@ def main(argv=None):
         return 1
 
     layouts = manifest.layouts(work / "out", entries)
+    # The names of the targets that are programs, and the record of each program's link map (read from out/).
+    programs = targets if job.programs is not None else []
+    link_maps = manifest.link_maps(work / "out", job.programs or [])
     data = manifest.manifest(
         project=job.name, repo=job.repo, ref=job.ref, commit=commit, oss_verify=check_build.oss_verify_state(job),
         builder={"toolchain": toolchain, "image": check_build.image_id(builder),
                  "project_image": check_build.image_id(tag)},
         sources=check_build.sources(tag, labels=check_build.work_label(work)), builds=job.builds, targets=targets,
-        entries=entries, layouts=layouts,
+        entries=entries, layouts=layouts, programs=programs, link_maps=link_maps,
     )
     manifest.write_manifest(work / "manifest.yaml", data)
     step("built")
@@ -436,12 +512,25 @@ def main(argv=None):
         options.summary.write_text(summary_table(targets, job.builds, entries, layouts), encoding="utf-8")
     not_static = [(f"out/{target}/{entries[target][build]['file']}", layouts[target][build]["static"])
                   for target in targets for build in job.builds if layouts[target][build]["static"] is not True]
+    kind = "a program" if job.programs is not None else "a fuzz target"
     for binary, static in not_static:
         why = "is dynamically linked" if static is False else "has program headers that cannot be read"
-        print(validate.printable(f"{job.name}: {binary} {why}: a fuzz target must be statically linked (no PT_INTERP "
+        print(validate.printable(f"{job.name}: {binary} {why}: {kind} must be statically linked (no PT_INTERP "
                                  "or PT_DYNAMIC program header)"), file=sys.stderr)
     if not_static:
         return 2
+
+    # A program that is not the file that project.yaml pins makes the exit code 3. The check goes on: with --twice it
+    # still records whether the two builds are the same, and a second build that fails still comes after this message.
+    code = 0
+    for program in job.programs or []:
+        name, built = program["file"], entries[program["file"]]["plain"]
+        if built["sha256"] != program["sha256"]:
+            say("\nNOT THE PINNED PROGRAM")
+            print(validate.printable(f"{job.name}: program {name}: the build wrote sha256 {built['sha256']} "
+                                     f"({built['bytes']} bytes) FROM the toolchain {toolchain}, and project.yaml pins "
+                                     f"{program['sha256']}"), file=sys.stderr)
+            code = DIFFERENT
 
     if with_layout:
         step(f"--layout-out: the layout tree of the build, in {options.layout_out}")
@@ -452,7 +541,6 @@ def main(argv=None):
             return 1
         say(f"layout tree: {options.layout_out}")
 
-    code = 0
     if options.twice:
         try:
             step("--twice: everything again, from scratch")
@@ -474,7 +562,8 @@ def main(argv=None):
         data["rebuild"], differences, matched = manifest.rebuild(
             entries, again, targets_again, host=socket.gethostname(),
             at=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            builder=builder_ids, builds=job.builds)
+            builder=builder_ids, builds=job.builds, programs=programs,
+            link_maps=(link_maps, manifest.link_maps(work / "twice" / "out", job.programs or [])))
         manifest.write_manifest(work / "manifest.yaml", data)
         say(f"manifest: {work / 'manifest.yaml'}, with the rebuild block (result: {data['rebuild']['result']})")
         if differences:
@@ -482,6 +571,12 @@ def main(argv=None):
             code = DIFFERENT
         else:
             say(f"\nreproducible: all {matched} binaries are byte for byte the same in the second build")
+        if job.programs is not None:
+            # The log holds the SHA-256 of each program of the second build; the first build's are listed above.
+            for target in targets_again:
+                for build in job.builds:
+                    entry = again[target][build]
+                    say(f"second build: out/{target}/{entry['file']} sha256 {entry['sha256']}")
     if pins is not None:
         differences, extras, matched = manifest.compare(entries, pins, job.builds)
         if extras:
@@ -499,9 +594,12 @@ def main(argv=None):
         # The checks of the binaries, into the manifest: per build, the uninstrumented list in the harness.yaml shape,
         # and the four results in its binary_checks block.
         try:
-            block, uninstrumented, libc = check_binaries.binary_checks(job, tag, toolchain, targets, entries,
-                                                                       data["sources"], work,
-                                                                       labels=check_build.work_label(work))
+            if job.programs is None:
+                block, uninstrumented, libc = check_binaries.binary_checks(
+                    job, tag, toolchain, targets, entries, data["sources"], work, labels=check_build.work_label(work))
+            else:
+                # No link record, no container and no qemu: the ELF check alone, on each program as it was built.
+                block, uninstrumented, libc = check_binaries.program_checks(job, targets, entries, work), {}, {}
             for target, by_build in uninstrumented.items():
                 for build, listing in by_build.items():
                     # No list where the check could not make a whole one: the facts must never say that a build links
@@ -510,14 +608,19 @@ def main(argv=None):
                         data["targets"][target]["builds"][build]["uninstrumented"] = listing
             data["binary_checks"] = block
             manifest.write_manifest(work / "manifest.yaml", data)
-            binaries = check_binaries.report(block, uninstrumented, job.builds, libc)
+            binaries = check_binaries.report(block, uninstrumented, job.builds, libc, programs=programs)
         # Any error: the step must never change oss-verify check's exit status.
         except Exception as failure:
             binaries = ("### The checks of the binaries\n\n`oss-verify check --checks` could not run them: "
                         f"{check_checks.code(f'{type(failure).__name__}: {failure}', 1500)}\n")
         try:
-            report = check_checks.checks(job, tag, targets, work, work / "raw", labels=check_build.work_label(work),
-                                         ubsan=ubsan_settings(job, toolchain), budget=options.checks_budget)
+            if job.programs is None:
+                report = check_checks.checks(job, tag, targets, work, work / "raw",
+                                             labels=check_build.work_label(work), ubsan=ubsan_settings(job, toolchain),
+                                             budget=options.checks_budget)
+            else:
+                # The coverage build, the seed runs, the abort() checks and the breakages are for fuzz targets.
+                report = programs_report(targets)
         # Any error: the step must never change oss-verify check's exit status.
         except Exception as failure:
             report = ("### The checks of the fuzz targets\n\n`oss-verify check --checks` could not measure them: "

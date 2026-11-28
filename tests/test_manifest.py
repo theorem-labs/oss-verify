@@ -1,8 +1,10 @@
 # Copyright 2026 Theorem Labs, PBC
 # SPDX-License-Identifier: Apache-2.0
 """Tests for src/oss_verify/manifest.py:  uv run pytest"""
+import errno
 import hashlib
 import os
+import shutil
 import struct
 
 import pytest
@@ -316,3 +318,150 @@ class TestLocks(Scratch):
         assert list(manifest.load_lock(self.dir / "lock.yaml")[1]) == [("7", "plain")]
         (self.dir / "lock.yaml").write_text("targets: {f: {builds: }}\n")
         assert manifest.load_lock(self.dir / "lock.yaml")[1] == {}
+
+
+class TestPrograms(Scratch):
+    """Whole programs that project.yaml's programs field names: collect_programs(), link_maps(), and their entries in
+    the manifest and its rebuild block."""
+
+    HELLO = {"plain": {"file": "hello", "bytes": 5, "sha256": "ab" * 32}}
+    MAP = {"file": "hello.map", "bytes": 7, "sha256": "cd" * 32}
+    LAYOUT = {"plain": {"text_bytes": 10, "static": True}}
+    ENTRY = {"file": "hello", "sha256": "ef" * 32, "link_map": "hello.map"}
+    NOT_EXECUTABLE = ("program hello is not an executable ELF file (a regular file, not a link, with the execute bit, "
+                      "of type ET_EXEC or ET_DYN)")
+
+    @staticmethod
+    def manifest_of(targets, entries, **given):
+        """manifest() of one check of the plain build, with these targets and entries."""
+        return manifest.manifest(
+            project="p", repo="https://x/y", ref="v1", commit="c" * 40, oss_verify=None,
+            builder={"toolchain": "example.org/toolchain@sha256:" + "1" * 64}, sources={}, builds=["plain"],
+            targets=targets, entries=entries, layouts={target: TestPrograms.LAYOUT for target in targets}, **given)
+
+    def collect(self, programs):
+        """collect_programs() of raw/plain, the plain build's $OUT, into out/."""
+        return manifest.collect_programs(self.dir / "raw/plain", programs, self.dir / "out")
+
+    def test_a_fuzz_target_carries_no_program_mark(self):
+        builds = {"plain": {"file": "fuzzer.plain", "bytes": 3, "sha256": "aa"}}
+        assert manifest.target_entry(builds) == {"builds": builds}
+        data = self.manifest_of(["fuzzer"], {"fuzzer": builds})
+        assert data["fuzz_targets"] == ["fuzzer"]
+        assert data["targets"] == {"fuzzer": {"builds": builds}}
+        block, differences, matched = manifest.rebuild({"fuzzer": builds}, {"fuzzer": builds}, ["fuzzer"], host="host",
+                                                       at="2026-11-27T00:00:00Z", builder={}, builds=["plain"])
+        assert (differences, matched) == ([], 1)
+        assert block["targets"] == {"fuzzer": {"builds": builds}}
+
+    def test_a_program_is_marked(self):
+        data = self.manifest_of(["hello"], {"hello": self.HELLO}, programs=["hello"], link_maps={"hello": self.MAP})
+        assert data["builds"] == ["plain"]
+        assert data["fuzz_targets"] == []
+        assert data["targets"] == {"hello": {"kind": "program", "builds": self.HELLO, "link_map": self.MAP}}
+        assert data["layout"] == {"hello": self.LAYOUT}
+        # A program whose entry names no link map has no link_map key.
+        for link_maps in (None, {}):
+            data = self.manifest_of(["hello"], {"hello": self.HELLO}, programs=["hello"], link_maps=link_maps)
+            assert data["targets"] == {"hello": {"kind": "program", "builds": self.HELLO}}
+
+    def test_collect_programs_takes_the_file_as_the_build_wrote_it(self):
+        program = elf([("main", GLOBAL_FUNC, 1)], symtab=True, segments=[PT_LOAD])
+        self.write("raw/plain/hello", program, 0o700)
+        self.write("raw/plain/hello.map", b"the link map of hello\n", 0o600)
+        # A stripped twin, as compile saves one for a fuzz target: it is not read, and none is made.
+        twin = self.write(f"raw/plain/.stripped/{hashlib.sha256(program).hexdigest()}", elf(symtab=False))
+        # Each other file in $OUT is ignored, an executable that project.yaml does not list too.
+        self.write("raw/plain/other", elf([("main", GLOBAL_FUNC, 1)]))
+        self.write("raw/plain/notes.txt", b"notes\n", 0o644)
+        self.write("out/stale/stale.plain", b"an earlier run's file")
+        entries, problems = self.collect([self.ENTRY])
+        assert problems == []
+        assert entries == {"hello": {"plain": {
+            "file": "hello", "bytes": len(program), "sha256": hashlib.sha256(program).hexdigest()}}}
+        copied, link_map = self.dir / "out/hello/hello", self.dir / "out/hello/hello.map"
+        assert copied.read_bytes() == program
+        assert manifest.has_symbol_table(copied)
+        assert copied.stat().st_mode & 0o777 == 0o755
+        assert link_map.read_bytes() == b"the link map of hello\n"
+        assert link_map.stat().st_mode & 0o777 == 0o644
+        assert sorted(path.relative_to(self.dir / "out").as_posix() for path in (self.dir / "out").rglob("*")) == [
+            "hello", "hello/hello", "hello/hello.map"]
+        assert [path.name for path in twin.parent.iterdir()] == [twin.name]
+
+    @pytest.mark.parametrize("case, problem", [
+        pytest.param("missing", "program hello, which project.yaml lists, is not in $OUT: build.sh did not write it",
+                     id="no-such-file"),
+        pytest.param("link", NOT_EXECUTABLE, id="a-link-to-an-elf-executable"),
+        pytest.param("text", NOT_EXECUTABLE, id="a-text-file"),
+        pytest.param("relocatable", NOT_EXECUTABLE, id="an-elf-file-of-type-ET_REL"),
+        pytest.param("not-executable", NOT_EXECUTABLE, id="an-elf-executable-without-the-execute-bit"),
+    ])
+    def test_collect_programs_refuses_by_name(self, case, problem):
+        self.write("raw/plain/hello.map", b"the link map of hello\n", 0o644)
+        if case == "link":
+            self.write("raw/plain/real", elf([("main", GLOBAL_FUNC, 1)]))
+            os.symlink("real", self.dir / "raw/plain/hello")
+        elif case == "text":
+            self.write("raw/plain/hello", b"#!/bin/sh\necho hello\n")
+        elif case == "relocatable":
+            self.write("raw/plain/hello", elf([("main", GLOBAL_FUNC, 1)], e_type=1))
+        elif case == "not-executable":
+            self.write("raw/plain/hello", elf([("main", GLOBAL_FUNC, 1)]), 0o644)
+        entries, problems = self.collect([self.ENTRY])
+        assert problems == [problem]
+        assert "hello" not in entries
+        assert not (self.dir / "out/hello/hello").exists()
+
+    @pytest.mark.parametrize("case", ["missing", "link"], ids=["no-such-file", "a-link"])
+    def test_collect_programs_refuses_a_missing_link_map(self, case):
+        self.write("raw/plain/hello", elf([("main", GLOBAL_FUNC, 1)]))
+        if case == "link":
+            self.write("raw/plain/real.map", b"the link map of hello\n", 0o644)
+            os.symlink("real.map", self.dir / "raw/plain/hello.map")
+        _, problems = self.collect([self.ENTRY])
+        assert problems == ["the link map hello.map of program hello, which project.yaml names, is not in $OUT"]
+        assert not (self.dir / "out/hello/hello.map").exists()
+
+    def test_collect_programs_reports_a_link_map_that_it_cannot_copy(self):
+        """A link map that build.sh leaves unreadable is a problem of collect_programs, not a traceback, and leaves no
+        part of a copy. A stand-in for shutil.copyfile refuses to read the map: root can read a file of mode 000."""
+        program = elf([("main", GLOBAL_FUNC, 1)])
+        self.write("raw/plain/hello", program)
+        self.write("raw/plain/hello.map", b"the link map of hello\n", 0o644)
+        copyfile = shutil.copyfile
+
+        def refuse_the_map(source, target):
+            if os.path.basename(source) != "hello.map":
+                return copyfile(source, target)
+            with open(target, "wb") as written:
+                written.write(b"the start of a copy")
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(source))
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(shutil, "copyfile", refuse_the_map)
+            entries, problems = self.collect([self.ENTRY])
+        assert problems == [f"the link map hello.map of program hello cannot be copied from $OUT: "
+                            f"{os.strerror(errno.EACCES)}"]
+        assert not (self.dir / "out/hello/hello.map").exists()
+        assert (self.dir / "out/hello/hello").read_bytes() == program
+        assert list(entries) == ["hello"]
+
+    def test_link_maps_records_each_named_map(self):
+        maps = {"hello": b"the link map of hello\n", "world": b"the link map of world, a longer one\n"}
+        for name, text in maps.items():
+            self.write(f"out/{name}/{name}", elf([("main", GLOBAL_FUNC, 1)]))
+            self.write(f"out/{name}/{name}.map", text, 0o644)
+        self.write("out/bare/bare", elf([("main", GLOBAL_FUNC, 1)]))
+        programs = [{"file": name, "sha256": "0" * 64, "link_map": f"{name}.map"} for name in maps]
+        programs.append({"file": "bare", "sha256": "0" * 64})
+        assert manifest.link_maps(self.dir / "out", programs) == {
+            name: {"file": f"{name}.map", "bytes": len(text), "sha256": hashlib.sha256(text).hexdigest()}
+            for name, text in maps.items()}
+
+    def test_a_program_manifest_is_a_lock(self):
+        data = self.manifest_of(["hello"], {"hello": self.HELLO}, programs=["hello"], link_maps={"hello": self.MAP})
+        manifest.write_manifest(self.dir / "manifest.yaml", data)
+        assert yaml.safe_load((self.dir / "manifest.yaml").read_text())["targets"] == data["targets"]
+        _, pins, _ = manifest.load_lock(self.dir / "manifest.yaml")
+        assert pins == {("hello", "plain"): self.HELLO["plain"]}

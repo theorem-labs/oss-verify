@@ -2,7 +2,11 @@
 
 This page describes each field of `projects/<name>/project.yaml` and each file in the project directory. It is for a maintainer, or a coding agent, who writes a project directory.
 
-Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. We use the same rules when we import a project.
+Start from [templates/project.yaml](../templates/project.yaml). `oss-verify validate` checks each rule on this page. It gives each problem once, and at most 100 problems for a project. If there are more, it then gives one line that says that more problems are not shown. It gives warnings in the same way. We use the same rules when we import a project.
+
+A problem or a warning quotes at most the first 200 characters of a string of project.yaml, or the first 200 bytes of a `!!binary` value. It names an integer of more than 664 bits by its size, for example `an integer of 16000 bits`. The summary line of a valid project gives its values whole.
+
+`oss-verify validate` refuses a YAML merge key (`<<`) in `project.yaml`, with this problem: `project.yaml does not parse: line <n>: a merge key (<<) is not allowed; write the keys out`. Write the keys out in the mapping instead. Anchors (`&name`) and aliases (`*name`) are allowed.
 
 The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. We made new names only for fields that neither has.
 
@@ -21,6 +25,7 @@ The field names come from OSS Scanner if it has the field, then from OSS-Fuzz. W
 | `sanitizers` | no | the sanitizer builds in addition to `plain` | `[address, undefined]` |
 | `ubsan_checks` | no | changes to the UBSan checks of the `ubsan` and `asan-ubsan` builds, with the next toolchain version ([below](#ubsan_checks)) | none: the checks that OSS-Fuzz makes fatal, for the project's language, with `strict-flex-arrays` |
 | `fuzz_targets` | no | the fuzz targets to verify | each fuzz target that the build makes |
+| `programs` | no | the whole programs that `build.sh` writes in place of fuzz targets, each with its pinned SHA-256 ([below](#programs)) | none: the project has fuzz targets |
 | `mutants` | no | the directory of the breakage patches, from the `WORKDIR` of the `Dockerfile` ([below](#mutants)) | none |
 | `patch_style` | no | the path of your `patch_style.md` in your repository ([below](#patch_style)) | |
 | `budgets` | no | the memory budgets of the statements | today's values |
@@ -99,7 +104,7 @@ Each build makes a different set of binaries, with its own statements.
 | `asan` | `sanitizers` contains `address` | AddressSanitizer |
 | `asan-ubsan` | `sanitizers` contains both | both |
 
-[build-contract.md](build-contract.md#the-builds) gives the flags of each build. A `go` or `jvm` project has the plain build only ([above](#language)).
+[build-contract.md](build-contract.md#the-builds) gives the flags of each build. A `go` or `jvm` project ([above](#language)) and a project with `programs` ([below](#programs)) have the plain build only.
 
 ### ubsan_checks
 
@@ -143,6 +148,54 @@ ubsan_checks:
 Give the names of the fuzz targets that `build.sh` puts in `$OUT`. If you do not give this field, we verify each fuzz target that the build makes. A fuzz target is an executable in `$OUT` whose symbol table defines `LLVMFuzzerTestOneInput`. It must be in each build.
 
 The manifest and the lock record the list that a build used. Thus "each fuzz target" cannot change what a proof is about without a record. A build that does not make a fuzz target in this list fails.
+
+### programs
+
+Give the whole programs that `build.sh` writes in `$OUT`, in place of fuzz targets. A whole program has its own `main` and no fuzz entry. `oss-verify check` does not find a program: it takes each file that this field names. [build-contract.md](build-contract.md#whole-programs) tells how it builds, checks and records a program.
+
+Each entry of the list is a mapping with these keys:
+
+| key | required | value |
+|---|---|---|
+| `file` | yes | the name of the program's file in `$OUT` |
+| `sha256` | yes | the pin: the SHA-256 of that file, as 64 hexadecimal digits in lower case |
+| `link_map` | no | the name of the link map in `$OUT` that the program's build writes |
+
+For example:
+
+```yaml
+programs:
+  - file: hello
+    sha256: <the SHA-256 of hello, 64 hexadecimal digits>
+    link_map: hello.map
+```
+
+A project can list more than one program. `oss-verify validate` refuses `programs` if it breaks one of these rules:
+
+* `programs` is a list of one or more entries.
+* Each entry has `file` and `sha256`, and can have `link_map`. It has no other key.
+* `file` and `link_map` are file names in `$OUT`. They use only `A-Z a-z 0-9 . _ + -`, start with a letter or digit, and have at most 100 characters. Thus a name has no `/`.
+* `sha256` has exactly 64 hexadecimal digits, in lower case.
+* No two entries have the same `file`, and no two entries have the same `link_map`. A `link_map` is not the `file` of a program, also not of its own entry.
+
+For a `file` or a `link_map` that is not a string, the problem gives the type of the value, for example `(it is a list)`, and not the value. A YAML alias can put one entry at more than one place of the list. `oss-verify validate` refuses an entry that is not a mapping at each place. It checks the keys and values of a mapping at its first place only. Each place still counts for the rule that no two entries have the same `file` or the same `link_map`.
+
+A project with `programs` has the plain build only, as a `go` or `jvm` project has ([above](#language)). Thus `oss-verify validate` refuses each field and file that is for fuzz targets or for a sanitizer build:
+
+* `sanitizers`, unless you leave it out or give `sanitizers: []`;
+* `fuzz_targets`: a project with programs lists no fuzz target;
+* `mutants`: the breakages do not run for a program;
+* a seed corpus (`<target>_seed_corpus.zip`): the seed runs are for fuzz targets only;
+* `ubsan_checks`: the project has no UBSan build;
+* a budget under `budgets.agrees`: the project has no sanitizer.
+
+`budgets.halts` is permitted ([below](#budgets)). The project can have any `language` that our builder builds ([above](#language)). The language chooses the toolchain image, and the build of a program gets the environment of that image ([build-contract.md](build-contract.md#the-environment-of-a-programs-build)).
+
+The pin is the SHA-256 of the file that the program's own build writes. Take it from the program's own release. Each run of `oss-verify check` compares the file that the build wrote with the pin. If the bytes differ, it prints `NOT THE PINNED PROGRAM` and a message that names the program, the built SHA-256, the toolchain image and the pinned SHA-256. Its exit status is then 3 ([build-contract.md](build-contract.md#the-refusals-of-a-program)).
+
+The ref of `repo` can be a tag or a branch ([above](#repo)). A tag is the natural ref of a program's release. `oss-verify validate` does not ask for a full commit id. If a branch moves and the bytes of the program change, `oss-verify check` exits with status 3, and its message names the pinned and the built SHA-256. That is what the pin is for.
+
+The pin holds for one toolchain image. A project with no lock is built with the newest toolchain for its language ([build-contract.md](build-contract.md#toolchains)). Thus a new row of [infra/toolchains.tsv](../infra/toolchains.tsv) can change the bytes of the program. The message of status 3 names the toolchain image of the build.
 
 ### mutants
 

@@ -12,8 +12,8 @@ An OSS-Fuzz `Dockerfile` and `build.sh` do not run here without changes. They ex
 
 1. Make the builder image from [infra/base-builder/](../infra/base-builder/), from a toolchain image ([below](#toolchains)).
 2. Build the project image from the project's `Dockerfile`, on the builder. `oss-verify check` gives the build arguments `COMMIT` (the full commit that `repo#ref` names), `REPO` and `BASE_BUILDER`. Only this step has network access.
-3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan` and `asan-ubsan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`.
-4. Find the fuzz targets in the `$OUT` of each build. Copy each binary to `out/<target>/<target>.<build>`. Write the manifest, with the SHA-256 of each binary. `oss-verify check` lists each binary with its size, the size of its `.text` section, `static` or `dynamic`, and its SHA-256. With `--summary <file>`, it also writes this list as a Markdown table; the Build check of a pull request shows that table. A binary with a `PT_INTERP` or `PT_DYNAMIC` program header is dynamically linked. `oss-verify check` refuses a dynamically linked binary, and one whose program headers it cannot read, with exit status 2, the status for a project that breaks the enrollment rules. Size is not a rule: a binary of any size passes. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries have less than 1 MB of code: the larger of their `.text` section and their executable segments, which can hold read-only data too ([README](../README.md#who-can-enroll)).
+3. Run `compile` in a new container of the project image, with no network (`docker run --network=none`). Do this once for each build that `project.yaml` asks for: `plain`, `ubsan`, `asan` and `asan-ubsan`. `compile` sets the compilers and flags of the build and runs `$SRC/build.sh`. A project with `programs` has the `plain` build alone. For it, the builder's script [compile-program](../infra/base-builder/compile-program) runs in place of `compile`, and runs its `build.sh` in the toolchain image's own environment ([below](#whole-programs)).
+4. Find the fuzz targets in the `$OUT` of each build. Copy each binary to `out/<target>/<target>.<build>`. For a project with `programs`, take each program that `project.yaml` lists from `$OUT`, as the build wrote it, and copy it to `out/<name>/<name>` ([below](#whole-programs)). If a file of `$OUT` cannot be read or copied in this step, for example because `build.sh` left it unreadable or the disk is full, `oss-verify check` stops at that file with exit status 1, and writes no manifest. It prints `BUILD FAILED: the fuzz targets cannot be taken from $OUT: <the reason that the system gives, with the file>`. For a project with `programs`, it prints `BUILD FAILED: the programs cannot be taken from $OUT: ...` ([below](#the-refusals-of-a-program)). Write the manifest, with the SHA-256 of each binary. `oss-verify check` lists each binary with its size, the size of its `.text` section, `static` or `dynamic`, and its SHA-256. With `--summary <file>`, it also writes this list as a Markdown table; the Build check of a pull request shows that table. A binary with a `PT_INTERP` or `PT_DYNAMIC` program header is dynamically linked. `oss-verify check` refuses a dynamically linked binary, and one whose program headers it cannot read, with exit status 2, the status for a project that breaks the enrollment rules. Then it compares each program with the SHA-256 that `project.yaml` pins: a program with other bytes makes the exit status 3. Size is not a rule: a binary of any size passes. Because of our capacity, we are most likely to respond quickly to a project in C whose plain binaries have less than 1 MB of code: the larger of their `.text` section and their executable segments, which can hold read-only data too ([README](../README.md#who-can-enroll)).
 
 ## The builder
 
@@ -131,7 +131,7 @@ With `--checks`, the build also takes the compile records of the runtime. Thus t
 | `<fuzzer/FuzzedDataProvider.h>` | on the include path of `$CC` and `$CXX`, as in OSS-Fuzz |
 | `$SOURCE_DATE_EPOCH` | `1756684800`, for each tool that writes a date |
 
-`compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)).
+`compile` runs `build.sh` with `bash -eux`, from the `WORKDIR` of the `Dockerfile`. The `build.sh` of a Go project gets the environment that OSS-Fuzz gives a Go project instead ([go/compile-go](../infra/base-builder/go/compile-go)). The `build.sh` of a project with `programs` gets the toolchain image's own environment instead, and the builder's script [compile-program](../infra/base-builder/compile-program) runs it in place of `compile` ([below](#the-environment-of-a-programs-build)).
 
 ## The builds
 
@@ -578,7 +578,7 @@ It needs `qemu-riscv64-static` on `PATH`, and compiler-rt's source from GitHub o
 
 ## The checks of the binaries
 
-`uv run oss-verify check --checks <file>` also does four checks on each build of each fuzz target ([src/oss_verify/check_binaries.py](../src/oss_verify/check_binaries.py)). It writes their results into the manifest ([below](#the-manifest)) and adds a table to the report, with one row for each binary. What they find changes no exit status.
+`uv run oss-verify check --checks <file>` also does four checks on each build of each fuzz target ([src/oss_verify/check_binaries.py](../src/oss_verify/check_binaries.py)). It writes their results into the manifest ([below](#the-manifest)) and adds a table to the report, with one row for each binary. What they find changes no exit status. For a whole program, only check 1 runs ([below](#the-checks-of-a-program)).
 
 The checks hold each binary against LPS as the published proofs use it: the proofs repository's [`release.yaml`](https://github.com/theorem-labs/oss-verify-proofs/blob/main/release.yaml) names the repository and the commit of LPS in its `semantics:` block, and `oss-verify check` reads that file from the proofs repository on GitHub and fetches LPS at that commit ([src/oss_verify/model_release.py](../src/oss_verify/model_release.py)). Checks 1 and 2 read LPS through rules that we wrote against [one commit of it](https://github.com/theorem-labs/rocq-linux-process-semantics/commit/c0dd863a0f8f307beca7f2ee5cb4d7686a875779) (`MODEL_COMMIT` in each check's file). If a file that a rule reads has different code at the commit that the release names, or is not there, or if `oss-verify check` cannot read `release.yaml` or LPS, the result is `stale` and not a verdict. A change to a comment changes no result.
 
@@ -654,6 +654,140 @@ Our tools do not write theorem statements for Go fuzz targets yet. These items a
 * All builds use Go 1.27.1. The `Dockerfile` of some OSS-Fuzz projects installs an older Go, which we do not install.
 * The target is riscv64 without the C extension (RV64G), and libFuzzer is not linked: the driver calls the fuzz target.
 
+## Whole programs
+
+A whole program has its own `main` and no fuzz entry. It defines no `LLVMFuzzerTestOneInput`, and no driver is linked into it. `oss-verify check` finds a fuzz target by its symbol table ([above](#the-fuzz-targets)), but it does not look for a program. A project names each program in the `programs` field of `project.yaml`, with the SHA-256 of its file, the pin ([project-yaml.md](project-yaml.md#programs)). Such a project has the plain build alone, and lists no fuzz target.
+
+### What build.sh does for a program
+
+`build.sh` runs the program's own build, for example its `make`. Then it writes the program's file in `$OUT`, with its execute bit, under the name that the entry's `file` gives. If the entry names a `link_map`, `build.sh` also writes that link map in `$OUT`. [tests/fixtures/program/](../tests/fixtures/program/) is a test port of one program, `hello`. Its `build.sh` runs `make`, then `cp hello hello.map "$OUT/"`.
+
+Keep the checkout under `$SRC`. If the program's own build files name a fixed path, copy the checkout to that path in the `Dockerfile`, and make that path the `WORKDIR` ([above](#what-the-dockerfile-must-do)). The `Dockerfile` of the fixture copies `$SRC/hello` to `/opt/hello`, and its `WORKDIR` is `/opt/hello`.
+
+A program must be statically linked, as each binary must ([below](#the-refusals-of-a-program)). Check 1 of [the checks of the binaries](#the-checks-of-the-binaries) also asks for an `ET_EXEC` file with no compressed instruction. The `Makefile` of the fixture builds `hello` static and not PIE, with `-march=rv64g -mabi=lp64d`.
+
+### The environment of a program's build
+
+The `build.sh` of a program runs in the environment of the toolchain image itself. This is the environment that `docker run --network none <toolchain image>` gives, so it is the environment of the program's own build in that image. Thus the check gives the bytes that the program's own build gives in the toolchain image.
+
+In the container, the image's own variables cannot be told from those that the builder and the project's `Dockerfile` add. Thus `oss-verify check` reads them on the host. These are the steps:
+
+1. `oss-verify check` reads the image's own `ENV`, its `Config.Env`, with `docker image inspect --format '{{json .Config.Env}}' <toolchain image>`. If the image is not on the host, it runs `docker pull --quiet <toolchain image>` and reads the list again. If it still cannot read the list, the build fails with exit status 1. The build also fails for an entry that is not `NAME=value`, whose name starts with `-`, or that holds a NUL byte. Step 3 ends each entry with a NUL byte, so `compile-program` would read such an entry as two.
+2. If the image sets no `PATH`, `oss-verify check` puts Docker's default in front of the list, as `docker run` gives it: `PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
+3. It writes the list to `program-env` in its work directory, each entry ended by a NUL byte. It mounts this file read-only in the container of the build, and names it in `OV_PROGRAM_ENV`.
+4. The builder's script [compile-program](../infra/base-builder/compile-program) runs in the container, in place of `compile`. It runs `build.sh` with `env -i`, with the list and with `SRC`, `WORK`, `OUT` and `HOME=/tmp`. It sets up no fuzz build, so nothing that `compile` sets gets to `build.sh`. It is a script of its own, and not a part of `compile`, because the key of [the prebuilt CPython runtime](#the-prebuilt-cpython-runtime) holds the SHA-256 of `compile` and not that of `compile-program`, so a change to the build of a program changes the key of no Python build.
+
+For the newest C and C++ toolchain on 2026-11-27, the row `oss-fuzz-theorems-2026.10` of [infra/toolchains.tsv](../infra/toolchains.tsv), `build.sh` gets these variables:
+
+* from the toolchain image: `PATH`, `MUSL_SYSROOT`, `ASAN_RESOURCE_DIR`, `PKG_CONFIG_LIBDIR`, an empty `PKG_CONFIG_PATH`, `OFT_DEP_CC`, `OFT_DEP_CFLAGS` and `OFT_DEP_CXX`;
+* from `compile-program`: `SRC`, `WORK` and `OUT`, which are `/src`, `/work` and `/out` as in each build, and `HOME=/tmp`;
+* from bash itself: `PWD`, `SHLVL` and `_`, and `OLDPWD` after a `cd`.
+
+`build.sh` gets no other variable:
+
+* No `HOSTNAME`. Docker gives each container its own value, and both builds of `--twice` must get the same environment.
+* None of the settings of the fuzz builds. Of the variables of [What build.sh gets](#what-buildsh-gets), it gets only `$SRC`, `$WORK` and `$OUT`. Thus it gets no `$CC`, `$CFLAGS`, `$LIB_FUZZING_ENGINE` or `$SANITIZER`, and no `$SOURCE_DATE_EPOCH` unless the toolchain image sets it. `PATH` does not name `/tmp/shim`, and the build makes no compiler shims. The variables that `oss-verify check` gives `compile-program`, such as `OV_OWNER` and `OFT_MAKE_JOBS`, do not get to `build.sh`.
+* No `ENV` of the builder image, such as `SANITIZER=none`, and no `ENV` of the project's `Dockerfile`.
+
+Both builds of `--twice` get the same environment. `build.sh` runs as root, from the `WORKDIR` of the `Dockerfile`, with `bash -eux`, as in each build. `$CC` and `$CFLAGS` are not set, so a `build.sh` that names them stops under `-u`.
+
+### What the check takes from $OUT
+
+`oss-verify check` takes each program that `programs` lists, and the link map that its entry names, from the `$OUT` of the plain build. It takes them as the build wrote them. It links no driver into a program and strips nothing, and it makes or reads no stripped twin. Thus the recorded file keeps its symbol table.
+
+It copies the program to `out/<name>/<name>`, with mode 0755, and the link map to `out/<name>/<link map>`, with mode 0644. It ignores each other file in `$OUT`, as for a fuzz target. The `$OUT` of the build stays in `raw/plain/` of the work directory of `oss-verify check`, as for each build. Thus `raw/plain/<name>` has the same bytes as `out/<name>/<name>`.
+
+### The build log of a program
+
+`compile-program` writes these lines for the build of a program:
+
+    compile: the plain build (SANITIZER=none)
+    compile: a program: build.sh runs in the toolchain image's own environment, with SRC, WORK, OUT and HOME=/tmp
+    compile: env <NAME>=<value>
+
+The first line is the line that `compile` writes for each plain build, at the start of its line. `compile-program` writes it too, because readers of the build log take this line as the start of a build. Then comes one line `compile: env NAME=value` for each variable of the toolchain image, in the order of the image. Then comes the trace that `bash -x` writes: a line that starts with `+ ` for each command of `build.sh`. The trace holds the program's own build command, for example `+ make`, and not each compile. The build writes no compile records and no `$OUT/.records/`.
+
+### The refusals of a program
+
+After the first build, `oss-verify check` does these steps, in this order:
+
+1. It takes the programs and the link maps from `$OUT` ([above](#what-the-check-takes-from-out)). It stops with exit status 1 if one of these problems occurs. It then prints `BUILD FAILED: the programs are not right:` and one line for each problem, and it writes no manifest.
+   * A program that `project.yaml` lists is not in `$OUT`: `program <name>, which project.yaml lists, is not in $OUT: build.sh did not write it`.
+   * A listed file is not an executable ELF file: `program <name> is not an executable ELF file (a regular file, not a link, with the execute bit, of type ET_EXEC or ET_DYN)`.
+   * A link map that an entry names is not in `$OUT`, or is a link: `the link map <link map> of program <name>, which project.yaml names, is not in $OUT`.
+   * A link map that an entry names cannot be copied from `$OUT`, for example because the user that runs `oss-verify check` cannot read it: `the link map <link map> of program <name> cannot be copied from $OUT: <the reason that the system gives>`, for example `Permission denied`. No part of the copy stays in `out/<name>/`.
+
+   If another file of `$OUT` cannot be read or copied, for example a program on a full disk, the check stops at that file with exit status 1, and writes no manifest. It then prints `BUILD FAILED: the programs cannot be taken from $OUT: <the reason that the system gives, with the file>`, and no line for a problem of the list.
+2. It writes the manifest, and lists each program as it lists a fuzz target ([The steps](#the-steps), step 4). With `--summary <file>`, the table has a row for each program.
+3. It refuses a program that is not statically linked, with exit status 2: `<project>: out/<name>/<name> is dynamically linked: a program must be statically linked (no PT_INTERP or PT_DYNAMIC program header)`. A program whose program headers it cannot read gets the same status. The check then compares no pin.
+4. It compares the SHA-256 of each program with the pin of its entry ([project-yaml.md](project-yaml.md#programs)). For each program with other bytes, it prints `NOT THE PINNED PROGRAM` on standard output, and this line on standard error: `<project>: program <name>: the build wrote sha256 <built> (<bytes> bytes) FROM the toolchain <image>, and project.yaml pins <pinned>`. The exit status becomes 3, and the manifest keeps the built SHA-256. The check goes on.
+5. With `--twice`, it builds again and compares the two builds ([below](#the-second-build-of-a-program)). A difference makes the exit status 3. A second build that fails stops the check with exit status 1, after the message of step 4.
+6. With `--lock`, it compares each program with the lock, as it compares a fuzz target ([below](#check-a-binary-against-a-lock)). A difference makes the exit status 3.
+7. With `--checks`, it runs the checks of a program ([below](#the-checks-of-a-program)). They change no exit status.
+
+Thus a program that is not statically linked exits with status 2, whatever its SHA-256. A wrong pin is named in each run that gets to step 4, also in a run whose second build fails.
+
+Before it builds, `oss-verify check` refuses `--layout-out` and `--base-layout` for a project with programs, with exit status 2 and this message: `--layout-out and --base-layout record the links of each fuzz target (infra/base-builder/link-fuzz-target), and the build of a program makes none: this project lists programs`. A layout tree needs the record of each link ([below](#a-development-build-that-keeps-addresses)).
+
+### The second build of a program
+
+With `--twice`, the second build of a program does the same steps as the first, from the start, in the same environment ([below](#reproducibility)). The comparison takes each program and its link map. A link map with other bytes is a difference, as a program with other bytes is. Then the `rebuild` block says `result: differs`, and the exit status is 3. `rebuild.targets.<name>` has the `kind`, `builds` and `link_map` of the second build.
+
+After the comparison, the log has one line for each program of the second build:
+
+    second build: out/<name>/<name> sha256 <value>
+
+The list of the binaries after the first build gives the SHA-256 of each program of the first build. Thus the log holds the SHA-256 of both builds.
+
+### The manifest entry of a program
+
+The manifest records a program under its own name: the `file` of its entry, for example `hello`. That name is the key of `targets` and of `layout`. These are the parts of the fixture's manifest that tell about its program:
+
+    builds:
+    - plain
+    fuzz_targets: []
+    targets:
+      hello:
+        kind: program
+        builds:
+          plain:
+            file: hello
+            bytes: <the size of out/hello/hello>
+            sha256: <the SHA-256 of out/hello/hello>
+        link_map:
+          file: hello.map
+          bytes: <the size of out/hello/hello.map>
+          sha256: <the SHA-256 of out/hello/hello.map>
+    layout:
+      hello:
+        plain:
+          text_bytes: <the size of the .text section of out/hello/hello>
+          static: true
+
+* `targets.<name>.kind: program` marks a program. The entry of a fuzz target has no `kind` key.
+* The one build is `plain`: `builds` is `[plain]`, and `targets.<name>.builds` has `plain` alone.
+* `targets.<name>.builds.plain.file` is the program's own name, not `<name>.plain`. Its `bytes` and `sha256` are those of `out/<name>/<name>`: the file as the build wrote it, with its symbol table.
+* `fuzz_targets` is `[]`. It lists only the fuzz targets, and the program is in `targets` alone.
+* `targets.<name>.link_map` gives the `file`, `bytes` and `sha256` of the link map, which is the file `out/<name>/<link map>`. A program whose entry names no link map has no `link_map` key.
+* `layout.<name>.plain` gives `text_bytes` and `static`, as for a fuzz target ([below](#the-manifest)).
+
+### The checks of a program
+
+With `--checks`, only check 1 of [the checks of the binaries](#the-checks-of-the-binaries) runs for a program: the check of the ELF file and its instructions, against LPS as the release names it, on `out/<name>/<name>`. No fuzz driver runs a program, and its build makes no record of its link. Thus checks 2, 3 and 4 do not run. The step reads LPS as for a fuzz target, but it reads no link record, starts no container and does not look for qemu. In the `binary_checks` block of the manifest, `qemu` is empty, and the list of the inputs of each program is empty.
+
+This table tells where each result of a program appears:
+
+| check | in the manifest | in the report of `--checks` |
+|---|---|---|
+| the static-link rule ([above](#the-refusals-of-a-program)) | `layout.<name>.plain.static` | none: a program that is not static stops the check with exit status 2 |
+| 1, ELF and instructions | `binary_checks.targets.<name>.plain.elf`: `pass`, `fail`, `error` or `stale`, as for a fuzz target | its result, as for a fuzz target, with a line under "What each failure is" for each result but `pass` |
+| 2, system calls | `binary_checks.targets.<name>.plain.system_calls`: `not-run` | `not run (a program)` |
+| 3, quiet and loud | `binary_checks.targets.<name>.plain.quiet_loud`: `not-run` | `not run (a program)` |
+| 4, uninstrumented code | `binary_checks.targets.<name>.plain.instrumented`: `plain`. `targets.<name>.builds.plain` has no `uninstrumented` list | `not instrumented (plain)`, and `no list (a program)` in the column "uninstrumented code" |
+| the checks of a fuzz target ([above](#the-checks-of-a-fuzz-target)): the coverage build, the seed runs, the `abort()` checks and the breakages | none: they do not run | the section "The checks of the fuzz targets" names each program, and says that these checks do not run for it |
+
+The detail of each `not-run` and `plain` result of a program starts with `a program:`. The report writes no line under "What each failure is" for `not run (a program)`. The line of the report that counts the inputs of each fuzz target names no program.
+
 ## Run a binary
 
 Each binary is a static Linux program for riscv64. Run it on a riscv64 machine, or with `qemu-riscv64` on another Linux machine:
@@ -676,8 +810,10 @@ The exit status tells the result ([above](#exit-statuses)).
 * `oss_verifier`: the commit of this repository, and whether `src/`, `infra/`, `seeds/` or the project directory had changes;
 * `builder`: the toolchain image of the builder ([Toolchains](#toolchains)), and the local ids of the builder and project images;
 * `sources`: each git checkout under `$SRC` in the project image, with its commit;
-* `builds` and `fuzz_targets`: what we built, with "each fuzz target" written as a list;
+* `builds` and `fuzz_targets`: what we built, with "each fuzz target" written as a list. For a project with `programs`, `builds` is `[plain]` and `fuzz_targets` is `[]` ([above](#the-manifest-entry-of-a-program));
 * `targets.<target>.builds.<build>`: the `file`, `bytes` and `sha256` of each binary, in the format of the `builds:` section of an oss-fuzz-theorems `harness.yaml`;
+* `targets.<target>.kind`: `program` for a whole program, and no key for a fuzz target;
+* `targets.<target>.link_map`: the `file`, `bytes` and `sha256` of the link map of a program, when its entry in `project.yaml` names one;
 * `layout.<target>.<build>`: the `text_bytes` of each binary (the size of its `.text` section), and `static`, true for a binary with no `PT_INTERP` or `PT_DYNAMIC` program header; a value that `oss-verify check` cannot read is `null`;
 * `rebuild`, only with `--twice`: the second build ([below](#reproducibility));
 * only with `--checks`: `targets.<target>.builds.<build>.uninstrumented`, the files of the toolchain image, and each file of a C library that the build declares ([above](#the-settings-of-one-fuzz-target)), whose code is in the binary (an archive is listed when the linker's map puts at least one input section of its members in a loaded section, so one whose code `--gc-sections` removed is not; a link with no map has no list), in the format of the `uninstrumented` list of a `harness.yaml` build (`name`, `kind`, and `sha256` for a file or `source` for an assembly or Fortran member; `kind` is `libc`, `compiler-rt`, `sanitizer-runtime`, `cxx-runtime`, `fortran-runtime`, `image-library`, `rust-allocator-shim`, `assembly` or `fortran`), and `binary_checks`: LPS as the release names it (`model`: release, repository and commit), the version of qemu (`qemu`), the inputs that each fuzz target ran on, and for each target and build the results of the four checks ([above](#the-checks-of-the-binaries)): `elf`, `system_calls` (with the calls LPS does not cover, the exit status on each input, and the abort stance), `quiet_loud` and `instrumented`. Each has a `result` (`pass`, `fail`, `error`, `stale`, `not-run` or `plain`) and a `detail` that a person reads.
@@ -698,7 +834,7 @@ After the comparison, `uv run oss-verify check --twice` adds the `rebuild` block
 
 * `kind: same-host`, the `host` and the time (`at`, in UTC) of the second build;
 * `builder`, `builds` and `targets` of the second build, in the same format as at the top level of the manifest;
-* `result`: `identical` if each binary has the bytes of the first build, or `differs`.
+* `result`: `identical` if each binary, and each link map of a program, has the bytes of the first build, or `differs` ([above](#the-second-build-of-a-program)).
 
 We pin only binaries that two clean builds reproduce. Thus we pin a binary only from a manifest whose `rebuild` block says `result: identical`. The second build uses the same toolchain. Its local image ids can differ from those of the first build, because Docker records the time of each build.
 
