@@ -621,10 +621,12 @@ class TestProblems:
     @pytest.mark.parametrize("key", ["add", "remove"])
     def test_a_ubsan_item_that_aliases_make_a_large_list(self, key):
         """An item of ubsan_checks.add or remove that is not a string is refused by its type, and validate never turns
-        it into text. Through aliases, the item here, 257 bytes of YAML, holds 531,441 strings, 2.8 MB as text, and
+        it into text. Through aliases, the item here, 303 bytes of YAML, holds 4,782,969 strings, 25 MB as text, and
         each level of about 56 bytes more is 9 times as much: str() of such items made oss-verify validate take 2.3 s
-        and 192 MiB for a project.yaml of 600 bytes."""
-        text = MINIMAL + f"ubsan_checks: {{{key}: [{nested_list(5)}], reason: x}}\n"
+        and 192 MiB for a project.yaml of 600 bytes. The item must be larger than MAX_PEAK as text: with
+        check_ubsan_changes' set(map(str, ...)) put back, this item makes a peak of about 34 MB, and an item of one
+        level less one of 3.8 MB, which MAX_PEAK lets pass."""
+        text = MINIMAL + f"ubsan_checks: {{{key}: [{nested_list(6)}], reason: x}}\n"
         problems, _, summary, peak = traced_check(text)
         assert summary is None
         assert f"ubsan_checks.{key} must be a list of UBSan check names" in problems, problems
