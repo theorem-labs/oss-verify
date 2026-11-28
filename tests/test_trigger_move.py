@@ -3352,9 +3352,12 @@ with open(os.environ["FAKE_PROBE_CALLS"], "a") as calls:
 
     def test_control_prebuilt_row_check_reads_the_table_before_from_the_pull_requests_first_commit(self):
         # The parent of the head of the pull request, not the merge's first parent: there the row already names OLD.
+        # The checkout holds two levels of the history alone, so the change reads that commit from the repository
+        # of the history of HEAD.
         caught = self.row_state_fails(self.in_job(
             "prebuilt", "                earlier=$(git show HEAD^1:infra/toolchains.tsv) ||\n",
-            "                earlier=$(git show HEAD^2^1:infra/toolchains.tsv) ||\n"), "older, set here",
+            '                earlier=$(git -C "$history" show "$head^2^1:infra/toolchains.tsv") ||\n'),
+            "older, set here",
             events=("pull_request",))
         self.assertIn(f"\n  {self.PREBUILT_ROW}, older, set here, pull_request: older", caught)
 
@@ -3378,7 +3381,7 @@ with open(os.environ["FAKE_PROBE_CALLS"], "a") as calls:
 
     def test_control_prebuilt_row_check_without_its_ancestor_check(self):
         caught = self.row_state_fails(self.in_job(
-            "prebuilt", '                if git merge-base --is-ancestor "$commit" HEAD; then\n',
+            "prebuilt", '                if git -C "$history" merge-base --is-ancestor "$commit" "$head"; then\n',
             "                if true; then\n"), "older, tag of another branch")
         self.assertIn(f"\n  {self.PREBUILT_ROW}, older, tag of another branch, push: older", caught)
 
@@ -3413,16 +3416,14 @@ with open(os.environ["FAKE_PROBE_CALLS"], "a") as calls:
                         'from it"; exit 1; }\n', "                  continue\n"), "older, a tag unreadable")
         self.assertIn(f"\n  {self.PREBUILT_ROW}, older, a tag unreadable, push: refuses the row: no tag", caught)
 
-    # The lines of prebuilt's row check that fetch the history of HEAD, and fail unless the checkout then holds all of
-    # it.
-    HISTORY = ('            { [ "$(git rev-parse --is-shallow-repository)" = false ] ||\n'
-               '              git fetch --quiet --no-tags --filter=tree:0 --unshallow origin "$head"; } &&\n'
-               '              [ "$(git rev-parse --is-shallow-repository)" = false ] ||\n')
+    # The fetch of prebuilt's row check that reads the history of HEAD into a repository of its own.
+    HISTORY = '              git -C "$history" fetch --quiet --no-tags --filter=tree:0 origin "$head"; } ||\n'
 
     def test_control_prebuilt_row_check_without_the_history_of_head(self):
-        # The checkout then holds two levels of the history alone, and no commit of a tag, root, is in it.
-        caught = self.row_state_fails(self.in_job("prebuilt", self.HISTORY, "            true ||\n"), "older",
-                                      "older, history unreadable")
+        # The fetch then takes two levels of the history alone, as the checkout holds them, and no commit of a tag,
+        # root, is in it.
+        caught = self.row_state_fails(self.in_job("prebuilt", self.HISTORY, self.HISTORY.replace(
+            "--filter=tree:0 ", "--filter=tree:0 --depth 2 ")), "older", "older, legacy tag")
         self.assertIn(f"\n  {self.PREBUILT_ROW}, older, push: refuses the row: no tag", caught)
 
     # The tables of rows_case (rows_table).

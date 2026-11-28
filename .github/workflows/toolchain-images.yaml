@@ -517,11 +517,11 @@ jobs:
       # yet"), the image made here ("current"), or, in a row that this change did not change, an image that
       # publish-prebuilt published for this row from a commit of the history of HEAD ("older"). The first two states
       # read nothing more. When the row is tested for the older state, the step reads three things, and fails, naming
-      # what it could not read, when it cannot read one: the history of HEAD (commits only, git fetch --filter=tree:0),
-      # the table before this change (the merge's first parent's on pull_request, the table of the commit before the
-      # push on push) and the tags of FP_PACKAGE. It never takes a row that it could not read as unchanged, or an image
-      # whose tag it could not read as published. The repository and the package are public: the fetches and crane read
-      # them with no token.
+      # what it could not read, when it cannot read one: the history of HEAD (commits only, git fetch --filter=tree:0
+      # into a repository of its own), the table before this change (the merge's first parent's on pull_request, the
+      # table of the commit before the push on push) and the tags of FP_PACKAGE. It never takes a row that it could not
+      # read as unchanged, or an image whose tag it could not read as published. The repository and the package are
+      # public: the fetches and crane read them with no token.
       # "Unchanged" alone proves nothing of the image. Toolchain images is not a required check of main (the ruleset
       # 25630254 requires tests, project-builds, enrollment and terms-accepted), so a change whose run of this file
       # failed can merge, and its row then passes as unchanged. Thus the older state also needs a tag of FP_PACKAGE
@@ -573,12 +573,18 @@ jobs:
             state="not derived yet: the image that prebuilt starts from. A build with it compiles its own runtime."
             state+=" After publish-prebuilt publishes \`$want\`, a pull request moves the row to that digest."
           else
-            # The older state. First the whole history of HEAD, commits only: the checkout holds two levels of it. A
-            # tree or a file that a command reads later comes from origin then (a partial clone).
+            # The older state. First the whole history of HEAD, commits only, in a new repository of its own (history),
+            # fetched from the checkout's origin; a tree or a file that a command reads there later comes from origin
+            # then (a partial clone). The checkout, which holds two levels of the history, stays as it is: git 2.56
+            # cannot deepen a shallow checkout of a merge into a partial clone. Its index-pack hands pack-objects the
+            # checkout's objects that the fetched commits link to, and pack-objects dies on a commit behind the shallow
+            # boundary ("BUG: builtin/pack-objects.c:5098: should_include_obj should only be called on existing
+            # objects"). A new repository holds no object to link to, and a fetch with no --depth is not shallow.
             head=$(git rev-parse HEAD)
-            { [ "$(git rev-parse --is-shallow-repository)" = false ] ||
-              git fetch --quiet --no-tags --filter=tree:0 --unshallow origin "$head"; } &&
-              [ "$(git rev-parse --is-shallow-repository)" = false ] ||
+            history=$(mktemp -d "$RUNNER_TEMP/history.XXXXXX")
+            { git init --quiet --bare "$history" &&
+              git -C "$history" remote add origin "$(git remote get-url origin)" &&
+              git -C "$history" fetch --quiet --no-tags --filter=tree:0 origin "$head"; } ||
               { echo "::error::cannot read the history of HEAD, $head, from origin: no tag's commit can be proved an ancestor"; exit 1; }
             case $EVENT in
               pull_request)
@@ -587,8 +593,8 @@ jobs:
                   { echo "::error::cannot read $what: no row of it to compare with"; exit 1; } ;;
               push)
                 what="infra/toolchains.tsv of $BEFORE, the commit before the push"
-                { git fetch --quiet --no-tags --filter=tree:0 origin "$BEFORE" &&
-                  earlier=$(git show "$BEFORE:infra/toolchains.tsv"); } ||
+                { git -C "$history" fetch --quiet --no-tags --filter=tree:0 origin "$BEFORE" &&
+                  earlier=$(git -C "$history" show "$BEFORE:infra/toolchains.tsv"); } ||
                   { echo "::error::cannot read $what: no row of it to compare with"; exit 1; } ;;
               *) echo "::error::the event $EVENT has no infra/toolchains.tsv before it to compare with"; exit 1 ;;
             esac
@@ -609,7 +615,7 @@ jobs:
                 digest=$(crane digest "$FP_PACKAGE:$tag") ||
                   { echo "::error::cannot read the tag $tag of $FP_PACKAGE: no proof of $named from it"; exit 1; }
                 [ "$FP_PACKAGE@$digest" = "$named" ] || continue
-                if git merge-base --is-ancestor "$commit" HEAD; then
+                if git -C "$history" merge-base --is-ancestor "$commit" "$head"; then
                   proved=$tag
                   break 2
                 fi
