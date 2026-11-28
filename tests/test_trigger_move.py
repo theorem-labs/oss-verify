@@ -5532,11 +5532,13 @@ class ReviewThatPasses(Stand):
 
     def test_passes_review_md_says_nothing_the_comment_of_a_pass_must_not_say(self):
         """No text of review.md, which the model reads, says what MUST_NOT_SAY matches or points to a comment of a
-        label (LABEL_COMMENT). And the paragraph of its section "Write the comment" that says what each label of
-        Enroll dispatch means, which is what the comment of a pass says comes next, names the labels as facts and says
-        nothing of who decides: no bullet of that section that names one of those labels holds a word with "decid".
-        Each text is read with each run of white space as one space, so a line break does not split a phrase. This
-        guards the phrases of the three patterns alone, not every way to say the same."""
+        label (LABEL_COMMENT). And what the section "Write the comment" says comes after a review that passes names
+        the labels as facts and says nothing of who decides: no word with "decid" in its bullets from the one under
+        which this commit's check `Enrollment review` has the conclusion `success` through the last one that names a
+        label of Enroll dispatch. Both ends are found by what the bullets say, not by where they stand, so a bullet
+        split in two or one added keeps the same text in the region. Each text is read with each run of white space as
+        one space, so a line break does not split a phrase. This guards the phrases of the three patterns alone, not
+        every way to say the same."""
         raw = (ROOT / "review.md").read_text()
         text = " ".join(raw.split())
         self.assertEqual([m.group(0) for m in self.MUST_NOT_SAY.finditer(text)], [])
@@ -5545,15 +5547,23 @@ class ReviewThatPasses(Stand):
         # space is joined, so that a "##" inside a line ends nothing.
         sections = re.findall(r"(?ms)^## Write the comment\n(.*?)(?=^## |\Z)", raw)
         self.assertEqual(len(sections), 1, "review.md has no one section Write the comment")
-        # The labels that Enroll dispatch puts on, which make the statements wait: the decisions label/<name> that
-        # enroll-dispatch.yml accepts. The paragraph is found by these names, not by the words around them.
+        bullets = [" ".join(b.split()) for b in re.split(r"(?m)^- ", sections[0])]
+        # The region's first bullet: the one for a review that passes, under which this commit has the conclusion
+        # success. (The bullet for a check that fails names success too, as a later commit's conclusion.)
+        passed = [i for i, b in enumerate(bullets) if "this commit has the conclusion `success`" in b]
+        self.assertEqual(len(passed), 1, "no one bullet of the section Write the comment gives this commit the "
+                                         "conclusion `success`")
+        # Its last: the last bullet that names a label that Enroll dispatch puts on, which makes the statements wait,
+        # read from the decisions label/<name> that enroll-dispatch.yml accepts.
         dispatch = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
         labels = set(re.findall(r"\blabel/([a-z][a-z-]*)", dispatch))
         self.assertTrue(labels, "enroll-dispatch.yml accepts no decision label/<name>")
-        bullets = [" ".join(b.split()) for b in re.split(r"(?m)^- ", sections[0])
-                   if any(re.search(rf"(?<![\w-]){re.escape(label)}(?![\w-])", b) for label in labels)]
-        self.assertTrue(bullets, f"no bullet of the section Write the comment names {sorted(labels)}")
-        self.assertEqual([word for b in bullets for word in re.findall(r"\S*decid\S*", b, re.I)], [])
+        named = [i for i, b in enumerate(bullets)
+                 if any(re.search(rf"(?<![\w-]){re.escape(label)}(?![\w-])", b) for label in labels)]
+        self.assertTrue(named and named[-1] >= passed[0],
+                        f"no bullet from the one with the conclusion `success` on names {sorted(labels)}")
+        region = bullets[passed[0]:named[-1] + 1]
+        self.assertEqual([word for b in region for word in re.findall(r"\S*decid\S*", b, re.I)], [])
 
 
 if __name__ == "__main__":
