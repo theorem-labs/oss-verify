@@ -1,11 +1,11 @@
 # mod-host's protocol layer: the command parser, the dispatcher that maps each verb onto a host backend, the scenario
-# reader and the state paths, with the fuzz targets of fuzz/ in FreeMixer's mod-host (its branch freemixer). Pinned to
-# the merge of FreeMixer/mod-host#11. The fuzz targets read each reply from a buffer (fuzz/socket_fuzz.c in place of
+# reader and the state paths, with the fuzz targets of fuzz/ in OpenMixer's mod-host (its branch openmixer). Pinned to
+# the head of that branch. The fuzz targets read each reply from a buffer (fuzz/socket_fuzz.c in place of
 # src/socket.c), keep their scratch files in the working directory, and compare values, each check with its mutant and
 # input records.
-repo: https://github.com/FreeMixer/mod-host#070cfcbeb9628b8c10e4c2095cc64aa4f057df9a
+repo: https://github.com/Open-Mixer/mod-host#49bba8511163ce556b8ed2fa6a8d5a84d0f5a2e2
 primary_contact: linuxnow@gmail.com
-homepage: https://github.com/FreeMixer/mod-host
+homepage: https://github.com/Open-Mixer/mod-host
 language: c
 sanitizers: [address, undefined]
 fuzz_targets:
