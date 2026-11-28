@@ -1,7 +1,7 @@
 /* Copyright 2026 Theorem Labs, PBC
  * SPDX-License-Identifier: Apache-2.0
  *
- * fuzz_preset_oom: a test of fuzz_preset.c and alloc.c of this directory, not a fuzz target that is published. For one
+ * fuzz_preset_oom: a test of omx-clap-core's fuzz/fuzz_preset.c and fuzz/alloc.c, not a fuzz target that is published. For one
  * input it makes the C library's malloc or realloc return NULL at each allocation, in turn, that one call of
  * fuzz_preset makes (the harness's own and, through alloc.c, the reader's), and requires that call to return 0 with no
  * abort each time: memory running out anywhere ends the call as a refusal does.
