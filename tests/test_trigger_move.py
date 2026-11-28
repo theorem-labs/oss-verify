@@ -5532,17 +5532,22 @@ class ReviewThatPasses(Stand):
 
     def test_passes_review_md_says_nothing_the_comment_of_a_pass_must_not_say(self):
         """No text of review.md, which the model reads, says what MUST_NOT_SAY matches or points to a comment of a
-        label (LABEL_COMMENT), and its section "Write the comment", which holds what the comment of a pass says comes
-        next, says nothing of who decides (no word that holds "decid"). It is read with each run of white space
-        as one space, so a line break does not split a phrase. This guards the phrases of the three patterns alone,
-        not every way to say the same."""
-        text = " ".join((ROOT / "review.md").read_text().split())
+        label (LABEL_COMMENT). And the paragraph of its section "Write the comment" that says what a label of Enroll
+        dispatch means, which is what the comment of a pass says comes next, names the labels as facts and says
+        nothing of who decides: no bullet of that section that names a label holds a word with "decid". Each text is
+        read with each run of white space as one space, so a line break does not split a phrase. This guards the
+        phrases of the three patterns alone, not every way to say the same."""
+        raw = (ROOT / "review.md").read_text()
+        text = " ".join(raw.split())
         self.assertEqual([m.group(0) for m in self.MUST_NOT_SAY.finditer(text)], [])
         self.assertEqual([m.group(0) for m in self.LABEL_COMMENT.finditer(text)], [])
-        heading = " ## Write the comment "
-        self.assertEqual(text.count(heading), 1, "review.md has no one section Write the comment")
-        section = text.split(heading, 1)[1].split(" ## ", 1)[0]
-        self.assertEqual(re.findall(r"\S*decid\S*", section, re.I), [])
+        # The section ends at the next heading of its level: a line that starts with "## ", read before the white
+        # space is joined, so that a "##" inside a line ends nothing.
+        sections = re.findall(r"(?ms)^## Write the comment\n(.*?)(?=^## |\Z)", raw)
+        self.assertEqual(len(sections), 1, "review.md has no one section Write the comment")
+        bullets = [" ".join(b.split()) for b in re.split(r"(?m)^- ", sections[0]) if re.search(r"\blabel", b, re.I)]
+        self.assertTrue(bullets, "no bullet of the section Write the comment names a label")
+        self.assertEqual([word for b in bullets for word in re.findall(r"\S*decid\S*", b, re.I)], [])
 
 
 if __name__ == "__main__":

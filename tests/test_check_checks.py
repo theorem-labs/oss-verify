@@ -3453,26 +3453,28 @@ class SessionCache(unittest.TestCase):
                         self.assertEqual(got["session"] != "skipped", runs, got)
 
     # The inputs of the pinned actions/cache/save and actions/cache/restore (v6.1.0) that have a default, and that
-    # default (their action.yml): an input set to its default changes nothing.
+    # default (their action.yml). The actions read an input with its white space trimmed, and an input set to its
+    # default changes nothing.
     CACHE_DEFAULTS = {"enableCrossOsArchive": "false", "fail-on-cache-miss": "false", "lookup-only": "false"}
 
-    def test_the_save_takes_each_input_of_each_restore_but_the_keys(self):
+    def test_the_save_and_each_restore_take_the_same_paths_and_no_other_input_but_their_keys(self):
         """actions/cache finds an entry only under the version that its inputs make (the paths, and
-        enableCrossOsArchive with the compression), and an input of a restore alone, set away from its default,
-        changes what it restores (lookup-only: true restores nothing, fail-on-cache-miss: true fails the gather job
-        before any session was saved). So the save's with:, but its key, is each restore's, but its key and
-        restore-keys, once the inputs set to their defaults are left out: an input added to or dropped from either
-        side fails here."""
-        def inputs(given, keys):
-            return {k: v for k, v in given.items()
-                    if k not in keys and as_text(v).lower() != self.CACHE_DEFAULTS.get(k)}
+        enableCrossOsArchive with the compression). A restore's lookup-only: true restores nothing, and its
+        fail-on-cache-miss: true fails the gather job before any session was saved. So, with each input set to its
+        default left out, the save takes its paths and its key alone, as the deleted test held, and each restore takes
+        the same paths, its key and its restore-keys alone. An input added to or dropped from any of the three fails
+        here, also one added to all three; so does the save's upload-chunk-size, which changes only how it uploads."""
+        def inputs(given):
+            return {k: v for k, v in given.items() if as_text(v).strip().lower() != self.CACHE_DEFAULTS.get(k)}
 
-        saved = inputs(step("session", "Keep it for the next push's review")["with"], ("key",))
-        self.assertIn("path", saved)
+        saved = inputs(step("session", "Keep it for the next push's review")["with"])
+        self.assertEqual(sorted(saved), ["key", "path"])
         for name in ("Restore the last review's session and the head it reviewed",
                      "Restore the last change review's session"):
             with self.subTest(restore=name):
-                self.assertEqual(inputs(step("gather", name)["with"], ("key", "restore-keys")), saved)
+                restored = inputs(step("gather", name)["with"])
+                self.assertEqual(sorted(restored), ["key", "path", "restore-keys"])
+                self.assertEqual(restored["path"], saved["path"])
 
     def test_the_collector_collects_the_session_job(self):
         """When the review job kept a session, the check review jobs asks for the session job: it fails when that job
