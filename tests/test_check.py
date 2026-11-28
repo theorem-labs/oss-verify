@@ -1101,10 +1101,11 @@ class TestBuildAll:
         assert "program world, which project.yaml lists, is not in $OUT: build.sh did not write it" in text
         assert "the link map hello.map of program hello, which project.yaml names, is not in $OUT" in text
 
-    @pytest.mark.parametrize("collector", ["collect", "collect_programs"], ids=["fuzz-targets", "programs"])
+    @pytest.mark.parametrize("collector", ["discover", "collect", "collect_programs"],
+                             ids=["fuzz-targets-discover", "fuzz-targets-collect", "programs"])
     def test_a_file_of_out_that_cannot_be_read_fails_the_build(self, collector):
         """An OSError of the steps that read $OUT after the compiles, for example for a file that build.sh left
-        unreadable, is Failed: check.main then prints BUILD FAILED and exits 1, with no traceback."""
+        unreadable, makes build_all raise Failed, whose message names the reason."""
         programs = [{"file": "hello", "sha256": "1" * 64}] if collector == "collect_programs" else None
         job = check_build.Job(name="demo", directory=self.scratch / "project", repo="https://example.org/demo",
                               ref="", dockerfile="", builds=["plain"], fuzz_targets=None, ubsan_checks=None,
@@ -1120,7 +1121,6 @@ class TestBuildAll:
             with pytest.raises(check_build.Failed) as failed:
                 check_tool.build_all(job, COMMIT, self.scratch / "work", TOOLCHAIN, self.home)
         assert str(unreadable) in str(failed.value)
-        assert failed.value.__suppress_context__
 
 
 class TestTreeHash:

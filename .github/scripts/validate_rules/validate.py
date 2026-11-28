@@ -665,8 +665,9 @@ def check_files(config, files):
         # Counts, not a scan of the list for each name: a series of 64 KiB has more than 20,000 lines.
         for name in sorted(name for name, count in collections.Counter(listed).items() if count > 1):
             yield f"series lists {quoted(name)} more than once"
+        in_series = set(listed)
         for name in patches:
-            if name not in listed:
+            if name not in in_series:
                 yield f"{name} is not listed in series (it says the order patches are applied in)"
     elif patches:
         yield "patches need a series file beside them that lists them, one per line, in the order they are applied"

@@ -215,6 +215,16 @@ def ubsan_settings(job, toolchain):
     return (list(checks), sorted(set(validate.TRAP_EXCEPTIONS) - set(checks)), c_left_out)
 
 
+@contextlib.contextmanager
+def taken_from_out(what):
+    """Raise Failed for an OSError of the block, a read or a copy of a file of $OUT after the compiles: for example of a
+    file that build.sh left unreadable, or of a full disk. The message names `what` the block takes, and the reason."""
+    try:
+        yield
+    except OSError as error:
+        raise Failed(f"{what} cannot be taken from $OUT: {error}") from None
+
+
 def build_programs(job, tag, work, toolchain, home):
     """Compile the plain build of a project that lists programs, and collect them into work/out. build.sh runs in the
     environment of the toolchain image `toolchain` alone (check_build.toolchain_environment). Its entries go to
@@ -232,10 +242,8 @@ def build_programs(job, tag, work, toolchain, home):
     check_build.compile_build(tag, "plain", validate.BUILDS["plain"], raw, labels=check_build.work_label(home),
                               program_env=program_env)
     step("find the programs")
-    try:
+    with taken_from_out("the programs"):
         entries, problems = manifest.collect_programs(raw, job.programs, work / "out")
-    except OSError as error:
-        raise Failed(f"the programs cannot be taken from $OUT: {error}") from None
     if problems:
         raise Failed("\n  ".join(["the programs are not right:", *problems]))
     return [program["file"] for program in job.programs], entries
@@ -273,14 +281,13 @@ def build_all(job, commit, work, toolchain, home, suffix="", no_cache=False, rec
                                   base_layout=base_layout)
 
     step("find the fuzz targets")
-    try:
+    with taken_from_out("the fuzz targets"):
         found = {build: manifest.discover(directory) for build, directory in raw.items()}
-        targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
-        for build, names in found.items():
-            say(f"{build}: {', '.join(names) or 'no fuzz target'}")
+    targets, problems = manifest.resolve_targets(found, job.fuzz_targets)
+    for build, names in found.items():
+        say(f"{build}: {', '.join(names) or 'no fuzz target'}")
+    with taken_from_out("the fuzz targets"):
         entries, missing = manifest.collect(raw, targets, work / "out")
-    except OSError as error:
-        raise Failed(f"the fuzz targets cannot be taken from $OUT: {error}") from None
     if problems or missing:
         raise Failed("\n  ".join(["the fuzz targets are not right:", *problems, *missing]))
     return builder, tag, targets, entries
