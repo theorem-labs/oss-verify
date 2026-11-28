@@ -43,26 +43,47 @@ order they appear here. A commit and a sha256 are the pins of a project's depend
 (a Dockerfile never holds one). The archive rules are those the oss-fuzz-theorems release laid its vendored trees out
 by.
 
-Only https is used. A checksum or commit that does not match stops the build.
+Only https is used. A checksum or commit that does not match stops the build, and the bytes of every try of a download
+are checked against the pin. A download is tried at most 3 times. After a failure that can pass, it waits 5 seconds
+before the second try and 15 seconds before the third, or the seconds that the host's Retry-After asks for, when they
+are at most 60; a longer Retry-After stops the build at once. So the waits of one download are at most 120 seconds. A
+failure that can pass is an answer of 408, 429, 500, 502, 503 or 504, or a connection that is refused, reset, or closed
+before the body that the answer declared. Any other failure stops the build at once: another status, such as 404; a
+certificate the build does not trust; and a timeout, because each try already waits up to 600 seconds for each read.
+The bound counts tries and waits, not time: each try also takes as long as the host takes to answer.
 """
 import fnmatch
 import hashlib
+import http.client
 import io
 import os
 import pathlib
 import re
 import shutil
+import ssl
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
 SRC = pathlib.Path(os.environ.get("SRC", "/src"))
 GIT = ["git", "-c", "credential.helper=", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always"]
 DOWNLOADS = {}
+# The bound of a download's tries, which the docstring above states (tests/test_lay_out_sources_download.py fails when
+# the two differ): the waits before the second and the third try, in seconds;
+WAITS = (5, 15)
+# the statuses that can pass, those that curl --retry tries again (any other answer is final: a 404 says the file is
+# not there, and asking again will not put it there);
+TRANSIENT = {408, 429, 500, 502, 503, 504}
+# the longest wait that a host's Retry-After may ask for;
+LONGEST_WAIT = 60
+# and the seconds each try waits for the host, for the connection and then for each read.
+TIMEOUT = 600
 
 
 class Failed(Exception):
@@ -92,13 +113,47 @@ def download(url, sha256):
     if not url.startswith("https://"):
         raise Failed(f"{url}: only https is used")
     if sha256 not in DOWNLOADS:
-        with urllib.request.urlopen(url, timeout=600) as response:
-            data = response.read()
+        data = fetch(url)
         got = hashlib.sha256(data).hexdigest()
         if got != sha256:
             raise Failed(f"{url}: sha256 {got}, expected {sha256}")
         DOWNLOADS[sha256] = data
     return DOWNLOADS[sha256]
+
+
+def fetch(url):
+    """The body at an https URL, tried as the docstring at the top says: after a failure that can pass (see passing),
+    again after the next of WAITS, or after the seconds of the host's Retry-After when they are at most LONGEST_WAIT. A
+    timeout is not tried again: that try has already waited TIMEOUT seconds for a host that sent nothing, and more tries
+    would only make the build wait longer."""
+    for tries, wait in enumerate((*WAITS, None), 1):
+        try:
+            with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+                return response.read()
+        except (OSError, http.client.HTTPException) as error:
+            failure = f"{url}: {error}"
+            if wait is None or not passing(error):
+                raise Failed(failure + (f" ({tries} tries)" if tries > 1 else "")) from None
+            # A field's value has no whitespace around it (RFC 9110, 5.5), and the seconds are ASCII digits.
+            asked = error.headers.get("Retry-After", "").strip() if isinstance(error, urllib.error.HTTPError) else ""
+            if re.fullmatch("[0-9]+", asked):
+                if int(asked) > LONGEST_WAIT:
+                    raise Failed(f"{failure}, and the host asks for a wait of {asked} seconds, more than the "
+                                 f"{LONGEST_WAIT} this waits") from None
+                wait = int(asked)
+        time.sleep(wait)
+
+
+def passing(error):
+    """Whether a try that failed with `error` may work when made again: the host answered with a status of TRANSIENT,
+    or the connection broke (refused, reset, closed before TLS began, or closed before the whole body that the answer
+    declared, by its Content-Length or its chunks). A body with neither ends where the connection ends, so a cut-short
+    one reaches the pin, which refuses it."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in TRANSIENT
+    if isinstance(error, urllib.error.URLError):
+        error = error.reason
+    return isinstance(error, (ConnectionError, ssl.SSLEOFError, http.client.IncompleteRead))
 
 
 def without_git(source, destination):
