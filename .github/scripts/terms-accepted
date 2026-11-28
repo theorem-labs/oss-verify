@@ -30,9 +30,9 @@ its own. But it needs the adopter's record of the terms when it adopts a seeded 
 projects/<name>/project.yaml that the pull request changes and does not remove, under its new name only, of each
 project that docs/seeded-projects.tsv of the base marks yes in its second column. It loads the text of that file at
 the head and the text of the same path at the base, with load of validate_rules/validate.py, the reader of oss-verify
-validate: at most validate.MAX_CONFIG_BYTES, with yaml.safe_load. YAML reads the same key from many spellings: a
-quoted key, a space before the colon, a flow mapping, a block scalar, an alias. So the program compares the values
-that YAML gives, never the lines of a patch.
+validate: at most validate.MAX_CONFIG_BYTES, with validate.ProjectLoader (yaml's SafeLoader, less merge keys). YAML
+reads the same key from many spellings: a quoted key, a space before the colon, a flow mapping, a block scalar, an
+alias. So the program compares the values that YAML gives, never the lines of a patch.
 
 The addresses that get findings are those that finding_addresses of validate.py gives, as check_addresses of
 oss-verify validate reads them: primary_contact, unless it is n/a, and each address of auto_ccs. The addresses are
@@ -63,8 +63,8 @@ that fails the check. From a fork, the box is then needed.
 
 Each value that the API gives (a description, a file name, the text of a file, a login) is data. The program only
 compares it and prints it. No shell reads it: each argument of gh is a word of its own. The text of a file goes to
-yaml.safe_load only, which makes only plain data and runs no code. A project name goes into an API path only when
-validate.NAME matches it, and the number of the record only when it is digits.
+validate.ProjectLoader only, which makes only plain data, runs no code, and refuses a merge key. A project name goes
+into an API path only when validate.NAME matches it, and the number of the record only when it is digits.
 """
 import json
 import os
