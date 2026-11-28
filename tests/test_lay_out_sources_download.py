@@ -25,7 +25,6 @@ import struct
 import sys
 import threading
 import types
-import urllib.request
 
 import pytest
 from cryptography import x509
@@ -55,12 +54,14 @@ STALL_LIMIT = 30
 
 
 class Host(http.server.ThreadingHTTPServer):
-    """An https server that answers each GET of a path with the next answer planned for it (the last one again once
-    the plan runs out), and counts the GETs of each path."""
+    """An https server (a plain http one without `context`) that answers each GET of a path with the next answer
+    planned for it (the last one again once the plan runs out), and counts the GETs of each path."""
 
-    def __init__(self, context):
+    def __init__(self, context=None):
         super().__init__(("127.0.0.1", 0), Answer)
-        self.socket = context.wrap_socket(self.socket, server_side=True)
+        if context is not None:
+            self.socket = context.wrap_socket(self.socket, server_side=True)
+        self.scheme = "http" if context is None else "https"
         self.lock = threading.Lock()
         self.plans, self.gets = {}, collections.Counter()
 
@@ -68,7 +69,7 @@ class Host(http.server.ThreadingHTTPServer):
         """The URL of a new path that gives `answers`, in turn."""
         path = f"/{name}"
         self.plans[path] = list(answers)
-        return f"https://127.0.0.1:{self.server_address[1]}{path}"
+        return f"{self.scheme}://127.0.0.1:{self.server_address[1]}{path}"
 
 
 class Answer(http.server.BaseHTTPRequestHandler):
@@ -140,8 +141,8 @@ def certificates(directory):
         x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")]))
         .issuer_name(authority_name).public_key(key.public_key()).serial_number(2)
         .not_valid_before(now - datetime.timedelta(days=1)).not_valid_after(now + datetime.timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
-                       critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                                                    x509.DNSName("localhost")]), critical=False)
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(authority_key.public_key()), critical=False)
         .sign(authority_key, hashes.SHA256()))
@@ -159,19 +160,27 @@ def tls(tmp_path_factory):
     return certificates(tmp_path_factory.mktemp("tls"))
 
 
-@pytest.fixture(scope="module")
-def host(tls):
-    served = Host(tls[1])
+def serve(served):
     threading.Thread(target=served.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
     yield served
     served.shutdown()
     served.server_close()
 
 
+@pytest.fixture(scope="module")
+def host(tls):
+    yield from serve(Host(tls[1]))
+
+
+@pytest.fixture(scope="module")
+def plain_host():
+    yield from serve(Host())
+
+
 class TestDownload:
     @pytest.fixture(autouse=True)
-    def set_up(self, tmp_path, tls, host):
-        self.top, self.trusted, self.host = tmp_path, tls[0], host
+    def set_up(self, tmp_path, tls, host, plain_host):
+        self.top, self.trusted, self.host, self.plain_host = tmp_path, tls[0], host, plain_host
         self.sources = tmp_path / "sources"
 
     def lay_out(self, url, timeout=None, trusted=True):
@@ -190,14 +199,16 @@ class TestDownload:
                 patch.setenv("SSL_CERT_FILE", str(self.trusted))
             else:
                 patch.delenv("SSL_CERT_FILE", raising=False)
-            # urlopen makes its opener, and with it the TLS context and the certificates it trusts, at its first call
-            # in a process, as a build does once. Each run here gets a new one, so it reads SSL_CERT_FILE as a build
-            # would, whatever called urlopen before it in this process.
-            patch.setattr(urllib.request, "_opener", None)
+            # lay-out-sources makes its opener, and with it the TLS context and the certificates it trusts, at its
+            # first download, as a build does once. Each run here gets a new one, so it reads SSL_CERT_FILE as a
+            # build would.
+            lay_out_sources.opener.cache_clear()
             try:
                 lay_out_sources.main()
             except SystemExit as stopped:
                 return str(stopped.code), slept
+            finally:
+                lay_out_sources.opener.cache_clear()
         assert (self.top / "root" / "out.c").read_bytes() == BODY
         return None, slept
 
@@ -316,6 +327,22 @@ class TestDownload:
         assert slept == []
 
     # What is not a passing failure stops the build at once, and the pin still refuses every other byte.
+
+    def test_a_redirect_to_http_stops_the_build_at_once(self):
+        # The http host would serve the pinned file: urllib's own redirects followed this one and laid it out.
+        plain = self.plain_host.plan("plain", OK)
+        url = self.host.plan("to-http", ("send", 302, "Found", b"", {"Location": plain}))
+        assert self.lay_out(url) == (self.stop(url, f"redirected to {plain}, which is not https: only https is used"),
+                                     [])
+        assert (self.gets(url), self.plain_host.gets["/plain"]) == (1, 0)
+
+    def test_a_redirect_to_https_on_another_host_is_followed(self):
+        # As github.com sends a release asset's download to release-assets.githubusercontent.com. The pin checks the
+        # bytes wherever they come from.
+        moved = self.host.plan("moved", OK).replace("127.0.0.1", "localhost")
+        url = self.host.plan("to-another-host", ("send", 302, "Found", b"", {"Location": moved}))
+        assert self.lay_out(url) == (None, [])
+        assert (self.gets(url), self.host.gets["/moved"]) == (1, 1)
 
     def test_a_404_stops_the_build_at_once(self):
         url = self.host.plan("missing", MISSING, OK)

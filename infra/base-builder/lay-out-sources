@@ -43,16 +43,19 @@ order they appear here. A commit and a sha256 are the pins of a project's depend
 (a Dockerfile never holds one). The archive rules are those the oss-fuzz-theorems release laid its vendored trees out
 by.
 
-Only https is used. A checksum or commit that does not match stops the build, and the bytes of every try of a download
-are checked against the pin. A download is tried at most 3 times. After a failure that can pass, it waits 5 seconds
-before the second try and 15 seconds before the third, or the seconds that the host's Retry-After asks for, when they
-are at most 60; a longer Retry-After stops the build at once. So the waits of one download are at most 120 seconds. A
-failure that can pass is an answer of 408, 429, 500, 502, 503 or 504, or a connection that is refused, reset, or closed
-before the body that the answer declared. Any other failure stops the build at once: another status, such as 404; a
-certificate the build does not trust; and a timeout, because each try already waits up to 600 seconds for each read.
-The bound counts tries and waits, not time: each try also takes as long as the host takes to answer.
+Only https is used. A download follows a redirect to an https URL on any host, since the pin checks the bytes wherever
+they come from; a redirect to any other URL, http among them, stops the build at once. A checksum or commit that does
+not match stops the build, and the bytes of every try of a download are checked against the pin. A download is tried
+at most 3 times. After a failure that can pass, it waits 5 seconds before the second try and 15 seconds before the
+third, or the seconds that the host's Retry-After asks for, when they are at most 60; a longer Retry-After stops the
+build at once. So the waits of one download are at most 120 seconds. A failure that can pass is an answer of 408, 429,
+500, 502, 503 or 504, or a connection that is refused, reset, or closed before the body that the answer declared. Any
+other failure stops the build at once: another status, such as 404; a certificate the build does not trust; and a
+timeout, because each try already waits up to 600 seconds for each read. The bound counts tries and waits, not time:
+each try also takes as long as the host takes to answer.
 """
 import fnmatch
+import functools
 import hashlib
 import http.client
 import io
@@ -68,6 +71,7 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -121,6 +125,24 @@ def download(url, sha256):
     return DOWNLOADS[sha256]
 
 
+class HttpsOnly(urllib.request.HTTPRedirectHandler):
+    """urllib's redirects, to https URLs alone: its own handler follows a redirect to http too, and then the bytes come
+    in plain text. The pin would still refuse other bytes; the docstring's "only https" would be false."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            fp.close()
+            raise Failed(f"{req.full_url}: redirected to {newurl}, which is not https: only https is used")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+@functools.cache
+def opener():
+    """The opener of every download, made at the first one, as urlopen makes its own: its TLS context takes the
+    certificates that the build trusts at that moment."""
+    return urllib.request.build_opener(HttpsOnly)
+
+
 def fetch(url):
     """The body at an https URL, tried as the docstring at the top says: after a failure that can pass (see passing),
     again after the next of WAITS, or after the seconds of the host's Retry-After when they are at most LONGEST_WAIT. A
@@ -128,7 +150,7 @@ def fetch(url):
     would only make the build wait longer."""
     for tries, wait in enumerate((*WAITS, None), 1):
         try:
-            with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
+            with opener().open(url, timeout=TIMEOUT) as response:
                 return response.read()
         except (OSError, http.client.HTTPException) as error:
             failure = f"{url}: {error}"
