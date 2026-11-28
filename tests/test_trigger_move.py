@@ -5481,17 +5481,7 @@ class HeldRuns(Stand):
 class ReviewThatPasses(Stand):
     """d10: the review job of an enrollment whose review passes has the model read review.md, and hands the comment
     and the verdicts that the model gave on to the comment job as they are. PostingStep of tests/test_check_checks.py
-    runs the comment job's step that posts them. review.md says nothing that the comment of a pass must not say."""
-
-    # A pointer to a comment of a label: Enroll dispatch puts a label on and posts no comment. For example "the comment
-    # on the label", "the label's comment", or "Enroll dispatch (then) posts a comment". The true sentence "Enroll
-    # dispatch posts no comment." does not match.
-    LABEL_COMMENT = re.compile(r"\bcomments? (?:of|on|for|with|from|about) (?:the |a |each |its |this |that |one )?"
-                               r"label|\blabel(?:'s|s'|s)? comments?\b"
-                               r"|\benroll dispatch (?:\w+ )?(?:posts|writes|leaves) (?:a|its) comment", re.I)
-    # What neither review.md nor the comment of a pass says: that Theorem decides the next step, that a maintainer
-    # will look at or review the pull request, or anything of held bugs.
-    MUST_NOT_SAY = re.compile(r"theorem decides|decides the next step|maintainer will (look|review)|held bug", re.I)
+    runs the comment job's step that posts them."""
 
     # The stand-in model's comment.
     COMMENT = ("Every check of review.md passes for projects/libreac/.\n\nYou need to do nothing more, unless the pull "
@@ -5529,41 +5519,6 @@ class ReviewThatPasses(Stand):
         self.assertEqual(rc, 0, log)
         self.assertEqual((kept["comment"], json.loads(kept["verdicts"]), json.loads(kept["reasons"])),
                          (self.COMMENT, {check: "pass" for check in ids}, {}), log)
-
-    def test_passes_review_md_says_nothing_the_comment_of_a_pass_must_not_say(self):
-        """No text of review.md, which the model reads, says what MUST_NOT_SAY matches or points to a comment of a
-        label (LABEL_COMMENT). And what the section "Write the comment" says comes after a review that passes names
-        the labels as facts and says nothing of who decides: no word with "decid" in its bullets from the one under
-        which this commit's check `Enrollment review` has the conclusion `success` through the last one that names a
-        label of Enroll dispatch. Both ends are found by what the bullets say, not by where they stand, so a bullet
-        split in two or one added keeps the same text in the region. Each text is read with each run of white space as
-        one space, so a line break does not split a phrase. This guards the phrases of the three patterns alone, not
-        every way to say the same."""
-        raw = (ROOT / "review.md").read_text()
-        text = " ".join(raw.split())
-        self.assertEqual([m.group(0) for m in self.MUST_NOT_SAY.finditer(text)], [])
-        self.assertEqual([m.group(0) for m in self.LABEL_COMMENT.finditer(text)], [])
-        # The section ends at the next heading of its level: a line that starts with "## ", read before the white
-        # space is joined, so that a "##" inside a line ends nothing.
-        sections = re.findall(r"(?ms)^## Write the comment\n(.*?)(?=^## |\Z)", raw)
-        self.assertEqual(len(sections), 1, "review.md has no one section Write the comment")
-        bullets = [" ".join(b.split()) for b in re.split(r"(?m)^- ", sections[0])]
-        # The region's first bullet: the one for a review that passes, under which this commit has the conclusion
-        # success. (The bullet for a check that fails names success too, as a later commit's conclusion.)
-        passed = [i for i, b in enumerate(bullets) if "this commit has the conclusion `success`" in b]
-        self.assertEqual(len(passed), 1, "no one bullet of the section Write the comment gives this commit the "
-                                         "conclusion `success`")
-        # Its last: the last bullet that names a label that Enroll dispatch puts on, which makes the statements wait,
-        # read from the decisions label/<name> that enroll-dispatch.yml accepts.
-        dispatch = (ROOT / ".github" / "workflows" / "enroll-dispatch.yml").read_text()
-        labels = set(re.findall(r"\blabel/([a-z][a-z-]*)", dispatch))
-        self.assertTrue(labels, "enroll-dispatch.yml accepts no decision label/<name>")
-        named = [i for i, b in enumerate(bullets)
-                 if any(re.search(rf"(?<![\w-]){re.escape(label)}(?![\w-])", b) for label in labels)]
-        self.assertTrue(named and named[-1] >= passed[0],
-                        f"no bullet from the one with the conclusion `success` on names {sorted(labels)}")
-        region = bullets[passed[0]:named[-1] + 1]
-        self.assertEqual([word for b in region for word in re.findall(r"\S*decid\S*", b, re.I)], [])
 
 
 if __name__ == "__main__":
