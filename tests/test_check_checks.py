@@ -3453,8 +3453,8 @@ class SessionCache(unittest.TestCase):
                         self.assertEqual(got["session"] != "skipped", runs, got)
 
     # The inputs of the pinned actions/cache/save and actions/cache/restore (v6.1.0) that have a default, and that
-    # default (their action.yml). The actions read an input with its white space trimmed, and an input set to its
-    # default changes nothing.
+    # default (their action.yml). GitHub evaluates an input's expressions before the action reads it, and the action
+    # reads it with its white space trimmed; an input set to its default changes nothing.
     CACHE_DEFAULTS = {"enableCrossOsArchive": "false", "fail-on-cache-miss": "false", "lookup-only": "false"}
 
     def test_the_save_and_each_restore_take_the_same_paths_and_no_other_input_but_their_keys(self):
@@ -3463,9 +3463,15 @@ class SessionCache(unittest.TestCase):
         fail-on-cache-miss: true fails the gather job before any session was saved. So, with each input set to its
         default left out, the save takes its paths and its key alone, as the deleted test held, and each restore takes
         the same paths, its key and its restore-keys alone. An input added to or dropped from any of the three fails
-        here, also one added to all three; so does the save's upload-chunk-size, which changes only how it uploads."""
+        here, also one added to all three; so does the save's upload-chunk-size, which changes only how it uploads.
+        An input whose expression reads a context is kept: this test cannot tell its value."""
+        def default(name, value):
+            text = as_text(value)
+            return "${{" not in re.sub(r"\$\{\{\s*(true|false)\s*\}\}", "", text) and \
+                interpolated(text, {}).strip().lower() == self.CACHE_DEFAULTS.get(name)
+
         def inputs(given):
-            return {k: v for k, v in given.items() if as_text(v).strip().lower() != self.CACHE_DEFAULTS.get(k)}
+            return {k: v for k, v in given.items() if not default(k, v)}
 
         saved = inputs(step("session", "Keep it for the next push's review")["with"])
         self.assertEqual(sorted(saved), ["key", "path"])
