@@ -11,9 +11,8 @@ import os
 import pathlib
 import subprocess
 import sys
-import tempfile
-import unittest
-from unittest import mock
+
+import pytest
 
 TESTS = pathlib.Path(__file__).resolve().parent
 LOADER = importlib.machinery.SourceFileLoader(
@@ -43,11 +42,10 @@ THROUGH_A_LINK = ("--- a/out/one.c\n+++ b/out/one.c\n@@ -1 +1 @@\n-int one(void)
                   "+int one(void) { return 9; }\n")
 
 
-class PatchDirective(unittest.TestCase):
-    def setUp(self):
-        d = tempfile.TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        self.top = pathlib.Path(d.name)
+class TestPatchDirective:
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.top = tmp_path
         self.root = self.top / "work"
         self.project = self.top / "project"
         self.project.mkdir()
@@ -62,13 +60,14 @@ class PatchDirective(unittest.TestCase):
         (self.project / "series").write_text("demo.patch\n")
         sources = self.project / "sources"
         sources.write_text("patch\text/demo/src\tdemo.patch\n")
-        with mock.patch.object(sys, "argv", ["lay-out-sources", str(sources), str(self.root)]):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(sys, "argv", ["lay-out-sources", str(sources), str(self.root)])
             lay_out_sources.main()
 
     def refused(self, text):
-        with self.assertRaises(SystemExit) as stopped:
+        with pytest.raises(SystemExit) as stopped:
             self.lay_out(text)
-        return str(stopped.exception.code)
+        return str(stopped.value.code)
 
     def test_a_patch_row_written_with_spaces_is_refused_by_its_line(self):
         """A row's fields are separated by tabs. A row with none ended the build with a ValueError traceback that
@@ -77,61 +76,61 @@ class PatchDirective(unittest.TestCase):
         (self.project / "series").write_text("demo.patch\n")
         sources = self.project / "sources"
         sources.write_text("# the demo patch\npatch ext/demo/src demo.patch\n")
-        with mock.patch.object(sys, "argv", ["lay-out-sources", str(sources), str(self.root)]), \
-                self.assertRaises(SystemExit) as stopped:
-            lay_out_sources.main()
-        self.assertEqual(str(stopped.exception.code),
-                         f"lay-out-sources: {sources}:2: not a directive this tool knows, with these fields: "
-                         "'patch ext/demo/src demo.patch'")
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(sys, "argv", ["lay-out-sources", str(sources), str(self.root)])
+            with pytest.raises(SystemExit) as stopped:
+                lay_out_sources.main()
+        assert str(stopped.value.code) == (f"lay-out-sources: {sources}:2: not a directive this tool knows, with "
+                                           "these fields: 'patch ext/demo/src demo.patch'")
 
     def test_a_patch_of_regular_files_applies(self):
         self.lay_out(EDIT)
-        self.assertEqual((self.tree / "one.c").read_text(), "int one(void) { return 2; }\n")
+        assert (self.tree / "one.c").read_text() == "int one(void) { return 2; }\n"
 
     def test_a_patch_may_add_and_delete_a_file(self):
         self.lay_out(ADD_AND_DELETE)
-        self.assertEqual((self.tree / "two.c").read_text(), "int two;\n")
-        self.assertFalse(os.path.lexists(self.tree / "one.c"))
+        assert (self.tree / "two.c").read_text() == "int two;\n"
+        assert not os.path.lexists(self.tree / "one.c")
 
     def test_a_patch_may_make_a_file_executable(self):
         self.lay_out(EXECUTABLE)
-        self.assertTrue(os.access(self.tree / "one.c", os.X_OK))
+        assert os.access(self.tree / "one.c", os.X_OK)
 
-    def test_a_patch_cannot_make_a_symbolic_link(self):
+    @pytest.mark.parametrize("text, name", [pytest.param(TYPECHANGE, "one.c", id="TYPECHANGE"),
+                                            pytest.param(TO_LINK, "one.c", id="TO_LINK"),
+                                            pytest.param(RENAME_TO_LINK, "two.c", id="RENAME_TO_LINK")])
+    def test_a_patch_cannot_make_a_symbolic_link(self, text, name):
         """Under core.symlinks=false git writes a link a patch makes as a regular file holding the text of its
         target, so nothing out of the tree is readable through the laid-out file. git refuses some of these forms
         by itself; either way, no link is made."""
-        for text, name in ((TYPECHANGE, "one.c"), (TO_LINK, "one.c"), (RENAME_TO_LINK, "two.c")):
-            with self.subTest(text=text):
-                try:
-                    self.lay_out(text)
-                except SystemExit as stopped:
-                    self.assertIn("demo.patch", str(stopped.code))
-                made = self.tree / name
-                self.assertFalse(made.is_symlink())
-                if made.exists():
-                    self.assertNotEqual(made.read_text(), pathlib.Path("/etc/hostname").read_text())
-                self.setUp()
+        try:
+            self.lay_out(text)
+        except SystemExit as stopped:
+            assert "demo.patch" in str(stopped.code)
+        made = self.tree / name
+        assert not made.is_symlink()
+        if made.exists():
+            assert made.read_text() != pathlib.Path("/etc/hostname").read_text()
 
     def test_a_link_a_patch_makes_is_a_regular_file_holding_its_target(self):
         """The delete-then-add-as-link patch, the form git diff writes when a file becomes a link: the laid-out
         file is a regular file whose text is the target's path, not the machine's /etc/hostname."""
         self.lay_out(TYPECHANGE)
-        self.assertFalse((self.tree / "one.c").is_symlink())
-        self.assertEqual((self.tree / "one.c").read_text(), "/etc/hostname")
+        assert not (self.tree / "one.c").is_symlink()
+        assert (self.tree / "one.c").read_text() == "/etc/hostname"
 
     def test_a_patch_with_a_path_out_of_the_tree_is_refused(self):
-        self.assertIn("demo.patch", self.refused(UP))
-        self.assertFalse(os.path.lexists(self.tree.parent / "one.c"))
-        self.assertEqual((self.tree / "one.c").read_text(), ONE)
+        assert "demo.patch" in self.refused(UP)
+        assert not os.path.lexists(self.tree.parent / "one.c")
+        assert (self.tree / "one.c").read_text() == ONE
 
     def test_a_patch_that_writes_through_a_link_already_in_the_tree_is_refused(self):
         outside = self.top / "outside"
         outside.mkdir()
         (outside / "one.c").write_text(ONE)
         (self.tree / "out").symlink_to(outside)
-        self.assertIn("demo.patch", self.refused(THROUGH_A_LINK))
-        self.assertEqual((outside / "one.c").read_text(), ONE)
+        assert "demo.patch" in self.refused(THROUGH_A_LINK)
+        assert (outside / "one.c").read_text() == ONE
 
     def configuration(self, repository):
         """What git reads as the configuration of the repository at `repository`: its own file, and the value of
@@ -141,19 +140,18 @@ class PatchDirective(unittest.TestCase):
         symlinks = subprocess.run(["git", "config", "core.symlinks"], cwd=repository, capture_output=True, text=True)
         return local, symlinks.returncode, symlinks.stdout
 
-    def test_the_apply_leaves_the_configuration_of_a_repository_as_it_was(self):
+    # Each its own test, so each has a fresh tree from set_up, whatever the one before it left.
+    @pytest.mark.parametrize("where", ["tree", "top"])
+    def test_the_apply_leaves_the_configuration_of_a_repository_as_it_was(self, where):
         """core.symlinks=false is for the apply alone: in a clone's config it would make git write the real
         symbolic links of that working tree as files of text. A tree that is a repository, and a tree below one,
         take the patch and keep their configuration."""
-        for where in ("tree", "top"):
-            with self.subTest(repository=where):
-                self.setUp()  # a fresh tree for each, whatever the one before it left
-                repository = getattr(self, where)
-                subprocess.run(["git", "init", "-q", "."], cwd=repository, check=True)
-                before = self.configuration(repository)
-                self.lay_out(EDIT)
-                self.assertEqual((self.tree / "one.c").read_text(), "int one(void) { return 2; }\n")
-                self.assertEqual(self.configuration(repository), before)
+        repository = getattr(self, where)
+        subprocess.run(["git", "init", "-q", "."], cwd=repository, check=True)
+        before = self.configuration(repository)
+        self.lay_out(EDIT)
+        assert (self.tree / "one.c").read_text() == "int one(void) { return 2; }\n"
+        assert self.configuration(repository) == before
 
     def test_a_repository_above_the_tree_does_not_take_the_patch(self):
         """Why the apply passes GIT_CEILING_DIRECTORIES: inside a repository, git apply reads the paths of a patch
@@ -161,9 +159,5 @@ class PatchDirective(unittest.TestCase):
         0."""
         subprocess.run(["git", "init", "-q", "."], cwd=self.top, check=True)
         self.lay_out(ADD_AND_DELETE)
-        self.assertEqual((self.tree / "two.c").read_text(), "int two;\n")
-        self.assertFalse(os.path.lexists(self.tree / "one.c"))
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert (self.tree / "two.c").read_text() == "int two;\n"
+        assert not os.path.lexists(self.tree / "one.c")

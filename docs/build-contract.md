@@ -36,7 +36,7 @@ The statements use [Linux Process Semantics (LPS)](https://github.com/theorem-la
 
 A new toolchain image changes the bytes of each binary that it builds, and a proof is about specified bytes. Thus each project is built with one toolchain image, its vintage.
 
-* [infra/toolchains.tsv](../infra/toolchains.tsv) lists the published toolchain images, oldest first, and the languages that each one builds ([project-yaml.md](project-yaml.md#language)). Today it lists four images: the C and C++ image above, and the Rust, Python and Go toolchains of the same release. We add a new image only after its publication. Outside `projects/`, no other file names the digest of a toolchain image.
+* [infra/toolchains.tsv](../infra/toolchains.tsv) lists the published toolchain images, oldest first, and the languages that each one builds ([project-yaml.md](project-yaml.md#language)). Today it lists five images: the C and C++ image above, the Rust, Python and Go toolchains of the same release, and the Python toolchain with the prebuilt CPython runtime ([below](#the-prebuilt-cpython-runtime)), which is the newest row for `python` and so the image that a Python project is built with. We add a new image only after its publication. Outside `projects/`, no other file names the digest of a toolchain image.
 * The builder gets the toolchain image as a build argument (`--build-arg TOOLCHAIN=<image>`). Its `Dockerfile` has no default, so a build without the argument fails.
 * `uv run oss-verify check --lock` builds with the toolchain that the lock names. For a manifest, this is `builder.toolchain`. For a `harness.yaml` of oss-fuzz-theorems, it is the `build.builder` field of the `project.yaml` two directories above.
 * If you give more than one lock, the locks must name the same toolchain.
@@ -62,7 +62,7 @@ In infra/toolchains.tsv, the row of a toolchain image with frame pointers has th
 
 On a toolchain image with frame pointers, the code that the link takes from the toolchain image has the same bytes as in the base image. This code is the C library, compiler-rt, the C++ library, the AddressSanitizer runtime and the other libraries of the sysroot. Thus it keeps the frame records that it has in the base image, and it gets no new ones.
 
-A calling function has a `jal` or a `jalr` that writes `ra`. A calling function keeps a frame record when an `addi s0, sp, N` comes before its first call. In the base image of the row `oss-fuzz-theorems-2026.10`, the `probe` job of the workflow counted these functions:
+A calling function has a `jal` or a `jalr` that writes `ra`. A calling function keeps a frame record when an `addi s0, sp, N` comes before its first call. In the base image of the row `oss-fuzz-theorems-2026.10`, the probes of the workflow counted these functions:
 
 * the C library, `/opt/musl-sysroot/usr/lib/libc.a`: 9 of 1,153 calling functions keep a frame record;
 * the C++ library, `/opt/musl-sysroot/usr/lib/libc++.a`: 5 of 1,853 calling functions keep a frame record;
@@ -73,7 +73,44 @@ To count them, do these steps in the root of this repository:
 1. Build the builder from the base image: `docker build --build-arg TOOLCHAIN=<image> -t <tag> infra/base-builder`. `<image>` is the image of the row `oss-fuzz-theorems-2026.10` in [infra/toolchains.tsv](../infra/toolchains.tsv).
 2. Run `docker run --rm --network=none --entrypoint python3 -v "$PWD/.github/scripts/frame-pointers:/fp:ro" <tag> /fp/frames.py count <archive>…`. Each `<archive>` is a path in the builder, for example `/opt/musl-sysroot/usr/lib/libc.a`.
 
-The builder does not hold `frames.py`, so step 2 mounts it from this repository. The `probe` job does these steps, and prints the count of each archive again on each run.
+The builder does not hold `frames.py`, so step 2 mounts it from this repository. The `make` job does these steps after it makes the image, and prints the count of each archive again on each run.
+
+### The prebuilt CPython runtime
+
+Each build of a Python project compiles CPython with the compiler and flags of that build, as a library: the runtime ([python/runtime.sh](../infra/base-builder/python/runtime.sh)). On one toolchain image, the runtime of a build has the same bytes in each Python project, and its compilation is most of the time of the four builds. Thus a toolchain image that is derived from a Python toolchain image can hold the runtime of each of the four builds, compiled one time.
+
+The runtime is addressed by its inputs, and its build reads no other input. The build compiles the runtime in an environment of its own (`oft_py_hermetic`), the same where the derived image is made and in a build of a project:
+
+* no environment variable but six of the build's (`CC`, `CXX`, `CFLAGS`, `PKG_CONFIG_LIBDIR`, `PKG_CONFIG_PATH` and `SOURCE_DATE_EPOCH`) and these: `PATH` (the compiler shims in `/tmp/shim`, then `/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin` and `/bin`), `HOME` and `TMPDIR` in the new build directory of the runtime, `CONFIG_SITE` empty, `PYTHONNOUSERSITE=1` and `PYTHONDONTWRITEBYTECODE=1`;
+* the build directory of the runtime as the working directory, and a shell that reads `runtime.sh` again;
+* in a build that runs as root, the user `nobody`, who owns the build directory and, while it builds, the records directory of `compile`, and can write no other file of the image. The patched source tree is read-only to it, and the build fails if that tree changed;
+* a read boundary (`oft_py_boundary`): while the runtime builds, each path that the key leaves out (below) goes to root with no access for its group and others, but what the build needs there (the patched source tree, through `/src/repo`, its build directory, the records directory, `runtime.sh` and `record-compile`) and the paths that it leaves open: the kernel's (`/proc`, `/sys`, `/dev`), which the build reads as every program does, and what the host mounts (`/out`, `/ov-base-layout`, Docker's init), whose mode the container must not change. Those are what Nix's sandbox, too, gives a build. So the build cannot read a closed file even when a value that it gets, such as `CFLAGS`, names it; and it takes no input from the open paths, since the key holds every name that it gets, and none of the shipped build's names is under them. Before it gives the paths back, the boundary stops each process of `nobody` in the build's container, where nothing else runs as that user. It reaches each path from `/` one directory at a time, follows no link, enters no mount point under a grant and refuses a grant that is one; it gives back each path that it can, and the build fails, naming each path that is not as it was. A mount namespace, as Nix's sandbox uses, would hide those paths instead, but a build's container may not make one (`unshare -m` fails there with "Operation not permitted");
+* `-I` on each run of the native Python, but where CPython's `make` runs it for the cross build, with `PYTHONPATH`, which `-I` would ignore.
+
+Before a build compiles the runtime, it computes the inputs, one on each line (`oft_py_runtime_inputs`):
+
+* the build, the arguments of `configure` (`CC` and `CFLAGS` too), and the targets of `make`;
+* that environment, and the user;
+* the SHA-256 of the CPython tarball, the patches, `Setup.local`, the native Python, and the scripts that the build of the runtime runs, or that write what it reads: `runtime.sh`, `patches/apply.py`, `release-target.sh`, `toolchain.sh`, `compile` and `record-compile`;
+* the SHA-256 of the package database;
+* the mode and owner of each file of those lines, of each directory above them, above the patched source tree and `/src/repo`, and of `/` and the directories that the tree lines split; and of each compiler shim, the read and run bits of the file that the build runs and of the file that holds its text (`oft_py_runtime_inputs`'s `meta` lines): what `nobody` may read, run and reach;
+* each path that the key leaves out, one `excluded` line each: the paths that the read boundary leaves open (`/proc`, `/sys`, `/dev`, `/out`, `/ov-base-layout`, `/sbin/docker-init`); what Docker writes in each container (`/run`, `/etc/hostname`, `/etc/hosts`, `/etc/resolv.conf`, `/.dockerenv`); the scratch of `compile` in `/tmp/ov`, the project's sources in `/src`, the build's own `/work`, caches (`/root/.cache`, `/var/tmp`, `/var/cache`), the shipped runtimes, the builder's scripts in `/usr/local/lib/oss-verify`, the Java keystore (each build of the builder writes it anew, with random salts), and the install prefix of each target in `/opt/oft`. `runtime.sh` gives the reason for each (`oft_py_fs_left_out`). The read boundary closes them all to the build but the open ones;
+* what the build does read under those paths, each on its own line: the four compiler shims that `release-target.sh` writes in `/tmp/shim`, as `shim <name> as release-target.sh writes it, for no target <SHA-256>` when each is the text that `release-target.sh` writes for the layout of the build's own targets in `build/lib/<flav>`, all with plain names (letters, digits and `. _ + -`), behind the front of `record-compile` with `--checks`, with the SHA-256 of the text that it writes for a layout of no target: all that the shim's text depends on but the targets' names, whose path pairs the build of the runtime never meets (`OV_PATH_REWRITE=off`, set unexported in a target's block, changes it); a shim of any other text, or of a target whose name is not plain, by its own SHA-256; and the link `/src/repo`, through which the build reads its source tree;
+* the SHA-256 of the content of the patched CPython source tree, of each entry of `/`, and of `/usr`, `/opt`, `/var` and `/tmp` (the rest of `/tmp/shim`, the sealed AddressSanitizer configuration and its wrap list among them), but those paths: the path, the type, the bytes of each file or the target of each link, and the mode and owner of each entry but a link, which decide what `nobody` may read and run, not its time; then of what each link of those leads to under a path left out (a link of `/usr/bin` to a tool under `/work`, say), but into the container's own paths and the Java keystore, which only Java reads, through its link too. A project whose `Dockerfile` changes any other file compiles its own runtime. The native Python hashes the files in a process pool, with one process for each processor that the build may run on.
+
+The key is the SHA-256 of these lines. Each build of a Python project computes its key, on each toolchain image, and writes it with the time that it took:
+
+    oft-py: runtime <flav>: key <the first 12 hex digits of the key> in <seconds> s
+
+The key reads `runtime.sh`, `release-target.sh` and the other scripts by their bytes, and assumes that the build runs their functions as those files define them where the key runs them (`oft_py_configure`, and the layout's functions of `release-target.sh`): a `build.sh` that defines one of them again, after it sources them, is not seen. The build of the runtime itself runs in a shell that reads `runtime.sh` again.
+
+The derived image holds the runtime of each build in `/opt/oft-py/prebuilt/<flav>-<key>/`: the files of the runtime, the compile records of its build, and its manifest. The manifest has the lines, the key, and the digest of the toolchain image that the runtime was made from. A build takes the runtime only when the directory of its own key is there and the lines of its manifest are the lines of the build. Then the build writes:
+
+    oft-py: runtime <flav>: took the shipped runtime (/opt/oft-py/prebuilt/<flav>-<key>); ran no CPython configure or make
+
+With `--checks`, the build also takes the compile records of the runtime. Thus the checks of the binaries get the same records as when the build compiles the runtime ([below](#the-checks-of-the-binaries)). In all other cases, the build compiles its runtime in the same environment, with the same commands. Before it does, it writes one line: the inputs cannot be read, the toolchain image ships no runtime, or the first input where the shipped runtime and the build differ. For example, a project whose `Dockerfile` installs a package, or sets `PKG_CONFIG_PATH`, compiles its own runtime; one that sets another environment variable takes the shipped runtime, since the build of the runtime does not see that variable.
+
+[.github/scripts/python-runtime/make](../.github/scripts/python-runtime/make) makes the derived image. It compiles the four runtimes in the builder of the toolchain image, and adds them to the toolchain image in one layer. [.github/workflows/toolchain-images.yaml](../.github/workflows/toolchain-images.yaml) makes the derived image of the Python row and of its frame-pointer image, and [.github/workflows/toolchain-images-publish.yaml](../.github/workflows/toolchain-images-publish.yaml) publishes them after a push to main. The row `oss-fuzz-theorems-2026.10-python-prebuilt` names the derived image of the Python row, so a Python project is built with it, and each build takes the runtime that it ships for the build's own key. The derived image of the frame-pointer image is published too, and no row names it, as no row names a frame-pointer image yet.
 
 ## What build.sh gets
 
@@ -86,6 +123,7 @@ The builder does not hold `frames.py`, so step 2 mounts it from this repository.
 | `$LIB_FUZZING_ENGINE` | the driver, which takes the place of libFuzzer in each fuzz target ([below](#the-driver)) |
 | `$LIB_ALLOCATION_FAILURE_ENGINE` | the driver of an allocation-failure fuzz target ([below](#allocation-failure-fuzz-targets)) |
 | `$LIB_ALLOCATION_COUNTING_ENGINE` | the same, with counting mode on, for sweep and test builds that we never publish |
+| `$LIB_DSL_ENGINE` | the driver of a DSL fuzz target, whose program is a script that the payload holds ([below](#dsl-fuzz-targets)) |
 | `$SANITIZER` | `none`, `undefined`, `address` or `address-undefined` |
 | `$ARCHITECTURE`, `$FUZZING_ENGINE` | `riscv64`; `none`, the OSS-Fuzz name for a driver that runs inputs from files |
 | `$CMAKE_TOOLCHAIN_FILE` | a CMake toolchain file for this build. CMake 3.21 and later find it without help. |
@@ -282,7 +320,7 @@ For a link that `build.sh` makes itself, you can give `OV_MAX_INPUT_LOG2` or `OV
 
 Outside the blocks, a setting applies to each later block, and an `export` reaches each later link. Thus in a `build.sh` with no blocks, as an OSS-Fuzz `build.sh` is, an `export` at the top level applies to each fuzz target that `build.sh` links after it.
 
-Only a link that goes to `link-fuzz-target` reads `OV_MAX_INPUT_LOG2` and `OV_LIBC` ([above](#how-a-fuzz-target-is-linked)). A link that names none of `$LIB_FUZZING_ENGINE`, `$LIB_ALLOCATION_FAILURE_ENGINE` and `$LIB_ALLOCATION_COUNTING_ENGINE` ignores them.
+Only a link that goes to `link-fuzz-target` reads `OV_MAX_INPUT_LOG2` and `OV_LIBC` ([above](#how-a-fuzz-target-is-linked)). A link that names none of `$LIB_FUZZING_ENGINE`, `$LIB_ALLOCATION_FAILURE_ENGINE`, `$LIB_ALLOCATION_COUNTING_ENGINE` and `$LIB_DSL_ENGINE` ignores them.
 
 ### The input limit
 
@@ -449,13 +487,64 @@ To find which allocations an input makes, link a sweep or test build with `$LIB_
 
 `tests/test_builder.py` checks the mask, counting mode and `std::bad_alloc` in all four builds, with each engine. It also builds cJSON's fuzz target with both engines ([tests/fixtures/cjson](../tests/fixtures/cjson/build.sh)). The test shows three results. The fuzz target keeps the release's bytes. An input that makes 21 allocations gets the same count in each build. If any one allocation fails, or all fail, the fuzz target still exits with 0.
 
+## DSL fuzz targets
+
+A DSL fuzz target is a driver of our own whose program is a script in the payload: a list of calls of the library's API, which the driver runs on live objects and whose results it prints. It defines no `LLVMFuzzerTestOneInput`. Its own C or C++ code, the driver objects, defines the four functions that `cli.c` calls (`target_name`, `target_alloc_init`, `target_alloc_count` and `target_run`, [target.h](../infra/base-builder/driver/target.h)), in place of `adapter.c`. The input has the format of [the driver](#the-driver), and the exit statuses are the driver's own: the status that `target_run` returns.
+
+The driver makes the library's calls of chosen functions fail, as the input tells it to, through renames. A map is a file of pairs `<old> <new>`, one a line; `#` starts a comment. The link renames each call of `<old>` to `<new>` in copies of the library's archives, and the target's trampolines, objects compiled with no sanitizer as the driver is, define `<new>`. Two kinds of map:
+
+* `OV_DSL_REDEFS`: renamed in the library and in the driver objects, for example the allocators, so that one schedule counts the allocations of both.
+* `OV_DSL_LIBRARY_REDEFS`: renamed in the library alone, for example the system calls of its file functions, which the trampolines answer from a file in memory. A driver object that names either side of such a pair stops the link: the driver reaches what the map renames only through the trampolines' own functions.
+
+A block declares the target in its environment, before `ov_target_build_dsl`:
+
+| variable | value |
+|---|---|
+| `OV_DSL_DRIVER` | the driver objects (`ov_dsl_driver` adds one) |
+| `OV_DSL_TRAMPOLINES` | the trampoline objects (`ov_dsl_trampoline` adds one) |
+| `OV_DSL_REDEFS`, `OV_DSL_LIBRARY_REDEFS` | the maps: at least one, in either variable |
+| `OV_DSL_ALLOW` | with a library map: the allow list of the census (below) |
+
+Each is a list of absolute paths, separated by spaces.
+
+    (
+    ov_target_begin zlib-api-driver
+    build_lib() {
+      oft_build_cmake
+      ov_dsl_driver dsl.c            # /work/targets/$T/dsl.c, with $CC, $CFLAGS and the library's include paths
+      ov_dsl_trampoline alloc_tramp.c  # with $DRVCC $BASE_CFLAGS: no sanitizer, as cli.o
+      oft_seal_getenv
+      oft_seal_mkstemp
+      oft_seal_getpid
+    }
+    LIB_ARCHIVE="lib/liboft.a"
+    export OV_DSL_REDEFS="/work/targets/$T/alloc_tramp.redefs"
+    ov_target_build_dsl api-driver
+    )
+
+`ov_dsl_driver` also compiles each driver object with `-DHARNESS_QUIET`, as `<name>-quiet.o`, for the quiet twin. `ov_target_build_dsl` links `$LIB_DSL_ENGINE`, the library's archive and `LIB_EXTRA`, through `link-fuzz-target`:
+
+    <compiler> -static -no-pie -Wl,--gc-sections cli.o <driver objects' copies> [<silent reports>] <the link's own arguments, the library's archives as copies> <trampolines> <seals>
+
+The link takes the library's archives and object files by name: it refuses `-l`, every `-Wl,` option but the seals' `-Wl,--wrap=<name>` (getenv, getpid, getppid, mkstemp, mkostemp, mkstemps and mkostemps, none of which a map may name), `-Xlinker`, response files, configuration files, source files and LLVM bitcode, which could hide a call from the renames ([dsl.py](../infra/base-builder/dsl.py)). A wrap of any other name could send the library's calls past the trampolines, and the trace below would not show it: the linker writes its `-y` trace before it applies `--wrap`. The library is each archive that the link names outside the toolchain image's `/opt`. Before it links, `dsl.py` stops the link when:
+
+* a map has a malformed line or no pair, or the maps rename one name twice, give two names one new name, or name one name as old and new;
+* the library defines an old name itself, or the library or a driver object names a new name already;
+* a pair does not move every reference from the old name to the new one in a copy, or a copy has another number of undefined symbols (conservation);
+* a map renames no reference at all: a schedule over nothing;
+* with a library map, a name that the library's copies leave undefined is not defined by the library, is no new name, is no sanitizer's name (`__asan_`, `__ubsan_`, `__sanitizer_`, `__start_`, `__stop_`) and is no line of `OV_DSL_ALLOW` (the census). So each call of the library that no map answers is a line of a file that the review reads, and a call that can reach the kernel belongs in a map, not on that list.
+
+The first link traces each new name (`-Wl,-y`). The link stops, and its output is removed, unless each new name is defined by one trampoline and no other file; each reference comes from a library copy, a driver object's copy or a trampoline, and a library map's new names only from the library; and the link takes a reference from the library to at least one new name of each library map.
+
+`compile` lists each DSL fuzz target in `$OUT/.dsl-fuzz-targets`, and `oss-verify check` finds it there, as it finds a Go fuzz target. The record of the link ([below](#the-checks-of-the-binaries)) names the trampolines as driver objects, compiled with no sanitizer, and each copy as the file that it stands for, in `renamed`; the driver objects are the project's code, compiled with the build's flags. The quiet twin takes the copies of the driver objects' quiet builds.
+
 ## The fuzz targets
 
-A fuzz target is an executable in the `$OUT` of a build whose ELF symbol table defines `LLVMFuzzerTestOneInput`. This is the OSS-Fuzz rule, but we read the symbol table in place of the bytes of the file. A fuzz target must be in each build. A Go program has no `LLVMFuzzerTestOneInput`. Thus `compile` lists the Go fuzz targets in `$OUT/.go-fuzz-targets`, and `oss-verify check` reads that list ([below](#go-fuzz-targets)).
+A fuzz target is an executable in the `$OUT` of a build whose ELF symbol table defines `LLVMFuzzerTestOneInput`. This is the OSS-Fuzz rule, but we read the symbol table in place of the bytes of the file. A fuzz target must be in each build. A Go program has no `LLVMFuzzerTestOneInput`, and nor has a DSL fuzz target. Thus `compile` lists the Go fuzz targets in `$OUT/.go-fuzz-targets` and the DSL fuzz targets in `$OUT/.dsl-fuzz-targets`, and `oss-verify check` reads those lists ([below](#go-fuzz-targets), [above](#dsl-fuzz-targets)).
 
 `fuzz_targets` in `project.yaml` names the fuzz targets to verify. Without it, we verify each fuzz target that we find. `oss-verify check` copies the published binary of each fuzz target to `out/<target>/<target>.<build>`. It ignores each other file in `$OUT`.
 
-A DSL driver is a fuzz target too: an `LLVMFuzzerTestOneInput` that runs a small program from its payload, and takes its configuration from the payload. It prints the observables of each operation. A failure of the library is one of these observables, not an exit status. The allocation mask works as for each other fuzz target.
+A DSL driver is a fuzz target too: either an `LLVMFuzzerTestOneInput`, or a DSL fuzz target ([above](#dsl-fuzz-targets)), that runs a small program from its payload, and takes its configuration from the payload. It prints the observables of each operation. A failure of the library is one of these observables, not an exit status. The allocation mask works as for each other fuzz target.
 
 A proof is only as strong as its fuzz target. Thus each fuzz target must obey the rules in step 3 of [the add-project skill](../.claude/skills/add-project/SKILL.md):
 
@@ -491,7 +580,7 @@ It needs `qemu-riscv64-static` on `PATH`, and compiler-rt's source from GitHub o
 
 `uv run oss-verify check --checks <file>` also does four checks on each build of each fuzz target ([src/oss_verify/check_binaries.py](../src/oss_verify/check_binaries.py)). It writes their results into the manifest ([below](#the-manifest)) and adds a table to the report, with one row for each binary. What they find changes no exit status.
 
-The checks hold each binary against LPS as the published proofs use it: the proofs repository's [`release.yaml`](https://github.com/theorem-labs/oss-verify-proofs/blob/main/release.yaml) names the repository and the commit of LPS in its `semantics:` block, and `oss-verify check` reads that file from the proofs repository on GitHub and fetches LPS at that commit ([src/oss_verify/model_release.py](../src/oss_verify/model_release.py)). Checks 1 and 2 read LPS through rules that we wrote against [one commit of it](https://github.com/theorem-labs/rocq-linux-process-semantics/commit/f1006fe8178338a499b5e5c41be83006c4edd058) (`MODEL_COMMIT` in each check's file). If a file that a rule reads has different code at the commit that the release names, or is not there, or if `oss-verify check` cannot read `release.yaml` or LPS, the result is `stale` and not a verdict. A change to a comment changes no result.
+The checks hold each binary against LPS as the published proofs use it: the proofs repository's [`release.yaml`](https://github.com/theorem-labs/oss-verify-proofs/blob/main/release.yaml) names the repository and the commit of LPS in its `semantics:` block, and `oss-verify check` reads that file from the proofs repository on GitHub and fetches LPS at that commit ([src/oss_verify/model_release.py](../src/oss_verify/model_release.py)). Checks 1 and 2 read LPS through rules that we wrote against [one commit of it](https://github.com/theorem-labs/rocq-linux-process-semantics/commit/c0dd863a0f8f307beca7f2ee5cb4d7686a875779) (`MODEL_COMMIT` in each check's file). If a file that a rule reads has different code at the commit that the release names, or is not there, or if `oss-verify check` cannot read `release.yaml` or LPS, the result is `stale` and not a verdict. A change to a comment changes no result.
 
 1. **ELF and instructions** ([src/oss_verify/binary_isa.py](../src/oss_verify/binary_isa.py)). The binary is a 64-bit RISC-V executable at fixed addresses (`ET_EXEC`, `EM_RISCV`). Each byte of its executable code is part of a 32-bit instruction that the decoder of LPS accepts and executes, or zero padding: no compressed (16-bit) instruction (the builds target rv64g, although LPS decodes compressed instructions too), no vector or other instruction that LPS does not have, and no read of a control register that LPS does not have. The check reads the instructions, not the ELF header's flags, and every byte that a segment marked executable maps, whatever a section header says about it. The one exception is a section of build-id notes (the Go and GNU build ids that Go's linker puts in front of `.text`), when its bytes are exactly such notes, each of the two at most once.
 2. **System calls** ([src/oss_verify/syscall_shapes.py](../src/oss_verify/syscall_shapes.py)). The binary runs on the empty input (the six-byte header and no payload) and on the first 8 inputs of the fuzz target's seed corpus, with `qemu-riscv64-static -strace` of qemu 10.0.11, the one release whose log formats and host calls the check reads; a run of any other release decides nothing (qemu 8.2, for one, hands the host 0 for the offset of every anonymous `mmap`, so its runs cannot show the offset the program asked for). Each run is in a container of the toolchain image with no network, in an empty working directory that holds the input as `input.bin`, with empty `/tmp`, `/var/tmp` and `/dev/shm`, with an `/etc` that holds only `hosts`, `nsswitch.conf`, `resolv.conf` and an empty `hostname`, with no environment, as an unprivileged user, with a core dump that holds no memory (step 2 of [the checks of a fuzz target](#the-checks-of-a-fuzz-target) says why), and with the fuzz target's name as `argv[0]` ([infra/checks/run-binaries](../infra/checks/run-binaries)). qemu's log prints some arguments as 32-bit numbers (the length of `mmap`, for one) and does not print the address that `connect` gets, so each run runs under a small tracer that logs the host calls with their full arguments, and the address family of each `connect` ([infra/checks/host-calls.c](../infra/checks/host-calls.c)). qemu rounds the length of `mmap`, `munmap`, `mprotect` and `madvise` up to a whole page before it calls the host, so the check takes the length's low 32 bits from qemu's log and its page from the host's. The check reads each trace against LPS, under the statements' default for an abort (`abort: error`: an abort is not a modeled end): each call must be in the system call table of LPS, and its arguments and its result must be ones that the call's specification allows: an errno that the call's arm can answer, or a success that it can give. Otherwise LPS says that the call is unmodeled, and no statement about the run is true in LPS. The check knows the bytes of `input.bin`, so each `read`, `pread64` and `lseek` of it has the one answer that LPS gives, and a `readv` gets no more bytes than remain. Each socket call is answered from the socket's state, as LPS keeps it. A call whose answer turns on a value that neither log shows decides nothing. A fork that LPS answers ends what the trace decides: the child writes into the same log, and qemu's writes of the two processes interleave inside a line, so the run is not decided from the fork on. The result lists each call and argument shape that LPS does not cover, with the inputs that made it. A trace decides something only when it is a whole run: it ends with the run's exit, holds at least 8 calls, and opens and reads `input.bin`. A run that does not end within 60 seconds decides nothing, and all runs together stop after 30 minutes.

@@ -62,8 +62,12 @@ from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from urllib.parse import quote, urlencode
 
-# oss-verify validate holds the enrollment rules (and imports PyYAML).
-from oss_verify import validate
+# The rules of oss-verify validate (which import PyYAML), from .github/scripts/validate_rules/, beside this file: the
+# copy of src/oss_verify/validate.py for the jobs that hold a token, which load no code from src/
+# (.github/scripts/copy-validate-rules). This file's directory goes first on sys.path: python3 puts it there for a
+# program, but not with -P or PYTHONSAFEPATH, nor for a module that another program or a test imports.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from validate_rules import validate  # noqa: E402
 
 API = "https://api.github.com"
 RAW = "application/vnd.github.raw"

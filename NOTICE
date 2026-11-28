@@ -96,3 +96,19 @@ Apache-2.0, wherever they are copied, and the rest of what comes from the recipe
 A file under projects/<name>/ or seeds/<name>/ copied from a project's own repository or from OSS-Fuzz
 (https://github.com/google/oss-fuzz) keeps its licence: the one its header names, or for a file with no header, that
 of the repository it was copied from (for OSS-Fuzz, the Apache License, Version 2.0).
+
+projects/zlib/compress_roundtrip_full_fuzzer.c is ours and is licensed under the MIT licence (LICENSES/MIT.txt) or the
+Apache License, Version 2.0, at your option (MIT OR Apache-2.0), though it has no SPDX line, because a line added at
+its top would move the line numbers that its sanitizer builds hold, and so the bytes of its pinned binaries.
+The changes that projects/zlib/musl-0001-export-pthread-struct-size.diff and
+projects/zlib/musl-0002-init-tls-check-mmap.diff make to musl are Theorem Labs' and are licensed under the MIT
+licence (LICENSES/MIT.txt), and the lines of musl that they carry keep musl's own MIT licence.
+
+projects/zlib/tramp_alloc.c, emit.h, target.h and the files projects/zlib/api-driver.* and projects/zlib/sysfail_fuzzer.*
+are Theorem Labs' and are licensed under the MIT licence (LICENSES/MIT.txt). The C sources and headers among them say so
+in their first lines, which take the place of lines of their first comment, so that no line of code moves.
+
+projects/zlib/zlib-sysfail_fuzzer.0002-gz_fetch-copy-partial-output-after-read-error.patch,
+zlib-sysfail_fuzzer.0003-gzseek64-overflow-after-initial-pushback.patch and
+zlib-sysfail_fuzzer.0004-gzwrite-finish-reset-on-failed-write.patch change zlib's code as the zlib pull requests
+(#1363, #1361 and #1399) that each one names, and keep zlib's licence (Zlib).

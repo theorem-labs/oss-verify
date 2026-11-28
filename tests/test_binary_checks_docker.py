@@ -9,11 +9,11 @@ The runs need qemu-riscv64-static on PATH; without it, they are skipped.
 """
 import os
 import pathlib
+import re
 import shutil
 import subprocess
-import sys
-import tempfile
-import unittest
+
+import pytest
 
 from oss_verify import check_binaries
 from oss_verify import check_build
@@ -27,16 +27,15 @@ QEMU = shutil.which("qemu-riscv64-static")
 BUILDS = ["plain", "ubsan", "asan"]
 
 
-@unittest.skipUnless(os.environ.get("OV_DOCKER_TESTS") == "1" and docker_ready(),
-                     "set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
-class Records(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.scratch = tempfile.TemporaryDirectory(prefix="ov-test-records.")
-        # Class cleanups run when setUpClass fails too, so a compile failure removes this process's image as well.
-        cls.addClassCleanup(cls.scratch.cleanup)
-        cls.addClassCleanup(subprocess.run, ["docker", "image", "rm", TAG], capture_output=True)
-        cls.work = pathlib.Path(cls.scratch.name)
+@pytest.mark.skipif(os.environ.get("OV_DOCKER_TESTS") != "1" or not docker_ready(),
+                    reason="set OV_DOCKER_TESTS=1, with Docker and the toolchain image, to build the fixture")
+class TestRecords:
+    @pytest.fixture(scope="class", autouse=True)
+    def set_up_class(self, request, tmp_path_factory):
+        cls = request.cls
+        cls.work = tmp_path_factory.mktemp("ov-test-records")
+        # A finalizer runs when this fixture fails too, so a compile failure removes this process's image as well.
+        request.addfinalizer(lambda: subprocess.run(["docker", "image", "rm", TAG], capture_output=True))
         job = check_build.Job(name="example", directory=FIXTURE, repo="https://example.invalid/example", ref="",
                               dockerfile="", builds=BUILDS, fuzz_targets=None)
         builder = check_build.build_builder()
@@ -52,38 +51,38 @@ class Records(unittest.TestCase):
         for build in BUILDS:
             recorded = sorted(p.name for p in (self.work / "recorded" / build / ".stripped").iterdir())
             unrecorded = sorted(p.name for p in (self.work / "unrecorded" / build / ".stripped").iterdir())
-            self.assertEqual(recorded, unrecorded, build)
+            assert recorded == unrecorded, build
             for name in recorded:
-                self.assertEqual(manifest.sha256_of(self.work / "recorded" / build / ".stripped" / name),
-                                 manifest.sha256_of(self.work / "unrecorded" / build / ".stripped" / name))
-            self.assertFalse((self.work / "unrecorded" / build / ".records").exists())
+                assert manifest.sha256_of(self.work / "recorded" / build / ".stripped" / name) == \
+                    manifest.sha256_of(self.work / "unrecorded" / build / ".stripped" / name)
+            assert not (self.work / "unrecorded" / build / ".records").exists()
 
     def test_every_fuzz_target_has_a_record_and_a_quiet_twin(self):
         for build in BUILDS:
             for target in self.targets:
                 record, quiet = check_binaries.record_of(self.raw[build], target)
-                self.assertIsInstance(record, check_links.Record, (build, target, record))
-                self.assertIsNotNone(quiet, (build, target))
-                self.assertTrue(any(path.endswith("/cli.o") for path in record.driver))
+                assert isinstance(record, check_links.Record), (build, target, record)
+                assert quiet is not None, (build, target)
+                assert any(path.endswith("/cli.o") for path in record.driver)
 
     def test_the_lists_and_the_instrumentation(self):
         # As check_binaries.binary_checks does: each build's compile records, read from its own $OUT.
         records = {build: check_binaries.record_of(self.raw[build], "example_fuzzer",
                                                    check_links.read_compiles(self.raw[build]))[0] for build in BUILDS}
-        self.assertIsNotNone(records["ubsan"].compiles)
+        assert records["ubsan"].compiles is not None
         wanted = {real for record in records.values() for real, _, _ in record.inputs.values()
                   if real.startswith("/opt/")}
         toolchain = check_build.newest_toolchain()
         image = check_binaries.image_hashes(toolchain, wanted, labels=[])
         results = check_links.analyse(records, image, check_binaries.dwarf_reader(toolchain, []))
-        self.assertEqual(results["plain"]["instrumented"]["result"], "plain")
+        assert results["plain"]["instrumented"]["result"] == "plain"
         for build in ("ubsan", "asan"):
-            self.assertEqual(results[build]["instrumented"]["result"], "pass", results[build]["instrumented"])
+            assert results[build]["instrumented"]["result"] == "pass", results[build]["instrumented"]
         # The compile records that compile and record-compile wrote decide the fixture's own objects in the ubsan build.
-        self.assertIn("by the compile that wrote them", results["ubsan"]["instrumented"]["detail"])
+        assert "by the compile that wrote them" in results["ubsan"]["instrumented"]["detail"]
         kinds = {entry["kind"] for entry in results["asan"]["uninstrumented"]}
-        self.assertTrue({"libc", "compiler-rt", "sanitizer-runtime"} <= kinds, kinds)
-        self.assertNotIn("sanitizer-runtime", {entry["kind"] for entry in results["plain"]["uninstrumented"]})
+        assert {"libc", "compiler-rt", "sanitizer-runtime"} <= kinds, kinds
+        assert "sanitizer-runtime" not in {entry["kind"] for entry in results["plain"]["uninstrumented"]}
 
     def test_dwarf_of_assembly(self):
         """The toolchain's clang writes no STT_FILE for an assembly source, only a DWARF unit in the assembler's
@@ -94,11 +93,11 @@ class Records(unittest.TestCase):
         data = subprocess.run(["docker", "run", "--rm", "--network=none", "--entrypoint", "sh", toolchain,
                                "-c", script], capture_output=True, check=True).stdout
         facts = check_links.object_facts(data)
-        self.assertFalse(facts.compiled)
+        assert not facts.compiled
         unit = check_binaries.dwarf_reader(toolchain, [])([data])[0]
-        self.assertEqual((unit[0], unit[1]), ("DW_LANG_Mips_Assembler", "x.S"), unit)
+        assert (unit[0], unit[1]) == ("DW_LANG_Mips_Assembler", "x.S"), unit
 
-    @unittest.skipUnless(QEMU, "no qemu-riscv64-static on PATH")
+    @pytest.mark.skipif(not QEMU, reason="no qemu-riscv64-static on PATH")
     def test_the_runs(self):
         inputs = [(check_binaries.EMPTY, check_binaries.HEADER), ("returns 1", check_binaries.HEADER + b"r")]
         for build in ("plain", "asan"):
@@ -116,20 +115,16 @@ class Records(unittest.TestCase):
             (files / "runs").write_text("".join(f"{run}\n" for run in runs))
             results = check_binaries.run_job(job_dir, check_build.newest_toolchain(), pathlib.Path(QEMU).resolve(), [],
                                              600)
-            self.assertEqual([(results / f"l{n}.status").read_text().strip() for n in range(2)], ["0", "78"])
-            self.assertTrue((results / "l0.out").read_text().strip() != "0", "the loud binary writes")
+            assert [(results / f"l{n}.status").read_text().strip() for n in range(2)] == ["0", "78"]
+            assert (results / "l0.out").read_text().strip() != "0", "the loud binary writes"
             agreement = check_binaries.quiet_loud(True, "", inputs, results)
-            self.assertEqual(agreement["result"], "pass", agreement)
+            assert agreement["result"] == "pass", agreement
             trace = (results / "l0.trace").read_text()
-            self.assertRegex(trace, r'openat\(AT_FDCWD,"input\.bin"')
+            assert re.search(r'openat\(AT_FDCWD,"input\.bin"', trace)
             calls = (results / "l0.calls").read_text().split("\n")
-            self.assertEqual(calls[0], "exec")
+            assert calls[0] == "exec"
             mmaps = [line.split() for line in calls if line.startswith("mmap ")]
-            self.assertTrue(mmaps, "the host-side log has no mmap")
+            assert mmaps, "the host-side log has no mmap"
             if build == "asan":
                 # The AddressSanitizer runtime's shadow: a mapping of 4 GiB or more, which qemu's log cannot print.
-                self.assertTrue(any(int(fields[3], 16) >= 1 << 32 for fields in mmaps), mmaps[:5])
-
-
-if __name__ == "__main__":
-    unittest.main()
+                assert any(int(fields[3], 16) >= 1 << 32 for fields in mmaps), mmaps[:5]

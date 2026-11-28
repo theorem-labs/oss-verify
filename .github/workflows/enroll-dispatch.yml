@@ -9,7 +9,7 @@
 #             workflow and event that must make it, at the commit; the record that build.yaml's record job wrote for
 #             it (each binary's .text and executable bytes); the pull request the record names and its files; and,
 #             for the label review-passed (below), the pull request's events, the runs from its head, and whether
-#             review.yml's rule trusts its author (ALLOWED_BOTS, from main's .github/workflows/review.yml, or write
+#             review.yml's rule trusts its author (WRITER_BOTS, from main's .github/workflows/review.yml, or write
 #             access). Its decision is dispatch, label or none (the script's header says when).
 #   dispatch  on dispatch: sends the repository_dispatch event enrollment-checked, with the pull request's number,
 #             its head commit and the project, to Theorem's private statements repository (repository id INTERNAL_ID
@@ -151,13 +151,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
           persist-credentials: false
-          # src: triage.py, which the maintainer check comes from, imports oss_verify.validate. .github/workflows:
-          # review.yml's ALLOWED_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this
-          # repository; nothing of the pull request is checked out.
+          # .github/scripts: enroll-dispatch, and triage.py, which the maintainer check comes from, with the rules of
+          # oss-verify validate it imports (.github/scripts/validate_rules/). .github/workflows: review.yml's
+          # WRITER_BOTS, the Apps its rule for trusted accounts trusts. Main's copy, read as code of this repository;
+          # nothing of the pull request is checked out. Nor is src/, which has no code owner: no job that holds a token,
+          # or whose outputs such a job reads, loads code from it (tests/test_token_jobs.py).
           sparse-checkout: |
             .github/scripts
             .github/workflows
-            src
 
       - name: Install PyYAML
         run: dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
@@ -172,8 +173,6 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
           RUN_EVENT: ${{ github.event.workflow_run.event }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
-          # triage.py imports oss_verify.validate, from main's src/.
-          PYTHONPATH: ${{ github.workspace }}/src
         run: |
           set -euo pipefail
           # Until the token is printed again, the runner reads none of the script's output (which quotes file names

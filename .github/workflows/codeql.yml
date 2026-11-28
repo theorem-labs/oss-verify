@@ -1,0 +1,106 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "CodeQL analysis"
+# The CodeQL analysis of one language, with the action github/codeql-action. Each workflow codeql-<language>.yml
+# (codeql-python.yml, codeql-c-cpp.yml, codeql-actions.yml) calls this file, and says when:
+#   - on a pull request into main, only when the pull request changes a file of that language, or a file of the
+#     analysis (this file, the caller and .github/codeql/codeql-config.yml). GitHub's paths filter decides this, and it
+#     is a filter of a whole workflow, not of a job: so each language has a workflow file of its own.
+#   - on each push to main, always, for every language: the alerts of main are the whole tree's.
+# .github/codeql/codeql-config.yml says what an analysis reads: never seeds/, projects/, tests/fixtures/ or
+# .github/scripts/frame-pointers/.
+#
+# This replaces CodeQL's default setup, which scanned five languages on each push of each pull request. Two are not
+# analysed:
+#   Go    every .go file of this repository is under seeds/, projects/ or tests/fixtures/, and Go has no build mode
+#         none, so its analysis builds with autobuild, which does not honour paths-ignore. It would read only those
+#         files.
+#   Rust  CodeQL's Rust extractor runs code of the packages it reads even in build mode none: it loads each Cargo
+#         package with rust-analyzer, which runs cargo check, and with it each build script, and runs proc macros
+#         through the sysroot's proc-macro server (github/codeql rust/extractor/src/config.rs at
+#         e54be546741e764e42f1fe396b0a4816e28c327f, lines 164 and 235: load_out_dirs_from_check: true). In a push job,
+#         which holds security-events: write and can save to main's Actions cache, a Cargo package with a build.rs in
+#         a directory with no code owner (tests/, docs/) would run. So infra/base-builder/rust/oft-rust-rt/, the
+#         runtime that the Rust builds link (owned), goes unscanned; the frame-pointer probe crate under
+#         .github/scripts/frame-pointers/rust/ would be left out anyway. .github/scripts/workflow-credentials fails a
+#         job with a credential that analyses Rust, a compiled language in another build mode than none, or a language
+#         it does not know.
+# The build modes are default setup's, from its job logs (the CodeQL runs of pull request #278, 2026-11-22): none for
+# Python, C/C++ and GitHub Actions. CodeQL's extractors for these read the source in that mode and run none of it,
+# Python's only while no entry at the top of the checkout is named for a module of Python's standard library (the step
+# before init, below). The category /language:<language> is default setup's too.
+#
+# Each caller has two jobs that call this file, and their permissions decide what its job analyze may do:
+#   pull-request  runs only on pull_request, with only read permissions, as every job that runs on pull_request in
+#                 this repository (tests/test_trigger_move.py, (r)). Code scanning takes the results of a run on
+#                 pull_request with security-events: read, also from a fork's pull request.
+#   push          runs only on push, to main, with security-events: write, which the results of main need.
+# Both run the job analyze of this one file, so the analysis has one key (the caller's path and the job's id, analyze)
+# on main and on pull requests. codeql-action keys its cache of main's database by that key, so a pull request's
+# analysis of Python or C/C++ can extract only the files the pull request changes, on top of main's database, when the
+# action finds that database in the cache and turns incremental analysis on.
+#
+# A workflow whose job holds a write permission is a file that runs with a credential, so .github/CODEOWNERS owns this
+# file, each caller and the configuration.
+#
+# These workflows need CodeQL's default setup off. While it is on, code scanning refuses their results ("CodeQL
+# analyses from advanced configurations cannot be processed when the default setup is enabled"), and the step Analyze
+# fails until an administrator turns default setup off (Settings, Code security, CodeQL analysis, Disable CodeQL; or
+# gh api -X PATCH repos/theorem-labs/oss-verify/code-scanning/default-setup -f state=not-configured).
+# Turning default setup on again stops these workflows' result uploads.
+
+on:
+  workflow_call:
+    inputs:
+      language:
+        description: The CodeQL language, as default setup named it.
+        required: true
+        type: string
+      build-mode:
+        description: How CodeQL extracts the language; none reads the source without a build.
+        required: true
+        type: string
+
+jobs:
+  analyze:
+    name: Analyze (${{ inputs.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # No permissions of its own: it takes the caller job's (above).
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          persist-credentials: false
+
+      # CodeQL's Python extractor probes its interpreter with python -S -c "import gzip" in the checkout
+      # (github/codeql python/extractor/buildtools/index.py at e54be546741e764e42f1fe396b0a4816e28c327f, site_flag), and
+      # python -c puts the working directory first on sys.path: an entry at the top of the checkout named for gzip, or
+      # for a module that gzip imports, would run there, and the top of the checkout needs no code owner. PYTHONSAFEPATH
+      # would keep the directory off sys.path, but the extractor's autobuild.sh then cannot import its own tracer. So
+      # this step fails when any entry at the top is named for a module of the standard library (gzip, gzip.py,
+      # gzip.<suffix>, a directory gzip), more names than python would import in fact. It runs python3 -I, which puts
+      # no directory of the checkout on sys.path, for every language. .github/scripts/workflow-credentials fails a job
+      # with a credential that analyses Python unless its steps are the checkout, this step exactly as written, and
+      # CodeQL's steps with no if, in that order, so that nothing changes the top between this step and the extraction.
+      - name: No entry at the top of the checkout is named for a module of Python's standard library
+        run: |
+          python3 -I -c '
+          import os, sys
+          names = set(sys.stdlib_module_names)
+          found = sorted(entry for entry in os.listdir(".") if entry.split(".")[0] in names)
+          for entry in found:
+              print("::error::" + entry + ": an entry at the top of the checkout named for the standard-library module "
+                    + entry.split(".")[0] + ", which CodeQL" + chr(39) + "s Python extractor could import from here")
+          sys.exit(1 if found else 0)
+          '
+
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4 (sha-pinned)
+        with:
+          languages: ${{ inputs.language }}
+          build-mode: ${{ inputs.build-mode }}
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4 (sha-pinned)
+        with:
+          category: /language:${{ inputs.language }}

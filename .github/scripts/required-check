@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+"""What .github/workflows/required-checks.yml posts as the oss-verify App, for one pull request's head:
+
+    GH_TOKEN=<read-only token> REPO=<owner/name> EVENT_NAME=workflow_run RUN_EVENT=<event> RUN_PATH=<workflow file> \\
+      HEAD_SHA=<commit> HEAD_REPOSITORY=<owner/name> HEAD_BRANCH=<branch> python3 -I .github/scripts/required-check
+    GH_TOKEN=<read-only token> REPO=<owner/name> EVENT_NAME=workflow_dispatch HEAD_SHA=<commit> \\
+      python3 -I .github/scripts/required-check
+
+On workflow_run the environment describes the run whose start or end started the workflow (github.event.workflow_run).
+On workflow_dispatch, a run by hand on main with the input head_sha, it finds the one open pull request into main at
+that commit and decides for its head as for a run of it: so a pull request whose runs ended before the workflow was
+on main, or after a run of the workflow failed, gets the App's four checks from the runs it has, with no re-run. Such a
+run is in the head's concurrency group, as a run of the head's own events is (the workflow's header). The script
+reads GitHub's API as data and runs no code of a pull request. It writes to GITHUB_OUTPUT bodies=<JSON list of at most
+four request bodies for POST /repos/{owner}/{repo}/check-runs>, on one line, and post=true when that list is not
+empty, else post=false, and prints one line for each check it read. The workflow's job read runs it with a read-only
+token, and its job post, which holds the App's key, posts the bodies. A read of the API that fails raises
+subprocess.CalledProcessError, and the step fails: the next run of the workflow for the head reads everything again.
+
+Why. main's ruleset requires the checks of CHECKS. A check is matched by its name, and GitHub does not record which
+workflow file of a pull request posted it, so any workflow file can post a check named tests under GitHub Actions. A
+theorem-labs/agent-infra change makes the ruleset require each check from the oss-verify App instead of GitHub
+Actions (github/main.go). This script, from main's checkout, is the one thing that decides what the App posts, and it
+posts what the job of that name in the run of the check's own workflow file says.
+
+What it posts. It acts only for a run on pull_request of one of the four files of CHECKS, named exactly. Then it finds
+the open pull request into main from the run's head repository and branch whose head is HEAD_SHA, as review.yml's
+route finds it. With none (the head moved, or the pull request is closed or into another branch) it posts nothing.
+It reads the pull request again after its runs, so a head that moved or closed during those reads posts nothing.
+Then, for each of the four checks, not only the one of the run that started it, so that the next run for a head posts
+what a lost or failed run of the workflow did not:
+
+  - The newest run (by id) of the check's file, on pull_request, at HEAD_SHA, from the same head repository and branch.
+    A run of another file with the same workflow name, or of another head at the same commit, does not count.
+  - In that run's latest attempt, the job whose name is the check's name. Its conclusion is the check's conclusion, as
+    GitHub Actions reports it today: the job's, not the run's (a run whose other job failed can still pass the check).
+    A completed run with no such job posts failure (cancelled for a cancelled run), but for a run GitHub holds for a
+    first-time contributor (conclusion action_required), which posts nothing: its approval runs it, and its end runs
+    this again. A held run makes no GitHub Actions check run, so an older result of GitHub Actions and the App stands
+    until approval lets the new run start. Two jobs of the name post failure.
+  - It posts a completed check unless the App's newest check of that name at HEAD_SHA already says the same (the same
+    job or run, attempt and conclusion). It posts in_progress for a run that has not ended only when the App's newest
+    check of that name is completed, so that a newer run withdraws an older result, as GitHub Actions' own check goes
+    back to pending when its job starts again. A head with no result yet gets nothing until its run ends.
+
+Each check's details_url is the job's page on GitHub (the run's page when it has no job), in the same form as GitHub
+Actions' own check runs. .github/scripts/enroll-dispatch reads those own check runs for the four, not the App's copies.
+tests/test_required_check.py tests what this script posts.
+A check run is scoped to its commit, not its pull request: two pull requests at one commit share the App's checks,
+as they share GitHub Actions' own checks.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from urllib.parse import quote
+
+# artifact.py's Api, which reads GitHub's REST API through gh.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from artifact import Api, whole  # noqa: E402
+
+# The oss-verify App (gh api apps/oss-verify), whose checks a theorem-labs/agent-infra change makes main's ruleset
+# require.
+APP = 5447700
+DEFAULT_BRANCH = "main"
+# Each required check's workflow file, and the name of the job of it that reports the check.
+CHECKS = {
+    ".github/workflows/build.yaml": "project-builds",
+    ".github/workflows/validate.yaml": "enrollment",
+    ".github/workflows/tests.yaml": "tests",
+    ".github/workflows/terms.yaml": "terms-accepted",
+}
+# The conclusions a job and a check run share (GitHub's REST reference, "Create a check run").
+CONCLUSIONS = frozenset({"action_required", "cancelled", "failure", "neutral", "success", "skipped", "timed_out"})
+SHA = re.compile(r"[0-9a-f]{40}")
+REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+GITHUB = "https://github.com/"
+
+
+def head_of(item: dict) -> tuple[object, object]:
+    """The repository and branch a run came from."""
+    return (item.get("head_repository") or {}).get("full_name"), item.get("head_branch")
+
+
+def open_pull(api: Api, repo: str, sha: str, head: tuple[str, str]) -> int | None:
+    """The number of the open pull request into the default branch from `head` (repository, branch) whose head commit
+    is `sha`, or None."""
+    name, branch = head
+    owner = quote(name.split("/")[0], safe="")
+    path = (f"repos/{repo}/pulls?state=open&base={DEFAULT_BRANCH}&head={owner}:{quote(branch, safe='')}"
+            "&per_page=100")
+    for pull in (p for page in api.pages(path) for p in page):
+        base, at = pull.get("base") or {}, pull.get("head") or {}
+        if (pull.get("state") == "open" and whole(pull.get("number"))
+                and base.get("ref") == DEFAULT_BRANCH and (base.get("repo") or {}).get("full_name") == repo
+                and at.get("sha") == sha and ((at.get("repo") or {}).get("full_name"), at.get("ref")) == head):
+            return pull["number"]
+    return None
+
+
+def newest_run(api: Api, repo: str, path: str, sha: str, head: tuple[str, str]) -> dict | None:
+    """The newest run of the workflow file `path` on pull_request at `sha` from `head`, or None."""
+    workflow = quote(path.rsplit("/", 1)[1], safe="")
+    runs = [r for page in api.pages(f"repos/{repo}/actions/workflows/{workflow}/runs?event=pull_request"
+                                    f"&head_sha={sha}&per_page=100")
+            for r in page.get("workflow_runs") or []
+            if r.get("path") == path and r.get("event") == "pull_request" and r.get("head_sha") == sha
+            and head_of(r) == head and whole(r.get("id")) and whole(r.get("run_attempt"))]
+    return max(runs, key=lambda r: r["id"], default=None)
+
+
+def page_of(url: object, run_page: str) -> str:
+    """`url` when it is a page of the run whose page on GitHub is `run_page`, else `run_page`."""
+    text = str(url or "")
+    return text if text == run_page or re.fullmatch(re.escape(run_page) + r"/job/[0-9]+", text) else run_page
+
+
+def check_run(name: str, sha: str, url: str, external: str, conclusion: str | None, summary: str) -> dict:
+    """A request body for POST /repos/{owner}/{repo}/check-runs: the check `name` at `sha`, completed with
+    `conclusion`, or in progress with none, whose details_url is `url` and external_id is `external`."""
+    body = {"name": name, "head_sha": sha, "status": "completed" if conclusion else "in_progress",
+            "details_url": url, "external_id": external,
+            "output": {"title": f"{name}: {conclusion or 'in progress'}", "summary": summary}}
+    if conclusion:
+        body["conclusion"] = conclusion
+    return body
+
+
+def wanted(api: Api, repo: str, path: str, name: str, run: dict, pr: int, sha: str) -> dict | None:
+    """The App's check `name` as run `run` of `path` gives it: a request body, or None when there is nothing to say."""
+    run_id, attempt = run["id"], run["run_attempt"]
+    jobs = [j for page in api.pages(f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100")
+            for j in page.get("jobs") or [] if j.get("name") == name]
+    run_page = f"{GITHUB}{repo}/actions/runs/{run_id}"
+    of_attempt = f"run {run_id} attempt {attempt}"
+    # After "run " or "Run " in a summary.
+    which = f"[{run_id}]({run_page}), attempt {attempt}, of `{path}` on pull request #{pr} at `{sha}`"
+    if len(jobs) > 1:
+        return check_run(name, sha, run_page, of_attempt, "failure",
+                         f"{len(jobs)} jobs of run {which} are named `{name}`, not one.")
+    if jobs:
+        job = jobs[0]
+        url = page_of(job.get("html_url"), run_page)
+        external = f"job {job['id']}" if whole(job.get("id")) else of_attempt
+        if job.get("status") != "completed":
+            return check_run(name, sha, url, external, None,
+                             f"[The job `{name}`]({url}) of run {which} has not ended.")
+        conclusion = job.get("conclusion") if job.get("conclusion") in CONCLUSIONS else "failure"
+        return check_run(name, sha, url, external, conclusion,
+                         f"[The job `{name}`]({url}) of run {which} ended `{conclusion}`.")
+    if run.get("status") != "completed":
+        return check_run(name, sha, run_page, of_attempt, None,
+                         f"Run {which} has not ended, and has no job `{name}` yet.")
+    if run.get("conclusion") == "action_required":
+        return None
+    conclusion = "cancelled" if run.get("conclusion") == "cancelled" else "failure"
+    return check_run(name, sha, run_page, of_attempt, conclusion, f"Run {which} ended with no job `{name}`.")
+
+
+def standing(api: Api, repo: str, sha: str) -> dict[str, dict]:
+    """The App's newest check run of each name at `sha`."""
+    newest: dict[str, dict] = {}
+    for check in (c for page in api.pages(f"repos/{repo}/commits/{sha}/check-runs?app_id={APP}&filter=all"
+                                          "&per_page=100")
+                  for c in page.get("check_runs") or []):
+        if (check.get("app") or {}).get("id") != APP or not whole(check.get("id")):
+            continue
+        name = check.get("name")
+        if name not in newest or check["id"] > newest[name]["id"]:
+            newest[name] = check
+    return newest
+
+
+def same(check: dict | None, body: dict) -> bool:
+    """Whether the App's check run `check` already says what `body` says."""
+    return check is not None and check.get("status") == body["status"] \
+        and check.get("conclusion") == body.get("conclusion") and check.get("external_id") == body["external_id"]
+
+
+def for_head(api: Api, repo: str, sha: str, head: tuple[str, str], pr: int) -> tuple[list[dict], list[str]]:
+    """The check runs to post, and one line about each check, for pull request `pr` at `sha` from `head`."""
+    checks = standing(api, repo, sha)
+    posts: list[dict] = []
+    lines: list[str] = []
+    for check_path, check_name in CHECKS.items():
+        run = newest_run(api, repo, check_path, sha, head)
+        if run is None:
+            lines.append(f"{check_name}: no run at {sha} for pull request #{pr}; nothing is posted.")
+            continue
+        body = wanted(api, repo, check_path, check_name, run, pr, sha)
+        if body is None:
+            lines.append(f"{check_name}: run {run['id']} is held for a maintainer's approval (action_required) at {sha} "
+                         f"for pull request #{pr}; nothing is posted.")
+            continue
+        state = body.get("conclusion") or body["status"]
+        current = checks.get(check_name)
+        if same(current, body):
+            lines.append(f"{check_name}: the App's check already says {state} for {body['external_id']}.")
+        elif body["status"] != "completed" and (current or {}).get("status") != "completed":
+            lines.append(f"{check_name}: {body['external_id']} has not ended, and no result of the App stands to "
+                         "withdraw; nothing is posted.")
+        else:
+            posts.append(body)
+            lines.append(f"{check_name}: posts {state} from {body['external_id']} of run {run['id']}.")
+    return posts, lines
+
+
+def decide(api: Api, repo: str, event: str, path: str, sha: str,
+           head: tuple[object, object]) -> tuple[list[dict], list[str]]:
+    """The check runs to post, and one line about each check, for the run that started the workflow."""
+    if event != "pull_request" or path not in CHECKS:
+        return [], ["The run that started this is not a run on pull_request of one of the four files of the required "
+                    "checks: nothing is posted."]
+    name, branch = head
+    if not (SHA.fullmatch(sha) and isinstance(name, str) and REPOSITORY.fullmatch(name)
+            and isinstance(branch, str) and branch):
+        return [], ["The run that started this names no head commit, repository and branch (a deleted fork gives no "
+                    "repository): nothing is posted."]
+    pr = open_pull(api, repo, sha, (name, branch))
+    if pr is None:
+        return [], [f"No open pull request into {DEFAULT_BRANCH} is at {sha} from the run's head repository and "
+                    "branch: the head moved, or the pull request is closed or into another branch. Nothing is posted."]
+    posts, lines = for_head(api, repo, sha, (name, branch), pr)
+    if posts and open_pull(api, repo, sha, (name, branch)) != pr:
+        return [], lines + [f"Pull request #{pr} moved or closed while its runs were read; nothing is posted."]
+    return posts, lines
+
+
+def open_pulls_at(api: Api, repo: str, sha: str) -> list[tuple[int, tuple[object, object]]]:
+    """Every open pull request into the default branch whose head commit is `sha`: (number, (head repository, head
+    branch)), the repository None for a deleted fork."""
+    out = []
+    for pull in (p for page in api.pages(f"repos/{repo}/pulls?state=open&base={DEFAULT_BRANCH}&per_page=100")
+                 for p in page):
+        base, at = pull.get("base") or {}, pull.get("head") or {}
+        if (pull.get("state") == "open" and whole(pull.get("number")) and base.get("ref") == DEFAULT_BRANCH
+                and (base.get("repo") or {}).get("full_name") == repo and at.get("sha") == sha):
+            out.append((pull["number"], ((at.get("repo") or {}).get("full_name"), at.get("ref"))))
+    return out
+
+
+def decide_by_hand(api: Api, repo: str, sha: str) -> tuple[list[dict], list[str]]:
+    """The check runs to post, and one line about each check, for the open pull request into the default branch at
+    `sha`, as for a run of its head (decide). With none, or with more than one (their heads would share the App's
+    checks at `sha`, and each could give another answer), nothing is posted."""
+    if not SHA.fullmatch(sha):
+        return [], [f"head_sha {sha!r} is no commit id: nothing is posted."]
+    pulls = open_pulls_at(api, repo, sha)
+    if len(pulls) != 1:
+        return [], [f"{len(pulls)} open pull requests into {DEFAULT_BRANCH} are at {sha}, not one: nothing is posted."]
+    pr, head = pulls[0]
+    name, branch = head
+    if not (isinstance(name, str) and REPOSITORY.fullmatch(name) and isinstance(branch, str) and branch):
+        return [], [f"Pull request #{pr} names no head repository and branch (a deleted fork gives no repository): "
+                    "nothing is posted."]
+    posts, lines = for_head(api, repo, sha, (name, branch), pr)
+    if posts and open_pull(api, repo, sha, (name, branch)) != pr:
+        return [], lines + [f"Pull request #{pr} moved or closed while its runs were read; nothing is posted."]
+    return posts, lines
+
+
+def main() -> int:
+    api, repo, sha = Api(), os.environ["REPO"], os.environ.get("HEAD_SHA", "")
+    if os.environ.get("EVENT_NAME") == "workflow_dispatch":
+        posts, lines = decide_by_hand(api, repo, sha)
+    else:
+        posts, lines = decide(api, repo, os.environ.get("RUN_EVENT", ""), os.environ.get("RUN_PATH", ""), sha,
+                              (os.environ.get("HEAD_REPOSITORY", ""), os.environ.get("HEAD_BRANCH", "")))
+    for line in lines:
+        print(line)
+    # One line, of at most four bodies of a few hundred bytes each: json.dumps escapes every newline of a string.
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+        out.write(f"post={'true' if posts else 'false'}\nbodies={json.dumps(posts, separators=(',', ':'))}\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

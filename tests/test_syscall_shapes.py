@@ -162,6 +162,7 @@ EXIT = "1 exit_group(0)"
 OPEN3 = '1 openat(AT_FDCWD,"in.bin",O_RDONLY|O_LARGEFILE) = 3\n'       # a read-only file at descriptor 3
 OPENDIR3 = '1 openat(AT_FDCWD,".",O_RDONLY|O_DIRECTORY|O_CLOEXEC) = 3\n'
 SOCKET3 = "1 socket(PF_INET,SOCK_STREAM|SOCK_CLOEXEC,IPPROTO_IP) = 3\n"
+DGRAM3 = "1 socket(PF_UNIX,SOCK_DGRAM,0) = 3\n"                         # Sys/Net/Socket.v socket_dgram_b: FdDgram
 BIND_ANY = '{sin_family=AF_INET,sin_port=htons(0),sin_addr=inet_addr("0.0.0.0")}'   # INADDR_ANY, port 0
 TID = "1 set_tid_address(0x64dbf0) = 1\n"                              # pins the model's m_tid at 1
 GUARD_IN_BRK = ("1 brk(NULL) = 0x100000\n1 brk(0x102000) = 0x102000\n"
@@ -171,9 +172,9 @@ TMP_ROUND_TRIP = ('1 openat(AT_FDCWD,"/tmp/libfuzzer.1",O_WRONLY|O_CREAT|O_TRUNC
                   '1 openat(AT_FDCWD,"/tmp/libfuzzer.1",O_RDONLY) = 3\n'
                   '1 read(3,0x1000,20) = 20\n1 close(3) = 0\n'
                   '1 unlinkat(AT_FDCWD,"/tmp/libfuzzer.1",0) = 0\n' + EXIT)
-MADVISE_GRANT = ("1 mmap(NULL,262144,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0)"
+MADVISE_GRANT = ("1 mmap(0x100000,262144,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0)"
                  " = 0x0000000000100000\n")
-GRANT_NONE = "1 mmap(NULL,65536,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x100000\n"
+GRANT_NONE = "1 mmap(0x100000,65536,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x100000\n"
 COMMIT = "1 mmap(0x104000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x104000\n"
 BRK_GUARD = ("1 brk(NULL) = 0x100000\n1 brk(0x102000) = 0x102000\n"
              "1 mmap(0x101000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x101000\n")
@@ -181,19 +182,19 @@ BRK_GUARD = ("1 brk(NULL) = 0x100000\n1 brk(0x102000) = 0x102000\n"
 ACCEPT = [
     # -- the address space -------------------------------------------------------------------------------------------
     ("the plain rw anonymous grant",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT),
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT),
     ("a fresh inaccessible reservation",
-     "1 mmap(NULL,8192,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT),
+     "1 mmap(0x100000,8192,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT),
     ("a guard page inside a brk grant", GUARD_IN_BRK),
     ("an exact munmap of a tracked mapping",
-     "1 mmap(NULL,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(0x100000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
      "1 munmap(0x100000,8192) = 0\n" + EXIT),
     ("mprotect of a read-write grant",
      MADVISE_GRANT + "1 mprotect(0x100000,4096,PROT_READ|PROT_WRITE) = 0\n" + EXIT),
     ("mprotect of a PROT_NONE reservation", GRANT_NONE + "1 mprotect(0x100000,8192,PROT_READ|PROT_WRITE) = 0\n"
      + EXIT),
     ("an rw grant with MAP_NORESERVE",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x100000\n" + EXIT),
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x100000\n" + EXIT),
     ("an rw MAP_FIXED commit inside a tracked reservation", GRANT_NONE + COMMIT + EXIT),
     ("an rw MAP_FIXED grant over free memory",
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED|MAP_NORESERVE,-1,0) = 0x100000\n"
@@ -201,17 +202,28 @@ ACCEPT = [
     ("a MAP_FIXED guard page in no tracked mapping",
      "1 mmap(0x100000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x100000\n" + EXIT),
     ("an rw MAP_FIXED across the end of its owner (the spanning arm)",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
      "1 mmap(0x100000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x100000\n" + EXIT),
-    ("an rw MAP_FIXED ending at the smallest alloc_top",
-     "1 mmap(0x7fff7f7ff000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x7fff7f7ff000\n"
-     + EXIT),
+    ("an interior partial munmap (munmap_cut_ok)",
+     "1 mmap(0x100000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 munmap(0x100000,4096) = 0\n1 madvise(0x101000,4096,MADV_DONTNEED) = 0\n" + EXIT),
+    ("an exact munmap that failed with -ENOMEM (munmap_errnos)",
+     MADVISE_GRANT + "1 munmap(0x100000,262144) = -1 errno=12\n" + EXIT),
+    ("a file mmap of a descriptor the run does not hold, -EBADF",
+     "1 mmap(NULL,4096,PROT_READ,MAP_PRIVATE,5,0) = -1 errno=9\n" + EXIT),
+    ("an unaligned offset with a length near 2^64, -EINVAL",
+     "1 mmap(NULL,-1,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,1) = -1 errno=22\n" + EXIT),
+    ("a brk grow records whole pages (brk_grants)",
+     "1 brk(NULL) = 0x100000\n1 brk(0x101800) = 0x101800\n1 madvise(0x101000,4096,MADV_DONTNEED) = 0\n" + EXIT),
+    ("a brk shrink inside one page frees nothing (brk_unmap_cut)",
+     "1 brk(NULL) = 0x100000\n1 brk(0x102000) = 0x102000\n1 brk(0x101800) = 0x101800\n"
+     "1 madvise(0x101000,4096,MADV_DONTNEED) = 0\n" + EXIT),
     ("a munmap of a free range below the smallest alloc_top", "1 munmap(0x8000000000,4096) = 0\n" + EXIT),
     ("a munmap past TASK_SIZE, -EINVAL", "1 munmap(0x800000000000,4096) = -1 errno=22\n" + EXIT),
     ("an mmap with an offset not page-aligned, -EINVAL",
      "1 mmap(NULL,4096,PROT_READ,MAP_SHARED,3,1) = -1 errno=22\n" + EXIT),
     ("an anonymous rw mmap with an fd",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,3,0) = 0x100000\n" + EXIT),
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,3,0) = 0x100000\n" + EXIT),
     ("an anonymous mmap that failed with -ENOMEM",
      "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = -1 errno=12\n" + EXIT),
     ("mremap to the same rounded size",
@@ -219,9 +231,8 @@ ACCEPT = [
     ("an mremap shrink in place", MADVISE_GRANT + "1 mremap(1048576,262144,131072,1,0,0) = 1048576\n" + EXIT),
     ("an mremap grow in place over free memory",
      MADVISE_GRANT + "1 mremap(1048576,262144,524288,1,0,0) = 1048576\n" + EXIT),
-    ("an mremap move to a free range",
-     MADVISE_GRANT + "1 mmap(0x200000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x200000\n"
-     "1 mremap(1048576,262144,524288,1,0,0) = 4194304\n" + EXIT),
+    ("an mremap to a size past TASK_SIZE, -EINVAL",
+     MADVISE_GRANT + "1 mremap(1048576,262144,140737488359424,1,0,0) = -1 errno=22\n" + EXIT),
     ("an mremap that failed with -ENOMEM",
      MADVISE_GRANT + "1 mremap(1048576,262144,524288,1,0,0) = -1 errno=12\n" + EXIT),
     # -- the MAP_FIXED_NOREPLACE arms --------------------------------------------------------------------------------
@@ -236,7 +247,7 @@ ACCEPT = [
      "0x100000\n1 mmap(0x101000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x101000\n"
      + EXIT),
     ("MAP_FIXED_NOREPLACE over a tracked grant, -EEXIST",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE|MAP_NORESERVE,-1,0) = -1 "
      "errno=17 (File exists)\n" + EXIT),
     ("MAP_FIXED_NOREPLACE over free memory, -ENOMEM",
@@ -268,6 +279,7 @@ ACCEPT = [
     ("/dev/urandom opened read-only", '1 openat(AT_FDCWD,"/dev/urandom",O_RDONLY|O_CLOEXEC) = 3\n' + EXIT),
     ("a create answered -EACCES", '1 openat(AT_FDCWD,"f",O_WRONLY|O_CREAT|O_TRUNC,0644) = -1 errno=13\n' + EXIT),
     ("unlinkat of a bare name", '1 unlinkat(AT_FDCWD,"gzio_tmp.gz",0) = 0\n' + EXIT),
+    ("unlinkat of a bare name answered -EOVERFLOW", '1 unlinkat(AT_FDCWD,"gzio_tmp.gz",0) = -1 errno=75\n' + EXIT),
     ("unlinkat of a name with a trailing separator, -ENOTDIR",
      '1 unlinkat(AT_FDCWD,"gzio_tmp.gz/",0) = -1 errno=20\n' + EXIT),
     ("close of an open descriptor", OPEN3 + "1 close(3) = 0\n" + EXIT),
@@ -300,7 +312,8 @@ ACCEPT = [
     ("a write to standard output", "1 write(1,0x1000,2) = 2\n" + EXIT),
     ("a read of a file", OPEN3 + "1 read(3,0x1000,64) = 64\n" + EXIT),
     ("a write of 512 times rw_bytes_max at a buffer in range", "1 write(1,0x1000,67108864) = 67108864\n" + EXIT),
-    ("a write of rw_bytes_max at a buffer past TASK_SIZE", "1 write(1,0x7fffffff0000,131072) = 131072\n" + EXIT),
+    ("a write of rw_bytes_max at a buffer past TASK_SIZE, -EFAULT",
+     "1 write(1,0x7fffffff0000,131072) = -1 errno=14\n" + EXIT),
     ("a read of standard input whose range runs past TASK_SIZE, -EFAULT",
      "1 read(0,0x1000,140737488355328) = -1 errno=14\n" + EXIT),
     ("a read of /dev/urandom that delivered the whole count",
@@ -343,6 +356,20 @@ ACCEPT = [
     ("eventfd2 with a bad flag, -EINVAL", "1 eventfd2(0,2) = -1 errno=22\n" + EXIT),
     ("epoll_create1 with a bad flag, -EINVAL", "1 epoll_create1(2) = -1 errno=22\n" + EXIT),
     ("epoll_ctl with an unreadable event, -EFAULT", "1 epoll_ctl(4,1,3,0,0,0) = -1 errno=14\n" + EXIT),
+    ("an exclusive append create", '1 openat(AT_FDCWD,"f",O_WRONLY|O_CREAT|O_EXCL|O_APPEND,0644) = 3\n' + EXIT),
+    ("a /tmp key made, unlinked while open, then used and reopened",
+     '1 openat(AT_FDCWD,"/tmp/t",O_RDWR|O_CREAT|O_EXCL,0600) = 3\n1 unlinkat(AT_FDCWD,"/tmp/t",0) = 0\n'
+     "1 ftruncate(3,16) = 0\n1 fcntl(3,F_SETFL,O_RDWR) = 0\n1 epoll_ctl(3,1,3,0x1000,0,0) = -1 errno=1\n"
+     '1 openat(AT_FDCWD,"/proc/self/fd/3",O_RDONLY) = 4\n' + EXIT),
+    ("/proc/self/fd of a descriptor the run never opened, -ENOENT",
+     '1 openat(AT_FDCWD,"/proc/self/fd/7",O_RDONLY) = -1 errno=2\n' + EXIT),
+    ("fcntl F_GETFD answering FD_CLOEXEC", "1 fcntl(1,F_GETFD) = 1\n" + EXIT),
+    ("eventfd2 with EFD_SEMAPHORE", "1 eventfd2(0,1) = 3\n" + EXIT),
+    ("an eventfd's F_GETFL follows its F_SETFL O_NONBLOCK",
+     "1 eventfd2(0,0) = 3\n1 fcntl(3,F_GETFL) = 2\n1 fcntl(3,F_SETFL,O_RDWR|O_NONBLOCK) = 0\n"
+     "1 fcntl(3,F_GETFL) = 2050\n1 epoll_ctl(3,1,3,0x1000,0,0) = -1 errno=22\n" + EXIT),
+    ("unlinkat(AT_REMOVEDIR) of a name answered -EOVERFLOW",
+     '1 unlinkat(AT_FDCWD,"x.gz",AT_REMOVEDIR) = -1 errno=75\n' + EXIT),
     ("epoll_pwait with an unreadable events array, -EFAULT", "1 epoll_pwait(4,0,1,0,0,8) = -1 errno=14\n" + EXIT),
     ("timerfd_create with a bad flag, -EINVAL", "1 timerfd_create(1,1,1,0,0,8) = -1 errno=22\n" + EXIT),
     ("pselect6 with a negative nfds, -EINVAL", "1 pselect6(-1,0,0,0,0,0) = -1 errno=22\n" + EXIT),
@@ -363,6 +390,16 @@ ACCEPT = [
      '1 accept(3,NULL,NULL) = 4\n1 sendto(4,"hi",2,MSG_NOSIGNAL,NULL,0) = 2\n' + EXIT),
     ("-EPIPE on a bound socket",
      SOCKET3 + "1 bind(3," + BIND_ANY + ',16) = 0\n1 sendto(3,"hi",2,MSG_NOSIGNAL,NULL,0) = -1 errno=32\n' + EXIT),
+    ("socket AF_UNIX SOCK_DGRAM", DGRAM3 + EXIT),
+    ("socket AF_INET6 SOCK_DGRAM, -ENOBUFS", "1 socket(PF_INET6,SOCK_DGRAM,IPPROTO_IP) = -1 errno=105\n" + EXIT),
+    ("socket with protocol 300, -ENFILE", "1 socket(PF_INET,SOCK_STREAM,300) = -1 errno=23\n" + EXIT),
+    ("socketpair AF_UNIX SOCK_STREAM", "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x40007ff8b0) = 0\n" + EXIT),
+    ("accept on a fresh socket, -EMFILE", SOCKET3 + "1 accept(3,NULL,NULL) = -1 errno=24\n" + EXIT),
+    ("accept on a channel, -EMFILE", "1 accept(0,NULL,NULL) = -1 errno=24\n" + EXIT),
+    ("accept on a channel with an address pointer, -ENOTSOCK", "1 accept(0,0x40007ff8b0,0x40007ff8c8) = -1 errno=88\n"
+     + EXIT),
+    ("sendto with MSG_DONTWAIT on a channel, -ENOTSOCK",
+     '1 sendto(1,"hi",2,MSG_DONTWAIT,NULL,0) = -1 errno=88\n' + EXIT),
     ("a wait4 whose return came after a signal line on its line",
      "1 wait4(-1,0x40007ff8b0,1,NULL)--- SIGALRM {si_signo=SIGALRM, si_code=SI_KERNEL} ---\n = -1 errno=10\n" + EXIT),
     # -- the answers the model gives ---------------------------------------------------------------------------------
@@ -384,18 +421,17 @@ REJECT = [
     # -- by name: no arm in spec_table -------------------------------------------------------------------------------
     ("getppid (no arm 173)", "1 getppid() = 1\n" + EXIT),
     ("kill (no arm 129)", "1 kill(1234,SIGTERM) = 0\n" + EXIT),
-    ("set_robust_list (no arm 99)", "1 set_robust_list(0x40007ff8b0,24) = 0\n" + EXIT),
     # -- the address space -------------------------------------------------------------------------------------------
     ("MAP_FIXED at address 0", "1 mmap(0,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0\n"
      + EXIT),
     ("MAP_POPULATE",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0) = 0x100000\n" + EXIT),
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_POPULATE,-1,0) = 0x100000\n" + EXIT),
     ("an anonymous mmap with an aligned nonzero offset",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,4096) = 0x100000\n" + EXIT),
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,4096) = 0x100000\n" + EXIT),
     ("an mmap grant that lands on a live mapping",
-     MADVISE_GRANT + "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT),
+     MADVISE_GRANT + "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT),
     ("an mmap grant that lands on the image",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x10000\n" + EXIT),
+     "1 mmap(0x10000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x10000\n" + EXIT),
     ("an mmap that failed with -EEXIST",
      "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = -1 errno=17\n" + EXIT),
     ("an rw MAP_FIXED ending one page above the smallest alloc_top",
@@ -403,12 +439,14 @@ REJECT = [
      + EXIT),
     ("a MAP_FIXED that came back at another address",
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x200000\n" + EXIT),
-    ("a munmap of a free range above the smallest alloc_top", "1 munmap(0x7fff7f800000,4096) = 0\n" + EXIT),
-    ("an interior partial munmap",
-     "1 mmap(NULL,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
-     "1 munmap(0x100000,4096) = 0\n" + EXIT),
-    ("a munmap of a tracked mapping that failed", MADVISE_GRANT + "1 munmap(0x100000,262144) = -1 errno=12\n" + EXIT),
-    ("a file mapping with an aligned offset", "1 mmap(NULL,4096,PROT_EXEC,MAP_SHARED,3,4096) = 0x100000\n" + EXIT),
+    ("a file mmap of a descriptor the run does not hold that succeeded",
+     "1 mmap(NULL,4096,PROT_READ,MAP_PRIVATE,5,0) = 0x100000\n" + EXIT),
+    ("DONTNEED over the page an interior munmap cut",
+     "1 mmap(0x100000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 munmap(0x100000,4096) = 0\n1 madvise(0x100000,4096,MADV_DONTNEED) = 0\n" + EXIT),
+    ("a munmap of a tracked mapping that failed with -EINVAL",
+     MADVISE_GRANT + "1 munmap(0x100000,262144) = -1 errno=22\n" + EXIT),
+    ("a file mapping with an aligned offset", "1 mmap(0x100000,4096,PROT_EXEC,MAP_SHARED,3,4096) = 0x100000\n" + EXIT),
     ("mprotect to PROT_READ|PROT_EXEC", MADVISE_GRANT + "1 mprotect(0x100000,4096,PROT_READ|PROT_EXEC) = 0\n" + EXIT),
     ("mprotect of a range in no tracked mapping", "1 mprotect(0x100000,4096,PROT_READ|PROT_WRITE) = 0\n" + EXIT),
     ("mprotect of a read-write range that failed",
@@ -418,9 +456,9 @@ REJECT = [
     ("an mremap whose source is not one whole mapping",
      MADVISE_GRANT + "1 mremap(1048576,4096,8192,1,0,0) = 2097152\n" + EXIT),
     ("an mremap shrink that moved", MADVISE_GRANT + "1 mremap(1048576,262144,131072,1,0,0) = 2097152\n" + EXIT),
-    ("an mremap grow onto a live mapping",
+    ("an mremap grow that moved though it had room above its source (mremap_inplace_room_b)",
      MADVISE_GRANT + "1 mmap(0x200000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x200000\n"
-     "1 mremap(1048576,262144,524288,1,0,0) = 2097152\n" + EXIT),
+     "1 mremap(1048576,262144,524288,1,0,0) = 4194304\n" + EXIT),
     ("an mremap of a PROT_NONE reservation", GRANT_NONE + "1 mremap(1048576,65536,131072,1,0,0) = 1048576\n" + EXIT),
     ("a brk query that answered another address", "1 brk(NULL) = 0x100000\n1 brk(NULL) = 0x200000\n" + EXIT),
     ("a brk grow that answered neither the request nor the break",
@@ -443,7 +481,7 @@ REJECT = [
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0) = -1 errno=17 "
      "(File exists)\n" + EXIT),
     ("a grant over an occupied range",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
      "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0) = 0x100000\n"
      + EXIT),
     ("a grant placed elsewhere than the address",
@@ -458,11 +496,11 @@ REJECT = [
     ("an unaligned DONTNEED that returned 0", MADVISE_GRANT + "1 madvise(0x100001,4096,MADV_DONTNEED) = 0\n" + EXIT),
     ("DONTNEED over a range nothing tracked", "1 madvise(0x200000,4096,MADV_DONTNEED) = 0\n" + EXIT),
     ("DONTNEED across the end of its grant",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
      "1 madvise(0x100000,8192,MADV_DONTNEED) = -1 errno=12\n" + EXIT),
     ("DONTNEED across two adjacent grants",
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x101000\n"
+     "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(0x101000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x101000\n"
      "1 madvise(0x100000,8192,MADV_DONTNEED) = 0\n" + EXIT),
     ("DONTNEED inside a live grant, -ENOMEM", MADVISE_GRANT + "1 madvise(0x100000,4096,MADV_DONTNEED) = -1 errno=12\n"
      + EXIT),
@@ -480,9 +518,13 @@ REJECT = [
     ("a create answered -ENOSPC", '1 openat(AT_FDCWD,"f",O_WRONLY|O_CREAT|O_TRUNC,0644) = -1 errno=28\n' + EXIT),
     ("unlinkat that removed a /tmp key never created", '1 unlinkat(AT_FDCWD,"/tmp/x.gz",0) = 0\n' + EXIT),
     ("unlinkat of two components under /tmp", '1 unlinkat(AT_FDCWD,"/tmp/a/b",0) = 0\n' + EXIT),
-    ("unlinkat of a /tmp key with a descriptor open on it",
-     '1 openat(AT_FDCWD,"/tmp/o.gz",O_WRONLY|O_CREAT|O_TRUNC,0600) = 3\n'
-     '1 unlinkat(AT_FDCWD,"/tmp/o.gz",0) = 0\n' + EXIT),
+    ("an unlink of a name with a trailing separator that succeeded", '1 unlinkat(AT_FDCWD,"x.gz/",0) = 0\n' + EXIT),
+    ("an exclusive append create of \".\" that succeeded",
+     '1 openat(AT_FDCWD,".",O_WRONLY|O_CREAT|O_EXCL|O_APPEND,0644) = 3\n' + EXIT),
+    ("/proc/self/fd of a named file", OPEN3 + '1 openat(AT_FDCWD,"/proc/self/fd/3",O_RDONLY) = 4\n' + EXIT),
+    ("ftruncate of an unnamed file opened read-only",
+     '1 openat(AT_FDCWD,"/tmp/t",O_RDWR|O_CREAT|O_EXCL,0600) = 3\n1 openat(AT_FDCWD,"/tmp/t",O_RDONLY) = 4\n'
+     '1 unlinkat(AT_FDCWD,"/tmp/t",0) = 0\n1 ftruncate(4,0) = 0\n' + EXIT),
     ("unlinkat relative to a dirfd", '1 unlinkat(3,"x.gz",0) = 0\n' + EXIT),
     ("fstat of standard output", "1 fstat(1,0x40007ff8b0) = 0\n" + EXIT),
     ("fstat of a directory", OPENDIR3 + "1 fstat(3,0x40007ff8b0) = 0\n" + EXIT),
@@ -567,7 +609,11 @@ REJECT = [
     ("getgroups delivering a list", "1 getgroups(32,0x40007ff8b0) = 3\n" + EXIT),
     ("setgroups that succeeded", "1 setgroups(0,NULL) = 0\n" + EXIT),
     ("wait4 for a pid that succeeded", "1 wait4(1234,0x40007ff8b0,0,NULL) = 1234\n" + EXIT),
-    ("eventfd2 with EFD_SEMAPHORE", "1 eventfd2(0,1) = 3\n" + EXIT),
+    ("eventfd2 that returned a descriptor the run holds", OPEN3 + "1 eventfd2(0,1) = 3\n" + EXIT),
+    ("dup of an eventfd", "1 eventfd2(0,0) = 3\n1 dup(3) = 4\n" + EXIT),
+    ("F_SETFL O_APPEND on an eventfd", "1 eventfd2(0,0) = 3\n1 fcntl(3,F_SETFL,O_APPEND) = 0\n" + EXIT),
+    ("epoll_ctl on a stdio channel target answered -EPERM", "1 epoll_ctl(1,1,0,0x1000,0,0) = -1 errno=1\n" + EXIT),
+    ("epoll_ctl(EPOLL_CTL_DEL) answered -EFAULT", OPEN3 + "1 epoll_ctl(3,2,3,0,0,0) = -1 errno=14\n" + EXIT),
     ("epoll_create1(0)", "1 epoll_create1(0) = 3\n" + EXIT),
     ("epoll_ctl that succeeded", "1 epoll_ctl(4,1,3,274886295552,0,0) = 0\n" + EXIT),
     ("epoll_pwait that returned an event", "1 epoll_pwait(4,274886295552,64,-1,0,8) = 1\n" + EXIT),
@@ -585,6 +631,15 @@ REJECT = [
     ("setsockopt that succeeded", SOCKET3 + "1 setsockopt(3,1,2,0x40007ff8b0,0x4) = 0\n" + EXIT),
     ("sendto with flags 0", SOCKET3 + '1 sendto(3,"hi",2,0,NULL,0) = 2\n' + EXIT),
     ("sendto on a file", OPEN3 + '1 sendto(3,"hi",2,MSG_NOSIGNAL,NULL,0) = 2\n' + EXIT),
+    ("socket AF_UNIX SOCK_DGRAM answered -ENOBUFS", "1 socket(PF_UNIX,SOCK_DGRAM,0) = -1 errno=105\n" + EXIT),
+    ("socket AF_UNIX SOCK_DGRAM with protocol 1", "1 socket(PF_UNIX,SOCK_DGRAM,1) = 3\n" + EXIT),
+    ("socketpair AF_UNIX SOCK_DGRAM", "1 socketpair(PF_UNIX,SOCK_DGRAM,0,0x40007ff8b0) = 0\n" + EXIT),
+    ("sendto with MSG_DONTWAIT on a socket", SOCKET3 + '1 sendto(3,"hi",2,MSG_DONTWAIT,NULL,0) = -1 errno=32\n' + EXIT),
+    ("sendto on a datagram socket", DGRAM3 + '1 sendto(3,"hi",2,MSG_NOSIGNAL,NULL,0) = 2\n' + EXIT),
+    ("listen on a datagram socket", DGRAM3 + "1 listen(3,5) = 0\n" + EXIT),
+    ("accept on a datagram socket", DGRAM3 + "1 accept(3,NULL,NULL) = -1 errno=22\n" + EXIT),
+    ("getsockname of a datagram socket", DGRAM3 + "1 getsockname(3,0x40007ff8b0,0x40007ff8c8) = 0\n" + EXIT),
+    ("shutdown of a datagram socket", DGRAM3 + "1 shutdown(3,1,0,0,0,0) = 0\n" + EXIT),
     ("a write on a socket", SOCKET3 + "1 write(3,0x1000,2) = 2\n" + EXIT),
     ("shutdown(SHUT_RD) that succeeded", SOCKET3 + "1 shutdown(3,0,0,0,0,0) = 0\n" + EXIT),
     # -- answers the model does not give -----------------------------------------------------------------------------
@@ -697,11 +752,11 @@ REJECT = [
     ("an unmodeled call behind a blocked modeled one", OPEN3 + "1 read(3,0x1000,64)1 getppid() = 1\n = 64\n" + EXIT),
     ("an unmodeled call behind a modeled one", "1 write(1,0x1000,2)1 kill(1234,SIGTERM) = 0\n" + EXIT),
     ("an Unknown syscall line after an open record", "1 write(1,0x1000,2)1 Unknown syscall 173\n" + EXIT),
-    ("a partial munmap whose return the blocked mmap before it would take",
-     "1 mmap(NULL,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
-     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0)1 munmap(0x100000,4096) = 0\n" + EXIT),
+    ("a munmap of the image whose return the blocked mmap before it would take",
+     "1 mmap(0x100000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+     "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0)1 munmap(0x10000,4096) = 0\n" + EXIT),
 ]
-NAME_REJECTS = 3       # the first REJECT plants are about the name; the rest are about a shape or an answer
+NAME_REJECTS = 2       # the first REJECT plants are about the name; the rest are about a shape or an answer
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -748,7 +803,7 @@ def test_interleaved_plants_are_really_interleaved():
 
 @needs_model
 def test_a_truncated_trace_fails_only_with_require_exit(model, image):
-    for text in ("", "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000"):
+    for text in ("", "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000"):
         result = check(model, image, text)
         assert (result["verdict"], result["exited"], result["unmodeled"]) == ("fail", False, [])
         assert check(model, image, text, require_exit=False)["verdict"] == "pass"
@@ -808,7 +863,7 @@ def test_a_missing_host_log_decides_nothing(model, image):
     ("1 write(1,0x1000,-1) = -1 errno=14", "the write's count"),
     ("1 read(0,0x1000,8) = 8", "the read's count"),
     ("1 getcwd(0x40007ff8b0,1) = -1 errno=34", "the getcwd size"),
-    ("1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000", "the mmap length"),
+    ("1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000", "the mmap length"),
     ("1 munmap(0x8000000000,4096) = 0", "the munmap length"),
     ("1 mprotect(0x100000,4096,PROT_READ|PROT_WRITE) = 0", "the mprotect length"),
     ("1 madvise(0x100000,4096,MADV_DONTNEED) = 0", "the madvise length"),
@@ -943,6 +998,16 @@ def test_after_a_pipe2_an_untracked_descriptor_declines(model, image, call):
     assert "never opened" in one_why(check(model, image, "1 " + call + "\n" + EXIT))
     bad = "1 pipe2(0x40007ff8b0,0) = 0\n1 " + call.split(" = ")[0] + " = -1 errno=9\n" + EXIT
     assert check(model, image, bad)["verdict"] == "pass"
+
+
+@needs_model
+def test_after_an_af_unix_socketpair_an_untracked_descriptor_declines(model, image):
+    # Sys/Net/Socket.v socketpair_unix_written installs two FdStream ends at numbers it writes to memory.
+    text = "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x40007ff8b0) = 0\n1 getsockname(5,0x40007ff8b0,0x40007ff8c8) = 0\n"
+    assert "socketpair" in one_undecided(check(model, image, text + EXIT))
+    # A failed socketpair installs nothing.
+    failed = "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x40007ff8b0) = -1 errno=24\n1 getsockname(5,0x1,0x2) = 0\n"
+    assert "never opened" in one_why(check(model, image, failed + EXIT))
 
 
 @needs_model
@@ -1234,17 +1299,18 @@ def test_the_band_is_read_from_the_model(tmp_path, image):
 OLD_NAMES = set("""brk close exit exit_group getrandom ioctl lseek mmap mprotect munmap openat read readlinkat
 set_tid_address write writev clock_gettime fstat fcntl newfstatat rt_sigprocmask getuid geteuid getcwd pipe2 nanosleep
 sched_getaffinity dup3 faccessat rt_sigaction unlinkat readv madvise sched_yield clone3""".split())
-NO_ARM = {"getppid", "kill", "set_robust_list", "rt_sigreturn"}
+NO_ARM = {"getppid", "kill", "rt_sigreturn"}
 
 
 @needs_model
 def test_the_table(model):
-    assert len(model.numbers) == 90
+    assert len(model.numbers) == 93
     assert list(model.numbers) == sorted(model.numbers), "the table keeps its arms sorted by number"
     assert OLD_NAMES <= model.names and not NO_ARM & model.names
-    assert {n: model.arms[n] for n in (17, 56, 63, 64, 94, 124, 222, 233, 435, 439)} == {
-        17: "getcwd", 56: "openat", 63: "read", 64: "write", 94: "exit_group", 124: "sched_yield", 222: "mmap",
-        233: "madvise", 435: "clone3", 439: "faccessat2"}
+    assert {n: model.arms[n] for n in (17, 56, 63, 64, 94, 99, 114, 124, 222, 233, 287, 435, 439)} == {
+        17: "getcwd", 56: "openat", 63: "read", 64: "write", 94: "exit_group", 99: "set_robust_list",
+        114: "clock_getres", 124: "sched_yield", 222: "mmap", 233: "madvise", 287: "pwritev2", 435: "clone3",
+        439: "faccessat2"}
 
 
 @needs_model
@@ -1292,11 +1358,13 @@ def test_the_rules_were_read_against_this_checkout():
     assert model_release.stale(MODEL_ROOT, S.MODEL_FILES) == [], (
         f"{MODEL_ENV} is not the model at {S.MODEL_COMMIT}, or a rule's file changed")
     assert all(path.startswith(S.MODEL_DIR + "/") for path in S.MODEL_FILES)
-    for rel in MODEL_FILES_READ + ("Fs.v", "Monad.v", "Run.v", "Sys/Syscall.v", "Sys/Dispatch.v"):
+    # Vdso.v: vdso_errno reads vdso_fn_sysno, which says which calls have a vDSO function
+    for rel in MODEL_FILES_READ + ("Fs.v", "Monad.v", "Run.v", "Sys/Syscall.v", "Sys/Dispatch.v", "Vdso.v"):
         assert f"{S.MODEL_DIR}/{rel}" in S.MODEL_FILES
     # Every model file the checkout has under the directories the rules read is hashed.
     base = pathlib.Path(MODEL_ROOT) / S.MODEL_DIR
-    for path in list(base.glob("Sys/**/*.v")) + [base / n for n in ("Fs.v", "Monad.v", "Run.v", "Specs.v", "State.v")]:
+    tops = ("Fs.v", "Monad.v", "Run.v", "Specs.v", "State.v", "Vdso.v")
+    for path in list(base.glob("Sys/**/*.v")) + [base / n for n in tops]:
         assert f"{S.MODEL_DIR}/{path.relative_to(base)}" in S.MODEL_FILES, path
 
 
@@ -1329,6 +1397,20 @@ def broken(tmp_path, rel, old, new):
 def test_a_model_these_rules_cannot_read_is_refused(tmp_path, rel, old, new, needle):
     with pytest.raises(Failed, match=needle):
         S.Model.load(broken(tmp_path, rel, old, new))
+
+
+@needs_model
+def test_the_arms_of_release_2026_11_3_are_named(tmp_path):
+    # The model of release 2026.11.3 (c0dd863a) adds these arms; a table that cannot name one refuses the whole model.
+    # The copy gets each one the checkout lacks, so the test holds at the pinned model and at c0dd863a alike.
+    added = {99: "set_robust_list", 114: "clock_getres", 287: "pwritev2"}
+    table = (pathlib.Path(MODEL_ROOT) / S.MODEL_DIR / "Sys/SyscallTable.v").read_text(encoding="utf-8")
+    have = {int(n) for n in S.ARM.findall(table)}
+    arms = "".join(f"  (* {name} *) mkSpecArm {n}%Z (fun i => {name}_spec i) ::\n"
+                   for n, name in added.items() if n not in have)
+    loaded = S.Model.load(broken(tmp_path, "Sys/SyscallTable.v", "  nil.\n", arms + "  nil.\n"))
+    assert {n: loaded.arms[n] for n in added} == added
+    assert set(added.values()) <= loaded.names
 
 
 @needs_model
@@ -1450,6 +1532,9 @@ def test_an_unknown_syscall_number(model, image):
     result = check(model, image, "1 Unknown syscall 435\n" + EXIT)
     why = one_why(result, "clone3")
     assert "arguments" in why and "ENOSYS" in why
+    # 287 is pwritev2: qemu runs it on the host and prints neither an argument nor the return, so it is undecided.
+    why = one_undecided(check(model, image, "1 Unknown syscall 287\n" + EXIT), "pwritev2")
+    assert "Unknown syscall 287" in why and "ENOSYS" not in why
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -1508,28 +1593,28 @@ GIFLIB_TRACE = "".join(line + "\n" for line in [
     "MAP_NORESERVE,-1,0) = 0x000000008fff7000",
     "66 mmap(0x000002008fff7000,-268431360,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|"
     "MAP_FIXED_NOREPLACE|MAP_NORESERVE,-1,0) = 0x000002008fff7000",
-    "66 mmap(NULL,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db287000",
-    "66 mmap(NULL,3727360,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368d8fef000",
-    "66 mmap(NULL,69632,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x00007348cbfef000",
+    "66 mmap(0x00007368db287000,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db287000",
+    "66 mmap(0x00007368d8fef000,3727360,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368d8fef000",
+    "66 mmap(0x00007348cbfef000,69632,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x00007348cbfef000",
     "66 mmap(0x00007368cbff0000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|"
     "MAP_FIXED,-1,0) = 0x00007368cbff0000",
-    "66 mmap(NULL,8388608,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x00007368d8600000",
-    "66 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db286000",
-    "66 mmap(NULL,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db276000",
-    "66 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db275000",
-    "66 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db274000",
-    "66 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db273000",
+    "66 mmap(0x00007368d8600000,8388608,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x00007368d8600000",
+    "66 mmap(0x00007368db286000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db286000",
+    "66 mmap(0x00007368db276000,65536,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db276000",
+    "66 mmap(0x00007368db275000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db275000",
+    "66 mmap(0x00007368db274000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db274000",
+    "66 mmap(0x00007368db273000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db273000",
     "66 munmap(0x00007368db273000,4096) = 0",
-    "66 mmap(NULL,11571200,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007348cb4e6000",
+    "66 mmap(0x00007348cb4e6000,11571200,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007348cb4e6000",
     "66 brk(NULL) = 0x0000000000626000",
     "66 brk(0x0000000000628000) = 0x0000000000628000",
     "66 mmap(0x0000000000626000,4096,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x0000000000626000",
-    "66 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db273000",
-    "66 mmap(NULL,1048576,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368d8eef000",
-    "66 mmap(NULL,8388608,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x00007348cac00000",
-    "66 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db272000",
+    "66 mmap(0x00007368db273000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db273000",
+    "66 mmap(0x00007368d8eef000,1048576,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368d8eef000",
+    "66 mmap(0x00007348cac00000,8388608,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE,-1,0) = 0x00007348cac00000",
+    "66 mmap(0x00007368db272000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db272000",
     "66 openat(AT_FDCWD,\"input.bin\",O_RDONLY|O_LARGEFILE) = 4",
-    "66 mmap(NULL,73728,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db260000",
+    "66 mmap(0x00007368db260000,73728,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x00007368db260000",
     "66 mmap(0x00007368d8600000,131072,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|"
     "MAP_FIXED,-1,0) = 0x00007368d8600000",
     "66 read(4,0x5f2c50,65536) = 6",
@@ -1652,9 +1737,12 @@ def gif_plus(model, image, lines):
 
 
 @needs_model
-def test_a_real_asan_run_passes_with_its_host_call_log(model, giflib_image):
+def test_a_real_asan_run_is_not_refused_with_its_host_call_log(model, giflib_image):
+    # qemu places the run's high mappings where the vdso/vvar pair of vm_reserved may lie (State.v init_reserved), at a
+    # place the trace does not show, so those calls decide nothing; no call is outside the model.
     result = gif(model, giflib_image)
-    assert result["verdict"] == "pass", result["unmodeled"]
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], result["unmodeled"]
+    assert all("vdso/vvar" in u["why"] for u in result["undecided"]), result["undecided"]
     assert (result["calls"], result["host_log"], result["exited"]) == (40, "present", True)
     assert "openat" in result["names"] and "writev" in result["names"]
 
@@ -1662,7 +1750,7 @@ def test_a_real_asan_run_passes_with_its_host_call_log(model, giflib_image):
 @needs_model
 def test_the_real_run_reads_its_input_exactly(model, giflib_image):
     # With input.bin's six bytes known, its two reads have one answer each: 6, then 0 at the end of the file.
-    assert gif(model, giflib_image, inputs={"input.bin": GIFLIB_INPUT})["verdict"] == "pass"
+    assert gif(model, giflib_image, inputs={"input.bin": GIFLIB_INPUT})["unmodeled"] == []
     longer = gif(model, giflib_image, inputs={"input.bin": bytes(7)})
     assert longer["verdict"] == "fail" and longer["unmodeled"][0]["call"] == "read", longer["unmodeled"]
     why = longer["unmodeled"][0]["why"]
@@ -1683,7 +1771,7 @@ def test_the_real_run_without_its_host_call_log(model, giflib_image):
 def test_the_real_run_with_a_host_line_changed(model, giflib_image):
     # The high shadow's length is 0xDFFF0001000; without that line the printed -268431360 stands and declines.
     short = GIFLIB_CALLS.replace("mmap 2201439137792 2008fff7000 dfff0001000 3 104022 ffffffff 0\n", "")
-    assert "not pinned" in one_undecided(gif(model, giflib_image, lengths=short), "mmap")
+    assert any("not pinned" in u["why"] for u in gif(model, giflib_image, lengths=short)["undecided"])
     wrong = GIFLIB_CALLS.replace("dfff0001000 3 104022", "dfff0002000 3 104022")
     assert gif(model, giflib_image, lengths=wrong)["verdict"] != "pass"
 
@@ -1695,20 +1783,20 @@ def test_the_real_run_knows_which_descriptor_is_qemus(model, giflib_image):
     # both descriptors the model's table does not have, and only -EBADF is its answer.
     assert "never opened" in one_why(gif_plus(model, giflib_image, ["write(3,0x5f2c50,16) = 16"]), "write")
     assert "never opened" in one_why(gif_plus(model, giflib_image, ["read(4,0x5f2c50,16) = 16"]), "read")
-    assert gif_plus(model, giflib_image, ["read(4,0x5f2c50,16) = -1 errno=9"])["verdict"] == "pass"
+    assert gif_plus(model, giflib_image, ["read(4,0x5f2c50,16) = -1 errno=9"])["unmodeled"] == []
 
 
 @needs_model
 @pytest.mark.parametrize("line,verdict,needle", [
-    # the low shadow is read-write, the 2 TiB gap PROT_NONE (vm_noaccess)
-    ("madvise(0x000000007fff7000,4096,MADV_DONTNEED) = 0", "pass", None),
+    # the low shadow is read-write, the 2 TiB gap PROT_NONE (vm_noaccess); the run's other calls are undecided
+    ("madvise(0x000000007fff7000,4096,MADV_DONTNEED) = 0", "undecided", None),
     ("madvise(0x000000008fff7000,4096,MADV_DONTNEED) = 0", "fail", "vm_noaccess"),
-    # inside the 128 GiB arena: a 256 KiB rw commit, and the PROT_NONE page just past it
-    ("madvise(0x00007349cbff0000,262144,MADV_DONTNEED) = 0", "pass", None),
-    ("madvise(0x00007349cc030000,4096,MADV_DONTNEED) = 0", "fail", "vm_noaccess"),
+    # inside the 128 GiB arena, above where the vdso/vvar pair may lie
+    ("madvise(0x00007349cbff0000,262144,MADV_DONTNEED) = 0", "undecided", None),
+    ("madvise(0x00007349cc030000,4096,MADV_DONTNEED) = 0", "undecided", None),
     # the guard page over the heap's last page
     ("madvise(0x0000000000626000,4096,MADV_DONTNEED) = 0", "fail", "vm_noaccess"),
-    ("madvise(0x0000000000627000,4096,MADV_DONTNEED) = 0", "pass", None),
+    ("madvise(0x0000000000627000,4096,MADV_DONTNEED) = 0", "undecided", None),
     # the image
     ("madvise(0x0000000000010000,4096,MADV_DONTNEED) = 0", "fail", "image"),
     ("munmap(0x0000000000010000,4096) = 0", "fail", "image"),
@@ -1728,7 +1816,7 @@ def test_the_real_runs_ledgers(model, giflib_image, line, verdict, needle):
     ("1 brk(0x102000) = 0x102000\n" + EXIT, "brk", "first brk call is not a query"),
     ('1 openat(AT_FDCWD,"a-very-long-name...",O_RDONLY) = 3\n' + EXIT, "openat", "cut short"),
     ('1 unlinkat(AT_FDCWD,"a-very-long-name...",0) = 0\n' + EXIT, "unlinkat", "cut short"),
-    ("1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS) = 0x100000\n" + EXIT, "mmap", "unparseable"),
+    ("1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS) = 0x100000\n" + EXIT, "mmap", "unparseable"),
     ("1 write(1,0x1000,2)1 close(9) = -1 errno=9\n" + EXIT, "write", "not where qemu writes it"),
     ('1 openat(AT_FDCWD,"f",O_WRONLY|O_CREAT|O_TRUNC,0644) = 3\n1 ftruncate(3,1099511627776) = 0\n' + EXIT,
      "ftruncate", "modeled_truncate_gap"),
@@ -1738,10 +1826,83 @@ def test_the_real_runs_ledgers(model, giflib_image, line, verdict, needle):
     ("1 mmap(NULL,0,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = -1 errno=22\n" + EXIT, "mmap",
      "the mmap length"),
     (MADVISE_GRANT + "1 madvise(0x100000,0,MADV_DONTNEED) = 0\n" + EXIT, "madvise", "the madvise length"),
+    # Sys/Mm/Mmap.v linux_place: an unhinted grant is the top-down search's, under the run's mmap base.
+    ("1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT, "mmap",
+     "no launch's vdso pair"),
+    # Sys/Mm/Mmap.v linux_place honours a free hint; the tracer's host mmap may not.
+    ("1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n" + EXIT, "mmap",
+     "free hint"),
+    ("1 mmap(0x7fff00000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7fff00000000\n" + EXIT,
+     "mmap", "place_declined_b"),
+    # State.v init_reserved: the vdso/vvar pair is in vm_reserved, at a place the trace does not show.
+    ("1 mmap(0x7fff7f7ff000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x7fff7f7ff000\n"
+     + EXIT, "mmap", "vdso/vvar"),
+    ("1 munmap(0x7fff7f800000,4096) = 0\n" + EXIT, "munmap", "vdso/vvar"),
+    ("1 mprotect(0x7fff00000000,4096,PROT_READ|PROT_WRITE) = 0\n" + EXIT, "mprotect", "vdso/vvar"),
+    # Sys/Mm/Mremap.v mremap_dst_ok: a grow with no room above its source moves where linux_place puts it.
+    (MADVISE_GRANT + "1 mmap(0x140000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = 0x140000\n"
+     "1 mremap(1048576,262144,524288,1,0,0) = 4194304\n" + EXIT, "mremap", "mremap_dst_ok"),
     ('1 openat(AT_FDCWD,"a\n' + EXIT, "openat", "no closing parenthesis"),
 ])
 def test_what_the_trace_does_not_decide(model, image, text, call, needle):
     assert needle in one_undecided(check(model, image, text), call)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Placement: the run's first top-down grant places the vdso pair (Ledger.infer_vdso), and each later one must be
+# the model's top-down search (Sys/Mm/Mmap.v topdown_search, thp_align). The grant ends at 0x7f16feab3000.
+# ---------------------------------------------------------------------------------------------------------------------
+FIRST = "1 mmap(NULL,69632,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16feaa2000\n"
+
+
+def grant(n, at, flags="MAP_PRIVATE|MAP_ANONYMOUS"):
+    return f"1 mmap(NULL,{n},PROT_READ|PROT_WRITE,{flags},-1,0) = {at:#x}\n"
+
+
+@needs_model
+@pytest.mark.parametrize("text,verdict,needle", [
+    # the first grant alone, and freed: the launch whose pair starts at its end
+    (FIRST, "pass", None),
+    (FIRST + "1 munmap(0x7f16feaa2000,69632) = 0\n", "pass", None),
+    # the next grant directly below it, the highest gap
+    (FIRST + grant(4096, 0x7f16feaa1000), "pass", None),
+    # a 2 MiB grant: under kb_thp, thp_align of the 4 MiB search's 0x7f16fe6a2000; without it, the 2 MiB search
+    (FIRST + grant(2097152, 0x7f16fe800000), "pass", None),
+    (FIRST + grant(2097152, 0x7f16fe8a2000), "pass", None),
+    # the tracer put the grant elsewhere: its host mmap, not the binary, chose it, so it is undecided, never a fail
+    (FIRST + grant(4096, 0x7f16fe000000), "undecided", "not the binary's"),
+    (FIRST + grant(4096, 0x7f16fe000000) + grant(4096, 0x7f16fdfff000), "undecided", "not the binary's"),
+    # kb_thp decides where a first grant of a PMD multiple puts the pair
+    (grant(2097152, 0x7f16fe800000), "undecided", "kb_thp"),
+    # a hinted grant takes no THP branch (Sys/Mm/Mmap.v linux_place: only a hint that rounds to 0 does): a hint that
+    # meets the first grant goes to the plain top-down search, whose only answer is 0x7f16fe8a2000
+    (FIRST + "1 mmap(0x7f16fe8b3000,2097152,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe8a2000\n",
+     "pass", None),
+    (FIRST + "1 mmap(0x7f16fe8b3000,2097152,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe800000\n",
+     "undecided", "not the binary's"),
+    # a grant the tracer put away from its free hint is still recorded: a later call on it is no call on free memory
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f0000100000\n"
+     "1 madvise(0x7f0000100000,4096,MADV_DONTNEED) = 0\n", "undecided", "not its free hint"),
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f0000100000\n"
+     "1 mremap(139637977776128,4096,4096,1,0,0) = 139637977776128\n", "undecided", "not its free hint"),
+    # kb_thp is one per run: a 2 MiB grant at the answer without it, then one at the answer with it, agree on none
+    (FIRST + grant(2097152, 0x7f16fe8a2000) + grant(2097152, 0x7f16fe600000), "undecided", "not the binary's"),
+    # a range the pair may hold: its length follows the kernel build
+    (FIRST + "1 munmap(0x7f16feab3000,4096) = 0\n", "undecided", "first top-down grant placed"),
+    # a refusal above the vdso floor may be the tracer's own mapping
+    (FIRST + "1 mmap(0x7f0000000000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0) = "
+     "-1 errno=17\n", "undecided", "tracer's"),
+    # negative controls: requests outside the model whatever the placement still fail
+    (FIRST + grant(4096, 0x7f16feaa1000, "MAP_SHARED|MAP_ANONYMOUS"), "fail", "modeled shapes"),
+    (FIRST + "1 kill(1234,SIGTERM) = 0\n", "fail", "not an arm of spec_table"),
+])
+def test_the_placement_replay(model, image, text, verdict, needle):
+    result = check(model, image, text + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if verdict == "undecided":
+        assert result["unmodeled"] == [] and needle in result["undecided"][0]["why"], result["undecided"]
+    elif verdict == "fail":
+        assert needle in one_why(result)
 
 
 @needs_model
@@ -1759,6 +1920,62 @@ def test_a_failed_map_fixed_over_live_memory_leaves_its_range_undecided(model, i
 
 
 @needs_model
+def test_an_munmap_of_an_unpinned_length_leaves_its_range_unknown(model, image):
+    """The reserved_va run's finding, in small: an munmap whose length no host line pins decides nothing, and it may
+    have unmapped more than its printed length, so a later grant over that range is undecided, never a fail."""
+    text = (FIRST + grant(4096, 0x7f16feaa1000) + "1 munmap(0x7f16feaa1000,4096) = 0\n" + grant(8192, 0x7f16feaa0000)
+            + EXIT)
+    log = "".join(ln + "\n" for ln in faithful_log(text).splitlines() if not ln.startswith("munmap "))
+    result = check(model, image, text, lengths=log)
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], (result["unmodeled"], result["undecided"])
+    assert [u["call"] for u in result["undecided"]] == ["munmap", "mmap"], result["undecided"]
+    assert "munmap length" in result["undecided"][0]["why"]
+
+
+MADVISE = "1 madvise({:#x},4096,MADV_DONTNEED) = 0\n"
+
+
+def drop_host_line(text, nth, call):
+    """The faithful host log of `text`, less the `nth` (0-based) line for `call`: a call whose length no line pins."""
+    lines, seen = [], 0
+    for ln in faithful_log(text).splitlines():
+        if ln.startswith(call + " "):
+            seen += 1
+            if seen - 1 == nth:
+                continue
+        lines.append(ln + "\n")
+    return "".join(lines)
+
+
+@needs_model
+@pytest.mark.parametrize("label,text,dropped,first", [
+    # a 1 MiB grant that starts inside the pair's band, then a madvise above the band inside the grant
+    ("grant in the pair's band", FIRST + grant(1048576, 0x7f16feab4000) + MADVISE.format(0x7f16feb00000), None, "mmap"),
+    # a hint that meets the pair's band, returned elsewhere, then a madvise on the grant
+    ("hint in the pair's band",
+     FIRST + "1 mmap(0x7f16feab3000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe000000\n"
+     + MADVISE.format(0x7f16fe000000), None, "mmap"),
+    # an munmap of an unpinned length leaves [addr, TASK_SIZE) unknown; a hint there returned below it; a madvise on it
+    ("hint in an unknown range",
+     FIRST + grant(4096, 0x7f16feaa1000) + "1 munmap(0x7f16feaa1000,4096) = 0\n"
+     + "1 mmap(0x7f16feaa1000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x7f16fe000000\n"
+     + MADVISE.format(0x7f16fe000000), ("munmap", 0), "munmap"),
+    # an mmap of an unpinned length: its grant is live all the same, so a madvise on it is not a call on free memory
+    ("grant of an unpinned length", FIRST + grant(4096, 0x7f16feaa1000) + MADVISE.format(0x7f16feaa1000),
+     ("mmap", 1), "mmap"),
+])
+def test_an_undecided_grant_is_still_live(model, image, label, text, dropped, first):
+    """Review of 85d67d1f: an mmap that comes out undecided still made a grant, so the replay records it (or marks
+    the range it could cover unknown) before answering; a later call on that memory is never judged as a call on
+    free memory. Each case was a fail at 85d67d1f."""
+    text += EXIT
+    log = drop_host_line(text, dropped[1], dropped[0]) if dropped else None
+    result = check(model, image, text, lengths=log) if log else check(model, image, text)
+    assert result["verdict"] == "undecided" and result["unmodeled"] == [], (result["unmodeled"], result["undecided"])
+    assert result["undecided"][0]["call"] == first, result["undecided"]
+
+
+@needs_model
 def test_an_undecided_call_is_not_a_verdict_against_the_run(model, image):
     # One undecided call and one unmodeled call: the unmodeled one decides, and both are reported.
     text = "1 brk(0x102000) = 0x102000\n1 getppid() = 1\n" + EXIT
@@ -1771,8 +1988,8 @@ def test_an_undecided_call_is_not_a_verdict_against_the_run(model, image):
 # ---------------------------------------------------------------------------------------------------------------------
 # The lengths qemu rounds, and the offset it hands on
 # ---------------------------------------------------------------------------------------------------------------------
-GO_MAPS = ("1 mmap(NULL,69648,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
-           "1 mmap(NULL,1439992,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n"
+GO_MAPS = ("1 mmap(0x100000,69648,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+           "1 mmap(0x200000,1439992,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x200000\n"
            "1 munmap(0x200000,1439992) = 0\n")
 
 
@@ -1782,14 +1999,18 @@ def test_a_length_that_is_not_whole_pages_is_found_by_its_rounding(model, image)
     # those lengths rounded up to a page, 0x12000 and 0x160000 (linux-user/mmap.c TARGET_PAGE_ALIGN), and the checker
     # finds the guest's whole length from that line (Arg.unpaged).
     log = faithful_log(GO_MAPS + EXIT)
-    assert "mmap 1048576 0 12000 " in log and "munmap 0 200000 160000 " in log
+    assert "mmap 1048576 100000 12000 " in log and "munmap 0 200000 160000 " in log
     result = check(model, image, GO_MAPS + EXIT)
     assert result["verdict"] == "pass", (result["unmodeled"], result["undecided"])
     # A host line whose length is not the rounding of the printed low 32 bits is no host call of this guest call:
-    # the length stays cut, and the call is undecided.
+    # the length stays cut, and the call is undecided. Its grant is live all the same, so [0x100000, TASK_SIZE)
+    # becomes unknown and the calls after it that meet that range are undecided too, never a fail.
     for wrong in ("11010", "13000"):
-        log = faithful_log(GO_MAPS + EXIT).replace("mmap 1048576 0 12000 ", f"mmap 1048576 0 {wrong} ")
-        assert "the mmap length" in one_undecided(check(model, image, GO_MAPS + EXIT, lengths=log), "mmap")
+        log = faithful_log(GO_MAPS + EXIT).replace("mmap 1048576 100000 12000 ", f"mmap 1048576 100000 {wrong} ")
+        result = check(model, image, GO_MAPS + EXIT, lengths=log)
+        assert result["verdict"] == "undecided" and result["unmodeled"] == [], result
+        assert [u["call"] for u in result["undecided"]] == ["mmap", "mmap", "munmap"], result["undecided"]
+        assert "the mmap length" in result["undecided"][0]["why"]
 
 
 @needs_model
@@ -1797,7 +2018,7 @@ def test_an_anonymous_mmaps_offset_comes_from_its_host_line(model, image):
     # qemu 10.0.11 hands the host the guest's offset (linux-user/mmap.c mmap_h_eq_g), so the host line that pins the
     # length pins the offset too. A printed 0 that the line shows as 2^32 is an offset no anonymous shape has
     # (Sys/Mm/Mmap.v mmap_modeled_b: w_is0 off).
-    text = "1 mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT
+    text = "1 mmap(0x100000,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n" + EXIT
     assert check(model, image, text)["verdict"] == "pass"
     wide = faithful_log(text).replace("ffffffffffffffff 0", "ffffffffffffffff 100000000")
     assert "every anonymous shape needs offset 0" in one_why(check(model, image, text, lengths=wide), "mmap")
@@ -1853,6 +2074,11 @@ CONNECT_CASES = [
     ("AF_INET on an accepted socket that connected", ACCEPTED4 + conn("0", fd=4), (2,), "fail", "connected socket"),
     # A host line without the family (the tracer could not read it) decides nothing.
     ("a connect whose host line has no family", SOCKET3 + conn("0"), (), "undecided", "family"),
+    # Sys/Net/Socket.v connect_spec: a datagram socket is unmodeled past the address copy, and a zero addrlen is never
+    # -EFAULT (move_addr_bytes).
+    ("connect on a datagram socket", DGRAM3 + conn("0"), (), "fail", "datagram socket"),
+    ("addrlen 0 answered -EFAULT", SOCKET3 + conn("-1 errno=14", alen=0), (), "fail", "shorter than a family"),
+    ("addrlen 0 on a channel answered -EFAULT", conn("-1 errno=14", fd=0, alen=0), (), "fail", "channel"),
 ]
 
 
@@ -1869,7 +2095,7 @@ def test_connect_is_answered_by_the_family_in_the_host_call_log(model, image, la
 
 @needs_model
 def test_connect_efault_is_an_address_qemu_could_not_read(model, image):
-    # connect_spec answers -EFAULT when read_bytes_map cannot read the address, before anything else. qemu then
+    # connect_spec answers -EFAULT when move_addr_bytes cannot copy the address, before anything else. qemu then
     # answers it itself, with no host call (target_to_host_sockaddr), so the log has no line for it.
     efault = SOCKET3 + conn("-1 errno=14") + EXIT
     assert check(model, image, efault)["verdict"] == "pass"
@@ -1877,7 +2103,7 @@ def test_connect_efault_is_an_address_qemu_could_not_read(model, image):
     # A host line of the call means qemu did read the address, and then the family's answer stands, never -EFAULT:
     # AF_UNSPEC on a fresh socket answers only 0.
     read = faithful_log(efault, extra=["connect -14 3 7ff8b0 10 0 0 0 0"])
-    assert "read_bytes_map" in one_why(check(model, image, efault, lengths=read), "connect")
+    assert "move_addr_bytes" in one_why(check(model, image, efault, lengths=read), "connect")
     # With no line at all, a success decides nothing: the family is not known.
     assert "family" in one_undecided(check(model, image, SOCKET3 + conn("0") + EXIT, lengths="exec\n"), "connect")
 
@@ -1936,6 +2162,49 @@ def test_a_reported_peer_error_resets_the_socket(model, image, reset, call, fami
 def test_a_connected_socket_answers_neither_epipe_nor_enotconn(model, image, call, verdict):
     result = check(model, image, ACCEPTED4 + "1 " + call + "\n" + EXIT)
     assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+
+
+# Sys/Fs/ReadWrite.v, Stat.v and Sync.v at c0dd863a: access_okb ahead of every transfer, sigpipe_write (which declines
+# under Run.v valid_input), write_fault_extend, and the descriptor kinds FdDgram, FdEventfd and FdAnon.
+TMP_W3 = '1 openat(AT_FDCWD,"/tmp/o",O_WRONLY|O_CREAT|O_TRUNC,0600) = 3\n'
+UNLINK_O = '1 unlinkat(AT_FDCWD,"/tmp/o",0) = 0\n'
+FILEIO_CASES = [
+    ("a channel write past TASK_SIZE that wrote", "1 write(1,0x7fffffff0000,131072) = 131072\n", "fail", "-EFAULT"),
+    ("a connected socket read past TASK_SIZE that delivered", ACCEPTED4 + "1 read(4,0x7ffffffffff0,64) = 16\n",
+     "fail", "access_okb"),
+    ("a fresh socket write past TASK_SIZE, -EFAULT", SOCKET3 + "1 write(3,0x7ffffffffff0,64) = -1 errno=14\n",
+     "pass", None),
+    ("a fresh socket write in range, -EPIPE", SOCKET3 + "1 write(3,0x1000,2) = -1 errno=32\n", "fail", "sigpipe_write"),
+    ("a datagram socket read", DGRAM3 + "1 read(3,0x1000,64) = 2\n", "fail", "FdDgram"),
+    ("a datagram socket write", DGRAM3 + "1 write(3,0x1000,2) = 2\n", "fail", "datagram socket is unmodeled"),
+    ("a datagram socket writev", DGRAM3 + "1 writev(3,0x40007ff8b0,0x1) = 2\n", "fail", "writev_buf_gap"),
+    ("fstat of a datagram socket", DGRAM3 + "1 fstat(3,0x40007ff8b0) = 0\n", "fail", "unmodeled"),
+    ("lseek of a datagram socket, -ESPIPE", DGRAM3 + "1 lseek(3,0,SEEK_SET) = -1 errno=29\n", "pass", None),
+    ("pread64 of an eventfd, -ESPIPE", "1 eventfd2(0,0) = 3\n1 pread64(3,0x1000,8,0) = -1 errno=29\n", "pass", None),
+    ("lseek of an eventfd", "1 eventfd2(0,0) = 3\n1 lseek(3,0,SEEK_SET) = 0\n", "pass", None),
+    ("fsync of an eventfd, -EINVAL", "1 eventfd2(0,0) = 3\n1 fsync(3) = -1 errno=22\n", "pass", None),
+    ("a read of an eventfd", "1 eventfd2(0,0) = 3\n1 read(3,0x1000,8) = 8\n", "undecided", "eventfd_read"),
+    ("readv of an eventfd that delivered", "1 eventfd2(0,0) = 3\n1 readv(3,274886295728,1,0,0,0) = 8\n", "fail",
+     "readv_buf_gap"),
+    ("fsync of an unlinked open file", TMP_W3 + UNLINK_O + "1 fsync(3) = 0\n", "pass", None),
+    ("pread64 of an unlinked open file", TMP_W3 + UNLINK_O + "1 pread64(3,0x1000,8,0) = -1 errno=9\n", "fail",
+     "FdAnon"),
+    ("a write of an unlinked open file", TMP_W3 + UNLINK_O + "1 write(3,0x1000,2) = 2\n", "undecided",
+     "anon_write_place"),
+    ("a read of an unlinked write-only file, -EBADF", TMP_W3 + UNLINK_O + "1 read(3,0x1000,2) = -1 errno=9\n", "pass",
+     None),
+    ("pwrite64 near the file's start", TMP_W3 + "1 pwrite64(3,0x1000,4,4096) = 4\n", "pass", None),
+    ("pwrite64 past rw_bytes_max", TMP_W3 + "1 pwrite64(3,0x1000,4,1048576) = 4\n", "undecided", "write_fault_extend"),
+]
+
+
+@needs_model
+@pytest.mark.parametrize("label,text,verdict,needle", FILEIO_CASES, ids=[c[0] for c in FILEIO_CASES])
+def test_the_read_and_write_arms_of_c0dd863a(model, image, label, text, verdict, needle):
+    result = check(model, image, text + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if needle is not None:
+        assert needle in (whys(result) + [u["why"] for u in result["undecided"]])[0]
 
 
 SOCKET_OPTION_CASES = [
@@ -2209,16 +2478,32 @@ def test_a_call_qemu_answered_itself_takes_none_of_qemus_own_lines(model, image)
     for log in (f"exec\n{QEMU_OWN_MMAP}\n", "exec\n"):
         assert "not pinned" in one_undecided(check(model, image, call + EXIT, lengths=log), "mmap"), log
     # A guest mmap qemu passed to the host agrees with its own line, result and all, and is decided.
-    granted = "1 mmap(NULL,134217728,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x75fd70000000\n"
-    log = f"exec\n{QEMU_OWN_MMAP}\nmmap {0x75fd70000000} 0 8000000 3 22 ffffffff 0\n"
+    granted = "1 mmap(0x10000000,134217728,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x10000000\n"
+    log = f"exec\n{QEMU_OWN_MMAP}\nmmap {0x10000000} 10000000 8000000 3 22 ffffffff 0\n"
     assert check(model, image, granted + EXIT, lengths=log)["verdict"] == "pass"
+
+
+@needs_model
+def test_a_map_fixed_at_an_address_that_reads_as_an_errno(model, image):
+    # Sys/Mm/Mmap.v mmap_fixed_overflow: a range that wraps 2^64 is -ENOMEM, and when the address reads as an errno
+    # (mmap_fixed_err_addr_b) the address itself, which the trace shows as that errno. qemu makes no host call for an
+    # unaligned MAP_FIXED, so the log below is written out to pin the length.
+    def run(addr, length, errno):
+        call = (f"1 mmap({addr:#x},{length},PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED,-1,0) = -1 "
+                f"errno={errno}\n")
+        return check(model, image, call + EXIT, lengths=f"exec\nmmap -{errno} {addr:x} {S.page_round_up(length):x} 3 "
+                                                          "22 ffffffffffffffff 0\n")
+    assert run(0xffffffffffffff00, 4096, 256)["verdict"] == "pass"
+    assert run(0xffffffffffffff00, 4096, S.ENOMEM)["verdict"] == "pass"
+    assert "mmap_fixed_overflow" in one_why(run(0xffffffffffffff00, 4096, S.EINVAL), "mmap")
+    assert "mmap_fixed_overflow" in one_why(run(0xfffffffffff00000, 1 << 20, 1), "mmap")
 
 
 @needs_model
 def test_munmap_mprotect_and_madvise_take_a_line_with_their_result(model, image):
     # The guest's printed length is cut; only a host line with the guest's own result (and, for madvise, its advice)
     # gives it back. A line of the same address and length with another result is another call.
-    grant = "1 mmap(NULL,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
+    grant = "1 mmap(0x100000,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0) = 0x100000\n"
     mmap_line = "mmap 1048576 0 2000 3 22 ffffffff 0"
     for call, own, other in (
             ("munmap(0x100000,8192) = 0", "munmap 0 100000 2000 0 0 0 0", "munmap -22 100000 2000 0 0 0 0"),
@@ -2274,3 +2559,134 @@ def test_input_bin_stays_found_after_a_writable_open(model, image):
                  '1 openat(AT_FDCWD,"input.bin",O_RDONLY|O_LARGEFILE) = -1 errno=2'):
         result = check(model, image, rdwr + line + "\n" + EXIT, inputs={"input.bin": INPUT})
         assert result["verdict"] == "fail", (line, result["undecided"])
+
+
+TASK_TOP = "0x800000000000"         # State.v TASK_SIZE: a pointer there fails access_okb for any length
+KERNEL_CASES = [
+    # Sys/Kernel/Futex/Syscalls.v set_robust_list_spec: 0 for a len of 24, else -EINVAL. qemu prints len's low 32
+    # bits and answers -ENOSYS itself.
+    ("1 set_robust_list(0x40007ff8b0,25) = -1 errno=22", "pass"),
+    ("1 set_robust_list(0x40007ff8b0,25) = 0", "fail"),
+    ("1 set_robust_list(0x40007ff8b0,24) = -1 errno=38", "undecided"),
+    ("1 set_robust_list(0x40007ff8b0,24) = 0", "undecided"),
+    # Sys/Kernel/Time/PosixTimers.v clock_getres_spec.
+    # a success into a tp in range: a read-only tp prints the same, and the model leaves it unmodeled
+    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 1})", "undecided"),
+    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 1,tv_nsec = 0})", "fail"),
+    ("1 clock_getres(CLOCK_PROCESS_CPUTIME_ID,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 4000000})", "fail"),
+    ("1 clock_getres(CLOCK_MONOTONIC,NULL) = 0 (NULL)", "pass"),
+    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0", "undecided"),
+    ("1 clock_getres(CLOCK_SGI_CYCLE,NULL) = -1 errno=22", "pass"),
+    ("1 clock_getres(CLOCK_SGI_CYCLE,NULL) = 0 (NULL)", "fail"),
+    ("1 clock_getres(0xfffffffe,NULL) = 0 (NULL)", "fail"),
+    ("1 clock_getres(CLOCK_REALTIME_ALARM,0x40007ff8b0) = -1 errno=22", "pass"),
+    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = -1 errno=22", "fail"),
+    ("1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = -1 errno=14", "fail"),
+    (f"1 clock_getres(CLOCK_MONOTONIC,{TASK_TOP}) = -1 errno=14", "undecided"),     # Run.v vdso_call_unmodeled
+    # copy_bytes_map: past access_okb is -EFAULT (a vDSO call's -EFAULT is undecided).
+    (f"1 clock_gettime(1,{TASK_TOP}) = -1 errno=14", "undecided"),
+    (f"1 clock_gettime(1,{TASK_TOP}) = 0", "fail"),
+    (f"1 gettimeofday({TASK_TOP},NULL) = -1 errno=14", "undecided"),
+    ("1 nanosleep(140737488355328,0,0,0,0,0) = -1 errno=14", "pass"),
+    ("1 nanosleep(140737488355328,0,0,0,0,0) = 0", "fail"),
+    # an rmtp past TASK_SIZE gives -EFAULT only after rqtp is read, and an unreadable rqtp in range is unmodeled
+    ("1 nanosleep(274886295728,140737488355328,0,0,0,0) = -1 errno=14", "undecided"),
+    ("1 nanosleep(274886295728,140737488355328,0,0,0,0) = -1 errno=4", "fail"),
+    (f"1 getrandom({TASK_TOP},4,0) = -1 errno=14", "pass"),
+    (f"1 getrandom({TASK_TOP},4,0) = 4", "fail"),
+    ("1 getrandom(0x40007ff8b0,0,0) = 0", "pass"),
+    ("1 getrandom(0x40007ff8b0,0,0) = -1 errno=14", "fail"),
+    (f"1 sigaltstack({TASK_TOP},NULL) = -1 errno=14", "pass"),
+    (f"1 sigaltstack({TASK_TOP},NULL) = 0", "fail"),
+    (f"1 rt_sigprocmask(SIG_BLOCK,{TASK_TOP},NULL,8) = -1 errno=14", "pass"),
+    (f"1 rt_sigprocmask(SIG_BLOCK,{TASK_TOP},NULL,8) = 0", "fail"),
+    ("1 clone3(140737488355328,88,0,0,0,0) = -1 errno=14", "pass"),
+    ("1 clone3(140737488355328,88,0,0,0,0) = 1234", "fail"),
+    ("1 clone3(274886295728,88,0,0,0,0) = -1 errno=14", "fail"),
+    # Sys/Kernel/Signal.v rt_sigaction_spec: SIGPIPE's arm (rt_sigaction_sigpipe), SIGABRT's SIG_DFL.
+    ("1 rt_sigaction(SIGPIPE,NULL,0x40007ff8b0) = 0", "pass"),
+    (f"1 rt_sigaction(SIGPIPE,NULL,{TASK_TOP}) = -1 errno=14", "pass"),
+    (f"1 rt_sigaction(SIGPIPE,NULL,{TASK_TOP}) = 0", "fail"),
+    ("1 rt_sigaction(SIGPIPE,NULL,NULL) = -1 errno=14", "fail"),
+    ("1 rt_sigaction(SIGPIPE,0x40007ff8b0,NULL) = -1 errno=14", "pass"),
+    ("1 rt_sigaction(SIGPIPE,0x40007ff8b0,0x40007ff8c8) = 0", "undecided"),
+    ("1 rt_sigaction(SIGABRT,0x40007ff8b0,NULL) = 0", "undecided"),
+    (f"1 rt_sigaction(SIGINT,{TASK_TOP},NULL) = 0", "fail"),
+    (f"1 rt_sigaction(SIGINT,{TASK_TOP},NULL) = -1 errno=14", "pass"),
+]
+
+
+@needs_model
+@pytest.mark.parametrize("line,verdict", KERNEL_CASES, ids=[c[0] for c in KERNEL_CASES])
+def test_the_kernel_calls(model, image, line, verdict):
+    result = check(model, image, line + "\n" + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+
+
+# The review of 43278dfb: rules that passed calls the model at c0dd863a leaves unmodeled, each with the review's trace
+# (and a control the model does answer). A call the model answers otherwise fails; one whose answer turns on what the
+# trace does not show is undecided.
+CREATED_OUT = '1 openat(AT_FDCWD,"out",O_WRONLY|O_CREAT|O_TRUNC,0666) = 3\n'
+REVIEW_305_CASES = [
+    # 1. sendto: access_ok_zero's -EFAULT is only for a buffer past access_okb; in range a datagram socket is FdDgram
+    ("sendto on a datagram socket, -EFAULT, buffer in range", DGRAM3 + "1 sendto(3,0x1000,2,0,NULL,0) = -1 errno=14\n",
+     "fail", "unmodeled"),
+    ("sendto on a datagram socket, -EFAULT, buffer past TASK_SIZE",
+     DGRAM3 + f"1 sendto(3,{TASK_TOP},2,0,NULL,0) = -1 errno=14\n", "pass", None),
+    ("sendto on a datagram socket, -EFAULT, buffer qemu printed as no address",
+     DGRAM3 + "1 sendto(3,?,2,0,NULL,0) = -1 errno=14\n", "undecided", "unparseable buffer"),
+    # 2. socketpair AF_UNIX: socketpair_faulted is access_okb sv 4
+    ("socketpair AF_UNIX, -EFAULT, sv in range", "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x1000) = -1 errno=14\n",
+     "fail", "socketpair"),
+    ("socketpair AF_UNIX, -EFAULT, sv past TASK_SIZE - 4",
+     "1 socketpair(PF_UNIX,SOCK_STREAM,0,0x7ffffffffffd) = -1 errno=14\n", "pass", None),
+    # 3. rt_sigaction(SIGPIPE): -EFAULT with both act and oact
+    ("rt_sigaction SIGPIPE, -EFAULT, act and an oact past TASK_SIZE",
+     f"1 rt_sigaction(SIGPIPE,0x40007ff8b0,{TASK_TOP}) = -1 errno=14\n", "undecided", "rt_sigaction(SIGPIPE)"),
+    ("rt_sigaction SIGPIPE, -EFAULT, act and an oact in range",
+     "1 rt_sigaction(SIGPIPE,0x40007ff8b0,0x40007ff8c8) = -1 errno=14\n", "undecided", "rt_sigaction(SIGPIPE)"),
+    # 4. nanosleep: rmtp past TASK_SIZE and rqtp in range
+    ("nanosleep, -EFAULT, rmtp past TASK_SIZE and rqtp in range", "1 nanosleep(16,140737488355328,0,0,0,0) = -1 errno=14\n",
+     "undecided", "nanosleep"),
+    # 5. a name the run created is in the model's file system
+    ("unlinkat AT_REMOVEDIR of a created name with its descriptor open, -ENOENT",
+     CREATED_OUT + '1 unlinkat(AT_FDCWD,"out",AT_REMOVEDIR) = -1 errno=2\n', "fail", "declines"),
+    ("unlinkat AT_REMOVEDIR of a created name, closed, -ENOENT",
+     CREATED_OUT + '1 close(3) = 0\n1 unlinkat(AT_FDCWD,"out",AT_REMOVEDIR) = -1 errno=2\n', "fail", "unlinkat"),
+    ("an exclusive append create of a created name that succeeded",
+     CREATED_OUT + '1 openat(AT_FDCWD,"out",O_WRONLY|O_CREAT|O_EXCL|O_APPEND,0666) = 4\n', "fail", "exclusive create"),
+    ("an exclusive append create of a created name, -EEXIST",
+     CREATED_OUT + '1 openat(AT_FDCWD,"out",O_WRONLY|O_CREAT|O_EXCL|O_APPEND,0666) = -1 errno=17\n', "pass", None),
+    # 6. readv and writev on the new kinds: 0, -EINVAL and -EFAULT turn on the iovec total, behind the pointer
+    ("readv of an eventfd, -EINVAL", "1 eventfd2(0,0) = 3\n1 readv(3,274886295728,1,0,0,0) = -1 errno=22\n",
+     "undecided", "iovec total"),
+    ("writev of an eventfd, -EINVAL", "1 eventfd2(0,0) = 3\n1 writev(3,0x40007ff8b0,0x1) = -1 errno=22\n",
+     "undecided", "iovec total"),
+    ("readv of an unlinked open file that returned 0",
+     '1 openat(AT_FDCWD,"/tmp/t",O_RDWR|O_CREAT|O_EXCL,0600) = 3\n1 unlinkat(AT_FDCWD,"/tmp/t",0) = 0\n'
+     "1 readv(3,274886295728,2,0,0,0) = 0\n", "undecided", "iovec total"),
+    ("readv of a datagram socket, -EFAULT", DGRAM3 + "1 readv(3,274886295728,1,0,0,0) = -1 errno=14\n", "undecided",
+     "iovec total"),
+    # 7. fstat: -EFAULT only for a statbuf past access_okb
+    ("fstat of an unlinked open file, -EFAULT, statbuf in range",
+     TMP_W3 + UNLINK_O + "1 fstat(3,0x1000) = -1 errno=14\n", "fail", "fstat"),
+    ("fstat of a file, -EFAULT, statbuf in range", OPEN3 + "1 fstat(3,0x1000) = -1 errno=14\n", "fail", "fstat"),
+    ("fstat of an unlinked open file, -EFAULT, statbuf past TASK_SIZE",
+     TMP_W3 + UNLINK_O + f"1 fstat(3,{TASK_TOP}) = -1 errno=14\n", "pass", None),
+    # 8. ioctl(SIOCGIFINDEX): -EFAULT is also Linux's answer where the model is unmodeled
+    ("ioctl SIOCGIFINDEX, -EFAULT", DGRAM3 + "1 ioctl(3,SIOCGIFINDEX,0x40007ff8b0) = -1 errno=14\n", "undecided",
+     "SIOCGIFINDEX"),
+    # 11. clock_getres: qemu returns 0 without checking that it wrote tp, so a read-only tp in range prints a success
+    ("clock_getres into a tp in range that answered 0",
+     "1 clock_getres(CLOCK_MONOTONIC,0x40007ff8b0) = 0 ({tv_sec = 0,tv_nsec = 1})\n", "undecided", "clock_getres"),
+    ("clock_getres with a NULL tp that answered 0", "1 clock_getres(CLOCK_MONOTONIC,NULL) = 0 (NULL)\n", "pass", None),
+]
+
+
+@needs_model
+@pytest.mark.parametrize("label,text,verdict,needle", REVIEW_305_CASES, ids=[c[0] for c in REVIEW_305_CASES])
+def test_what_the_review_of_43278dfb_found(model, image, label, text, verdict, needle):
+    result = check(model, image, text + EXIT)
+    assert result["verdict"] == verdict, (result["unmodeled"], result["undecided"])
+    if needle is not None:
+        assert needle in (whys(result) + [u["why"] for u in result["undecided"]])[0]

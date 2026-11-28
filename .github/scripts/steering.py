@@ -7,11 +7,18 @@ in the review job. A script in this directory imports it, as enroll-dispatch imp
     import steering
     steering.is_steering(".github/workflows/build.yaml")  # True
 
-STEERING holds the last patterns of .github/CODEOWNERS, which give a file to @theorem-labs/engineering and
-@theorem-labs/research, in the order of that file, as they are at commit 62081ee. A change to one of the two must change
-the other: a test compares them. The four patterns above them (AGENTS.md, CLAUDE.md, SKILL.md and skills/ at any depth)
-give the same owners and are not in STEERING: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and
-a skill that Claude Code loads in the review job is under .claude/.
+STEERING holds the patterns that .github/CODEOWNERS gave to @theorem-labs/engineering and @theorem-labs/research at
+commit 62081ee, in the order of that file, all of /.github/ and /src/ among them. CODEOWNERS no longer owns /src/, on
+purpose: a change under src/ needs no code owner's approval to merge, but it is still a steering change, so its Build
+run's results wait for a person's approval of its head (below).
+CODEOWNERS also gives no owner to some files under /.github/ (its lines with no owner, after /.github/); this list
+stays as broad as it was. A test holds it to that list, and holds each file that CODEOWNERS owns to be a steering file
+but two, which are no steering files: docs/seeded-projects.tsv, because take-project and triage.py read it from the
+base branch, never from the pull request, and app/sentences.yaml, because only tests read it, as data, and no
+workflow runs it. .github/scripts/workflow-credentials matches the patterns
+of CODEOWNERS with `matches`. The four patterns at the top of CODEOWNERS (AGENTS.md, CLAUDE.md, SKILL.md and skills/
+at any depth) give the same owners and are not in STEERING: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and
+CLAUDE.md, and a skill that Claude Code loads in the review job is under .claude/.
 
 The workflows that start on pull_request run the merge commit's copy of each workflow file and script. For a pull
 request that changes no steering file, that merge commit holds main's .github/, src/, infra/ and seeds/, so its Build

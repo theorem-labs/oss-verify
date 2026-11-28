@@ -91,9 +91,11 @@ oft_write_cc_shim() {
   } > "$1"
 }
 
-# ov_release_layout <target> [<dependency> ...]: the release layout for a target and its dependencies, and the
-# compiler shims that rewrite paths into it. With OV_PATH_REWRITE=off, the shims rewrite no path (above).
-ov_release_layout() {
+# ov_release_variables <target> [<dependency> ...]: the variables of the release layout for a target and its
+# dependencies, from which ov_release_shims writes the compiler shims: OFT_REL_FLAGS, OFT_REL_CASES, OFT_ARCH_PIN,
+# OFT_SYSROOT_FLAG and SHIM; and the neutral names under /src (ov_neutral). With OV_PATH_REWRITE=off, the shims rewrite
+# no path (above).
+ov_release_variables() {
   if [ -n "${OV_PATH_REWRITE+x}" ] && [ "$OV_PATH_REWRITE" != off ]; then
     echo "ov_release_layout: OV_PATH_REWRITE must be off or unset, not '$OV_PATH_REWRITE'" >&2; exit 1
   fi
@@ -145,18 +147,31 @@ while [ "$i" -lt "$n" ]; do
   i=$((i+1))
 done'
   fi
-  oft_write_cc_shim "$SHIM/$CHOST-clang-plain" \
+}
+
+# ov_release_shims <directory>: the four compiler shims of the release layout, in <directory>, from the variables
+# that ov_release_variables set. ov_release_layout writes them in $SHIM. python/runtime.sh writes them again in a
+# directory of its own, from the layout's own targets, to check that the shims in $SHIM are these.
+ov_release_shims() {
+  oft_write_cc_shim "$1/$CHOST-clang-plain" \
     'clang --config=/opt/asan-static/musl.cfg'
-  oft_write_cc_shim "$SHIM/$CHOST-clang++-plain" \
+  oft_write_cc_shim "$1/$CHOST-clang++-plain" \
     'clang++ --config=/opt/asan-static/musl.cfg -stdlib=libc++'
+  oft_write_cc_shim "$1/$CHOST-clang-sealed" \
+    'clang --config=/tmp/asan-musl-sealed-noiconv.cfg' " $SHIM/oft-nogc-discard.ld"
+  oft_write_cc_shim "$1/$CHOST-clang++-sealed" \
+    'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
+  chmod +x "$1/$CHOST-clang-plain" "$1/$CHOST-clang-sealed" \
+           "$1/$CHOST-clang++-plain" "$1/$CHOST-clang++-sealed"
+}
+
+# ov_release_layout <target> [<dependency> ...]: the release layout for a target and its dependencies, and the
+# compiler shims that rewrite paths into it. With OV_PATH_REWRITE=off, the shims rewrite no path (above).
+ov_release_layout() {
+  ov_release_variables "$@"
+  ov_release_shims "$SHIM"
   printf 'SECTIONS { /DISCARD/ : { *(.data.rel.ro.__interception_extract_*) } } INSERT AFTER .text;\n' \
     > "$SHIM/oft-nogc-discard.ld"
-  oft_write_cc_shim "$SHIM/$CHOST-clang-sealed" \
-    'clang --config=/tmp/asan-musl-sealed-noiconv.cfg' " $SHIM/oft-nogc-discard.ld"
-  oft_write_cc_shim "$SHIM/$CHOST-clang++-sealed" \
-    'clang++ --config=/tmp/asan-musl-sealed-noiconv.cfg -stdlib=libc++' " $SHIM/oft-nogc-discard.ld"
-  chmod +x "$SHIM/$CHOST-clang-plain" "$SHIM/$CHOST-clang-sealed" \
-           "$SHIM/$CHOST-clang++-plain" "$SHIM/$CHOST-clang++-sealed"
   # When compile records the build (OV_RECORDS, oss-verify check --checks): a front before each shim, which records each
   # compile (record-compile). Without records the shims are the release's, as written above.
   if [ -n "${OV_RECORDS:-}" ]; then
@@ -226,4 +241,71 @@ ov_target_build() {
   fi
   # shellcheck disable=SC2086 # flag lists, split as the release splits them
   "$OV_LINK_CC" $BASE_CFLAGS -o "$OUT/$ov_name" $LIB_FUZZING_ENGINE $ov_link ${LIB_EXTRA:-}
+}
+
+# The DSL form (docs/build-contract.md, "DSL fuzz targets"): a fuzz target whose driver is the target's own C or C++
+# code, which defines what cli.c calls (target_run and the rest), not an LLVMFuzzerTestOneInput. Its block calls these
+# in build_lib, after the library's build, and then ov_target_build_dsl in place of ov_target_build:
+#
+#     ov_dsl_driver <source> [<flag> ...]   compile /work/targets/$T/<source> as the harness is compiled: with $CC
+#                                           (or $CXX for C++) and $CFLAGS, the library's include directories and the
+#                                           flags; and again with -DHARNESS_QUIET for the quiet twin. Adds the object
+#                                           to OV_DSL_DRIVER.
+#     ov_dsl_trampoline <source>            compile /work/targets/$T/<source> as the driver is compiled: $DRVCC
+#                                           $BASE_CFLAGS, with no sanitizer and no flag of the target. Adds the
+#                                           object to OV_DSL_TRAMPOLINES.
+#
+# and the block exports its maps, OV_DSL_REDEFS and OV_DSL_LIBRARY_REDEFS, and with a library map OV_DSL_ALLOW
+# (link-fuzz-target, dsl.py).
+
+# ov_dsl_object <source>: the object of /work/targets/$T/<source> in $BUILDDIR, <base>.o.
+ov_dsl_object() {
+  ov_dsl_base=$(basename -- "$1")
+  printf '%s/%s.o' "$BUILDDIR" "${ov_dsl_base%.*}"
+}
+
+ov_dsl_driver() {
+  ov_dsl_src=/work/targets/$T/${1:?ov_dsl_driver needs a source of /work/targets/$T}
+  shift
+  [ -f "$ov_dsl_src" ] || { echo "ov_dsl_driver: there is no $ov_dsl_src" >&2; return 1; }
+  ov_dsl_obj=$(ov_dsl_object "$ov_dsl_src")
+  case "$ov_dsl_src" in
+    *.cc|*.cpp|*.cxx) ov_dsl_cc=$CXX ;;
+    *) ov_dsl_cc=$CC ;;
+  esac
+  ov_dsl_inc="-I$BUILDDIR/src -I$BUILDDIR/src/include -I$BUILDDIR/src/src -I$BUILDDIR/include -I$BUILDDIR/cmk"
+  ov_dsl_inc="$ov_dsl_inc -I$BUILDDIR/cmk/include -I$BUILDDIR/mes -I$BUILDDIR/mes/include -I/work/targets/$T"
+  ov_dsl_inc="$ov_dsl_inc $(oft_sweep_includes promote \
+    "$BUILDDIR/src" "$BUILDDIR/src/include" "$BUILDDIR/src/src" \
+    "$BUILDDIR/include" "$BUILDDIR/cmk" "$BUILDDIR/cmk/include" \
+    "$BUILDDIR/mes" "$BUILDDIR/mes/include" "/work/targets/$T")"
+  # shellcheck disable=SC2086 # flag lists
+  "$ov_dsl_cc" $CFLAGS $ov_dsl_inc "$@" -c "$ov_dsl_src" -o "$ov_dsl_obj" || return 1
+  # shellcheck disable=SC2086 # flag lists
+  "$ov_dsl_cc" $CFLAGS -DHARNESS_QUIET $ov_dsl_inc "$@" -c "$ov_dsl_src" -o "${ov_dsl_obj%.o}-quiet.o" || return 1
+  OV_DSL_DRIVER="${OV_DSL_DRIVER:-}${OV_DSL_DRIVER:+ }$ov_dsl_obj"
+  export OV_DSL_DRIVER
+}
+
+ov_dsl_trampoline() {
+  ov_dsl_src=/work/targets/$T/${1:?ov_dsl_trampoline needs a source of /work/targets/$T}
+  [ -f "$ov_dsl_src" ] || { echo "ov_dsl_trampoline: there is no $ov_dsl_src" >&2; return 1; }
+  ov_dsl_obj=$(ov_dsl_object "$ov_dsl_src")
+  # shellcheck disable=SC2086 # BASE_CFLAGS is a list of flags
+  "$DRVCC" $BASE_CFLAGS -c -I"/work/targets/$T" "$ov_dsl_src" -o "$ov_dsl_obj" || return 1
+  OV_DSL_TRAMPOLINES="${OV_DSL_TRAMPOLINES:-}${OV_DSL_TRAMPOLINES:+ }$ov_dsl_obj"
+  export OV_DSL_TRAMPOLINES
+}
+
+# ov_target_build_dsl <fuzz target>: run the pin's build_lib, and link the DSL fuzz target into $OUT with
+# $LIB_DSL_ENGINE: cli.o, the driver objects, the library's archive and LIB_EXTRA, then the trampolines
+# (link-fuzz-target). The archive is the library's: it needs no harness, and the link takes no member that defines
+# LLVMFuzzerTestOneInput, since nothing calls it.
+ov_target_build_dsl() {
+  ov_name=${1:?ov_target_build_dsl needs the fuzz target name}
+  OV_DSL_DRIVER="" OV_DSL_TRAMPOLINES=""
+  build_lib
+  [ -n "${LIB_ARCHIVE:-}" ] || { echo "ov_target_build_dsl: the pin names no LIB_ARCHIVE" >&2; exit 1; }
+  # shellcheck disable=SC2086 # flag lists, split as the release splits them
+  "$OV_LINK_CC" $BASE_CFLAGS -o "$OUT/$ov_name" $LIB_DSL_ENGINE "$BUILDDIR/$LIB_ARCHIVE" ${LIB_EXTRA:-}
 }

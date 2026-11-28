@@ -14,7 +14,8 @@
 #
 # CPython is C, so each build compiles it with that build's compiler and flags, as a library. oft_py_build:
 #
-#   oft_py_runtime   the build's libpython3.11.a, built once in a container for all its targets
+#   oft_py_runtime   the build's libpython3.11.a, built once in a container for all its targets, or taken from the
+#                    toolchain image when it ships the one built from this build's inputs (runtime.sh)
 #   oft_py_install   the project's own `pip install` (what its OSS-Fuzz build.sh does), with no network, from the
 #                    files at /work/ext/<target>/pydist, each pinned by sha256 in the sources file
 #   oft_py_freeze    the module closure (pyclosure.py: what an import can reach, and what a run over the seeds at
@@ -27,92 +28,28 @@
 # phase only, the malloc allocator, a fixed sys.executable that does not exist, no select.epoll, hash seed 0).
 #
 # From the build recipe of the oss-fuzz-theorems 2026.10 release (tools/python/recipe.sh), in its release mode: the same
-# paths, names, flags and steps. The comments are new, and the stock runtime is left out.
-
-OFT_PY_DIR=/usr/local/lib/oss-verify/python
-# The toolchain image's Python: the CPython tarball and a native CPython 3.11.13 built from it.
-OFT_PY_OPT=/opt/oft-py
-OFT_PY_BPY=$OFT_PY_OPT/native/bin/python3.11
-OFT_PY_TARBALL=$OFT_PY_OPT/Python-3.11.13.tar.xz
-OFT_PY_TARBALL_SHA256=8fb5f9fbc7609fa822cb31549884575db7fd9657cbffb89510b5d7975963a83a
-OFT_PY_PATCHES="$OFT_PY_DIR/patches/0001-signal-assume-default-dispositions.patch"
-OFT_PY_CPY_DEFS="-DOFT_SIGNAL_ASSUME_DEFAULT"
-OFT_PY_HOST_DEFS='-DNDEBUG -DOFT_PY_CORE_ONLY -DOFT_PY_MALLOC -DOFT_PY_EXECUTABLE="/oft/py/bin/python3" -DOFT_PY_NO_EPOLL'
-# The interpreter's prefix, which libpython and atheris_host.c record. /oft does not exist, so CPython's probes of it
-# cost one -ENOENT. The build directory's own files are compiled as /oft/pyrt/build/ (__FILE__).
-OFT_PY_PREFIX=/oft/py
-OFT_PY_FILE_MAP=/oft/pyrt/build/
-# The patched source tree, one for all four builds, at the release's path for it: configure records its own path, and
-# the binaries hold it, 237 times in an asan build. The name is the release's hash of the tarball and the patches.
-OFT_PY_SRC=/work/build/pyrt/src-64ef29c99f3ea59d
+# paths, names, flags and steps. The comments are new, and the stock runtime is left out. One name differs: the
+# release made each target's scratch directory with mktemp, as $BUILDDIR/py.XXXXXX, with a link $BUILDDIR/py to it, and
+# here it is $BUILDDIR/py itself (oft_py_workdir). The debug information of harness.o names that directory, so with a
+# name of mktemp's no two builds gave the same harness.o, liboft.a, unstripped fuzz target or compile records. The
+# published fuzz target, linked with --strip-all, holds no debug information: its bytes are the same with either name.
 
 oft_py_fail() { echo "oft-py: $*" >&2; return 1; }
 
-oft_py_source() {
-  [ ! -f "$OFT_PY_SRC/.oft-src-ok" ] || return 0
-  [ -f "$OFT_PY_TARBALL" ] || { oft_py_fail "no $OFT_PY_TARBALL: this is not the Python toolchain image"; return 1; }
-  [ "$(sha256sum "$OFT_PY_TARBALL" | cut -d' ' -f1)" = "$OFT_PY_TARBALL_SHA256" ] \
-    || { oft_py_fail "$OFT_PY_TARBALL is not CPython 3.11.13's tarball"; return 1; }
-  rm -rf "$OFT_PY_SRC"
-  mkdir -p "$OFT_PY_SRC"
-  tar -C "$OFT_PY_SRC" --strip-components=1 -xJf "$OFT_PY_TARBALL" || return 1
-  # shellcheck disable=SC2086 # a list of patches
-  "$OFT_PY_BPY" "$OFT_PY_DIR/patches/apply.py" "$OFT_PY_SRC" $OFT_PY_PATCHES || return 1
-  : > "$OFT_PY_SRC/.oft-src-ok"
-}
+# The runtime (runtime.sh): its constants (OFT_PY_DIR, the native Python OFT_PY_BPY, the source tree OFT_PY_SRC),
+# oft_py_source and oft_py_runtime. They call oft_py_fail above, and oft_jobs of ../recipes.sh.
+# shellcheck source-path=SCRIPTDIR source=runtime.sh
+. /usr/local/lib/oss-verify/python/runtime.sh
 
-# oft_py_runtime: the build's libpython3.11.a, in /work/build/pyrt/<flav>, built once in a container.
-oft_py_runtime() {
-  oft_py_source || return 1
-  rt=/work/build/pyrt/$FLAV
-  if [ ! -f "$rt/.oft-built" ]; then
-    rm -rf "$rt"
-    mkdir -p "$rt/Modules"
-    cp "$OFT_PY_DIR/Setup.local" "$rt/Modules/Setup.local"
-    t0=$(date +%s)
-    # A cross build, out of the source tree. The two ac_cv_file values are what configure asks for in a cross build;
-    # ipv6 needs a run-time getaddrinfo probe that a cross build cannot run. configure is run through the path the
-    # compiler shims give the tree (/src/repo/... for /work/...), which it records. CFLAGS are a library's, the
-    # runtime's define, and a prefix map that gives the build directory's own files one __FILE__ spelling.
-    if ! ( cd "$rt" && CONFIG_SITE= "/src/repo${OFT_PY_SRC#/work}/configure" \
-          --host="$CHOST" --build=x86_64-pc-linux-gnu \
-          --with-build-python="$OFT_PY_BPY" --prefix="$OFT_PY_PREFIX" \
-          --disable-shared --without-ensurepip --disable-test-modules --disable-ipv6 \
-          ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
-          CC="$CC" CFLAGS="$BASE_CFLAGS $SAN $OFT_PY_CPY_DEFS -fmacro-prefix-map=$rt/=$OFT_PY_FILE_MAP -fmacro-prefix-map=/src/repo${rt#/work}/=$OFT_PY_FILE_MAP" \
-          CPPFLAGS= LDFLAGS= ) > "$rt/configure.log" 2>&1; then
-      tail -40 "$rt/configure.log" >&2; return 1
-    fi
-    if ! ( cd "$rt" && make -j"$(oft_jobs)" libpython3.11.a Modules/expat/libexpat.a \
-          Modules/_decimal/libmpdec/libmpdec.a ) > "$rt/make.log" 2>&1; then
-      grep -n -m20 -E 'error|Error' "$rt/make.log" >&2; tail -30 "$rt/make.log" >&2; return 1
-    fi
-    # What the static program links besides libpython: the Makefile's own answer.
-    printf 'print-%%:\n\t@echo $($*)\n' > "$rt/oft-print.mk"
-    ( cd "$rt" && for v in LIBS MODLIBS SYSLIBS OPT; do printf '%s=' "$v"; make -s -f Makefile -f oft-print.mk "print-$v"; done ) > "$rt/oft-linkvars.txt"
-    # The target's builtin modules (the cross build's inittab) and CPython's own frozen modules, for the closure.
-    { sed -n 's/^ *{"\([A-Za-z0-9_]*\)", *[A-Za-z0-9_]*},.*/\1/p' "$rt/Modules/config.c"
-      printf '%s\n' marshal _imp _ast _tokenize builtins sys gc _warnings _string __main__; } | sort -u > "$rt/target-builtins.txt"
-    "$OFT_PY_BPY" -c 'import _imp; print("\n".join(_imp._frozen_module_names()))' | sort -u > "$rt/target-frozen.txt"
-    if [ ! -s "$rt/target-builtins.txt" ] || [ ! -s "$rt/target-frozen.txt" ]; then
-      oft_py_fail "empty inittab or frozen list for $rt"; return 1
-    fi
-    for a in libpython3.11.a Modules/expat/libexpat.a Modules/_decimal/libmpdec/libmpdec.a; do
-      [ -s "$rt/$a" ] || { oft_py_fail "the runtime build made no $a"; return 1; }
-    done
-    echo "oft-py: runtime $FLAV built in $(( $(date +%s) - t0 )) s ($(wc -l < "$rt/target-builtins.txt") builtin modules)"
-    : > "$rt/.oft-built"
-  else
-    echo "oft-py: runtime $FLAV built already ($rt)"
-  fi
-  OFT_PY_RT=$rt
-}
+# shellcheck disable=SC2089 # the quotes of a C string, which oft_py_harness gives the compiler as they are
+OFT_PY_HOST_DEFS='-DNDEBUG -DOFT_PY_CORE_ONLY -DOFT_PY_MALLOC -DOFT_PY_EXECUTABLE="/oft/py/bin/python3" -DOFT_PY_NO_EPOLL'
 
-# oft_py_workdir: a new scratch directory for this target, named by $BUILDDIR/py.
+# oft_py_workdir: the scratch directory of this target, $BUILDDIR/py, made anew. Its name is the same in every build
+# (above): the target's build directory is its own, and one container builds its targets one after another.
 oft_py_workdir() {
-  mkdir -p "$BUILDDIR"
-  OFT_PY_W=$(mktemp -d "$BUILDDIR/py.XXXXXX")
-  ln -sfn "$OFT_PY_W" "$BUILDDIR/py"
+  OFT_PY_W=$BUILDDIR/py
+  rm -rf "$OFT_PY_W"
+  mkdir -p "$OFT_PY_W"
 }
 
 # oft_py_install: the project's own pip install, with no network. PY_INSTALL is pip's arguments in the project's
@@ -173,7 +110,7 @@ oft_py_harness() {
   mkdir -p /work/tools/python
   cp "$OFT_PY_DIR/atheris_host.c" /work/tools/python/atheris_host.c
   # $OFT_PY_HOST_DEFS unquoted: its -DOFT_PY_EXECUTABLE="..." word holds the quotes of a C string.
-  # shellcheck disable=SC2086
+  # shellcheck disable=SC2086,SC2090
   "$CC" $CFLAGS $OFT_PY_HOST_DEFS -I"$OFT_PY_SRC/Include" -I"$OFT_PY_RT" -I"$OFT_PY_W" \
     -c /work/tools/python/atheris_host.c -o "$OFT_PY_W/harness.o" \
     || { oft_py_fail "the harness does not compile"; return 1; }
@@ -187,6 +124,7 @@ oft_py_harness() {
     echo "save"; echo "end"; } > "$mri"
   "$CHOST-ar" -M < "$mri" || { oft_py_fail "the archive merge failed"; return 1; }
   mv -f -- "$OFT_PY_W/liboft.a" "$out"
+  # shellcheck disable=SC2034 # ov_target_build (release-target.sh) reads it
   LIB_ARCHIVE="lib/liboft.a"
   # MODLIBS names the bundled archives relative to the build directory: the two in liboft.a are dropped, and the
   # sysroot's -l flags stay (not instrumented, like each C target's sysroot libraries).

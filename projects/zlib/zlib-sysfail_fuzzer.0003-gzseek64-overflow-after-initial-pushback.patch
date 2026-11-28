@@ -1,0 +1,31 @@
+zlib gzseek64(): no signed overflow in the range checks when gzungetc() has left the position negative.
+
+Without it, a gzungetc() before any read leaves x.pos at -1, and gzseek64's guard (gzlib.c:395 at 99623ef7)
+overflows z_off64_t.
+
+Upstream: madler/zlib pull request #1361, commit ce2248ee97501aff83203a68a37369fa6c988eda (its head, 192060e2, adds two
+empty commits, so the diff is the same). This is only the
+pull request's gzlib.c hunk, unchanged; its test/example.c hunk is left out.
+
+diff --git a/gzlib.c b/gzlib.c
+index c3b3efc..0422003 100644
+--- a/gzlib.c
++++ b/gzlib.c
+@@ -392,12 +392,16 @@ z_off64_t ZEXPORT gzseek64(gzFile file, z_off64_t offset, int whence) {
+     /* compute the absolute position */
+     pos = whence == SEEK_SET ? 0 :
+           state->x.pos + (state->past ? 0 : state->skip);
+-    if (offset > GZ_OFF_MAX - pos)
++    if (pos > 0 && offset > GZ_OFF_MAX - pos)
+         return -1;                          /* would overflow z_off64_t */
+     if (offset < -pos)
+         return -1;                          /* before start of file */
+     pos += offset;
+ 
++    /* the displacement from a negative position must fit in z_off64_t */
++    if (state->x.pos < 0 && pos > GZ_OFF_MAX + state->x.pos)
++        return -1;
++
+     /* if within raw area while reading, just go there */
+     if (state->mode == GZ_READ && state->how == COPY) {
+         ret = LSEEK(state->fd, pos - state->x.pos - (z_off64_t)state->x.have,

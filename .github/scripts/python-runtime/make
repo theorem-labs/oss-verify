@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Makes the prebuilt-runtime image of a Python toolchain image: the toolchain image with one layer more, which holds the
+# CPython runtime of each of the four builds, built once, with its compile records and its manifest
+# (infra/base-builder/python/runtime.sh says what a build takes from it, and when):
+#
+#   .github/scripts/python-runtime/make BASE_IMAGE TARGET
+#
+# BASE_IMAGE is a Python toolchain image by its digest (<image>@sha256:<digest>): the image of a Python row of
+# infra/toolchains.tsv, or the frame-pointer image made from it. TARGET is <repository>:<tag> in a registry that crane
+# can write. The steps:
+#   1. It builds the builder FROM BASE_IMAGE (docker build --build-arg TOOLCHAIN=BASE_IMAGE infra/base-builder), as
+#      oss-verify check does. It refuses a base image that has /opt/oft-py/prebuilt already.
+#   2. It runs compile for the four builds at once in that builder, each in a container of its own as
+#      src/oss_verify/check_build.py's compile_build runs a build that records (no network, OV_RECORD=1), with build.sh
+#      of this directory mounted as /src/build.sh ($SRC/build.sh). build.sh builds the runtime of a target
+#      oft-py-prebuilt as a Python fuzz target's build does, and stages it in $OUT/prebuilt: the runtime's files, and
+#      the manifest of its inputs, whose last line is its key.
+#   3. It fails unless each build printed "oft-py: runtime <flav> built in" and its key line ("oft-py: runtime <flav>:
+#      key <12 hex digits> in <seconds> s", with its manifest's key), staged each file of a runtime and wrote its
+#      compile records, and unless the key of each manifest is the SHA-256 of the lines above it.
+#   4. It lays out opt/oft-py/prebuilt/<flav>-<key>/ for each build: runtime/ from $OUT/prebuilt; records/ from
+#      $OUT/.records, compiles.jsonl (the runtime's compile records, all the build recorded) and nosan/; and manifest,
+#      $OUT/prebuilt's with one line more, `made-from BASE_IMAGE`. That line is for an audit: no build compares it, and
+#      it is written here, after the builds, since a value given to a build would change the key.
+#   5. It writes that tree as one layer (layer.py: the same files give the same bytes), appends it to BASE_IMAGE with
+#      crane append, and fails unless the new image's manifest names the base image's layers and then one more, whose
+#      diff ID is the layer's SHA-256.
+# The last line it prints is `made <repository>@sha256:<digest>`. The same base image and builder give the same
+# runtimes, and so the same digest. It exits 2 on a usage error, and non-zero when a step fails. Its work is in a new
+# directory under ${RUNNER_TEMP:-${TMPDIR:-/tmp}}, which it removes. It runs docker, crane, jq and python3 with
+# layer.py, and no code of src/.
+set -euo pipefail
+
+usage() {
+  echo "usage: make BASE_IMAGE TARGET (BASE_IMAGE: <image>@sha256:<digest>; TARGET: <repository>:<tag>)" >&2
+  exit 2
+}
+[ $# -eq 2 ] || usage
+base=$1 target=$2
+[[ "$base" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || usage
+last=${target##*/}
+[[ "$target" == */* && "$target" != *@* && "$target" != *[[:space:]]* && "$last" == *:?* ]] || usage
+
+here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+root=$(cd -- "$here/../../.." && pwd)
+work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/python-runtime.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+# compile hands $OUT to this owner at its end, so that this script can read and remove what it wrote.
+owner="$(id -u):$(id -g)"
+builder="oss-verify-python-runtime/builder:$(printf '%s' "$base" | sha256sum | cut -c1-16)"
+# The files of a runtime that build.sh stages: OFT_PY_RT_FILES of infra/base-builder/python/runtime.sh
+# (tests/test_python_prebuilt.py compares the two).
+runtime_files="libpython3.11.a Modules/expat/libexpat.a Modules/_decimal/libmpdec/libmpdec.a pyconfig.h oft-linkvars.txt
+  target-builtins.txt target-frozen.txt"
+
+docker pull --quiet "$base" > /dev/null
+if ! docker run --rm --network=none --entrypoint sh "$base" -c '[ ! -e /opt/oft-py/prebuilt ]'; then
+  echo "make: $base has /opt/oft-py/prebuilt already: make a prebuilt-runtime image from a toolchain image" >&2
+  exit 1
+fi
+docker build --progress=plain --build-arg "TOOLCHAIN=$base" -t "$builder" "$root/infra/base-builder"
+
+# The four builds at once, each as compile_build runs a build that records. build.sh is mounted as /src/build.sh, the
+# builder's $SRC, under /src, which the key leaves out (runtime.sh, oft_py_fs_left_out): a mount anywhere else would be
+# a file that no project's build has, and the key of each runtime would be one that no project's build computes.
+declare -A flavs=([none]=plain [undefined]=ubsan [address]=asan [address-undefined]=asanubsan)
+sanitizers="none undefined address address-undefined"
+declare -A pids
+for sanitizer in $sanitizers; do
+  flav=${flavs[$sanitizer]}
+  mkdir -p "$work/out/$flav"
+  docker run --rm --init --network=none -e "SANITIZER=$sanitizer" -e "OV_OWNER=$owner" -e OV_RECORD=1 \
+    -v "$here/build.sh:/src/build.sh:ro" -v "$work/out/$flav:/out" \
+    "$builder" compile > "$work/$flav.log" 2>&1 &
+  pids[$flav]=$!
+done
+failed=0
+for sanitizer in $sanitizers; do
+  flav=${flavs[$sanitizer]}
+  status=0
+  wait "${pids[$flav]}" || status=$?
+  echo "::group::the $flav build (SANITIZER=$sanitizer): compile exited $status"
+  cat "$work/$flav.log"
+  echo "::endgroup::"
+  if [ "$status" -ne 0 ]; then
+    echo "make: the $flav build failed: compile exited $status" >&2
+    failed=1
+  fi
+done
+[ "$failed" -eq 0 ] || exit 1
+
+# Each build built its runtime, staged it, and recorded its compiles; each manifest's key is its inputs'.
+for sanitizer in $sanitizers; do
+  flav=${flavs[$sanitizer]}
+  out=$work/out/$flav
+  grep -q "^oft-py: runtime $flav built in " "$work/$flav.log" ||
+    { echo "make: the $flav build printed no 'oft-py: runtime $flav built in' line" >&2; failed=1; }
+  for f in manifest $runtime_files; do
+    path=$out/prebuilt/runtime/$f
+    if [ "$f" = manifest ]; then path=$out/prebuilt/manifest; fi
+    [ -s "$path" ] || { echo "make: the $flav build staged no $path" >&2; failed=1; }
+  done
+  [ -s "$out/.records/compiles.jsonl" ] ||
+    { echo "make: the $flav build wrote no compile records ($out/.records/compiles.jsonl)" >&2; failed=1; }
+  [ -s "$out/prebuilt/manifest" ] || continue
+  key=$(tail -n 1 "$out/prebuilt/manifest")
+  sum=$(sed '$d' "$out/prebuilt/manifest" | sha256sum | cut -d' ' -f1)
+  [ "$key" = "key $sum" ] ||
+    { echo "make: the last line of the $flav build's manifest is '$key', not 'key $sum'" >&2; failed=1; }
+  [ "$(head -n 1 "$out/prebuilt/manifest")" = "flav $flav" ] ||
+    { echo "make: the $flav build's manifest is not of the $flav build" >&2; failed=1; }
+  # The key line of the build (runtime.sh, oft_py_shipped): the staged manifest's key, and what it cost.
+  grep "^oft-py: runtime $flav: key ${sum:0:12} in [0-9]*\.[0-9] s$" "$work/$flav.log" ||
+    { echo "make: the $flav build printed no 'oft-py: runtime $flav: key ${sum:0:12} in <seconds> s' line" >&2
+      failed=1; }
+done
+[ "$failed" -eq 0 ] || exit 1
+
+# The tree of the layer.
+staging=$work/staging
+for sanitizer in $sanitizers; do
+  flav=${flavs[$sanitizer]}
+  out=$work/out/$flav
+  key=$(tail -n 1 "$out/prebuilt/manifest")
+  dir=$staging/opt/oft-py/prebuilt/$flav-${key#key }
+  mkdir -p "$dir/records/nosan"
+  cp -R "$out/prebuilt/runtime" "$dir/runtime"
+  { cat "$out/prebuilt/manifest"; echo "made-from $base"; } > "$dir/manifest"
+  cp "$out/.records/compiles.jsonl" "$dir/records/compiles.jsonl"
+  if [ -d "$out/.records/nosan" ]; then cp -R "$out/.records/nosan/." "$dir/records/nosan/"; fi
+  echo "$flav: $(wc -l < "$dir/records/compiles.jsonl") compile records, $(find "$dir/records/nosan" -type f | wc -l)" \
+    "objects in nosan/, key ${key#key }"
+done
+
+python3 -P "$here/layer.py" "$staging" "$work/layer.tar"
+made=$(crane append -b "$base" -f "$work/layer.tar" -t "$target")
+[[ "$made" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || { echo "make: crane gave no digest: '$made'" >&2; exit 1; }
+
+# The new image is the base image and the layer: the base image's layers, in order, then one more, whose diff ID (the
+# SHA-256 of the uncompressed layer) is that of layer.tar.
+crane manifest "$base" > "$work/base-manifest.json"
+crane manifest "$made" > "$work/new-manifest.json"
+jq -e -n --slurpfile b "$work/base-manifest.json" --slurpfile n "$work/new-manifest.json" \
+  '($n[0].layers | length) == ($b[0].layers | length) + 1 and $n[0].layers[:-1] == $b[0].layers' > /dev/null ||
+  { echo "make: the new manifest does not name the base image's layers and then one more" >&2; exit 1; }
+layer="sha256:$(sha256sum < "$work/layer.tar" | cut -d' ' -f1)"
+diff_id=$(crane config "$made" | jq -r '.rootfs.diff_ids[-1]')
+[ "$diff_id" = "$layer" ] ||
+  { echo "make: the new image's last layer has the diff ID $diff_id, not layer.tar's $layer" >&2; exit 1; }
+echo "layers: the base image's $(jq '.layers | length' "$work/base-manifest.json"), and the runtimes' ($layer)"
+echo "made $made"

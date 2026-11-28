@@ -8,14 +8,21 @@ first-time contributor after the screen (OSSV-679):
 With `-k held`, only the cases of the held runs run. With `-k 'not held'`, only the other cases run.
 
 The move:
-  (r)  No workflow starts on pull_request_target. A workflow that starts on pull_request reads no secret, and its jobs
-       have no identity token, no environment and only read permissions.
+  (r)  The rule is .github/scripts/workflow-credentials, which tests.yaml's job suite runs on every event, and these
+       cases run its pull_request_holds on this tree and on changed copies. No workflow starts on pull_request_target. A
+       workflow that starts on pull_request reads no secret, and its jobs have no identity token and no environment.
+       A job of it that can run on pull_request has only read permissions: a job with a write permission has the if
+       github.event_name == 'push', and that permission is security-events: write alone (CodeQL's push jobs). A job
+       that calls a workflow of this repository is held to the same with that workflow's jobs, and passes it no
+       secret.
   (s)  A Build run's artifact build-results that names another pull request or another head, or that holds a diff,
        changes nothing that review.yml reads or posts: route reads the pull request and its head from the API,
        .github/scripts/take-build-results gives its fixed line, the gather job reads the text and the diff from the
        API, and the comment job posts to that pull request at that head.
-  (u)  The list of .github/scripts/steering.py is the list of the last patterns of .github/CODEOWNERS, which give a file
-       to @theorem-labs/engineering and @theorem-labs/research, at commit 62081ee and today.
+  (u)  The list of .github/scripts/steering.py is the patterns that .github/CODEOWNERS owned at commit 62081ee, all of
+       /.github/ and /src/ among them, and each file that CODEOWNERS owns today is a steering file but the files of
+       NOT_STEERING: take-project and triage.py read docs/seeded-projects.tsv from the base branch, and only tests read
+       app/sentences.yaml, as data, and no workflow runs it.
   (w)  Enroll dispatch sends no enrollment that changes a steering file, and puts no label on it, until a person
        approved its head: for an open pull request and for a merge.
   (x)  No workflow with workflow_dispatch builds the code of a pull request (oss-verify check, docker).
@@ -36,6 +43,28 @@ The move:
        publish installs crane only from the archive with the SHA-256 of its pin, and no step of it writes
        GITHUB_PATH or GITHUB_ENV. Its push step stops at an unset variable before it copies, and at a base row
        outside the toolchain packages before any command of crane. It logs out of ghcr.io after its push.
+       Its jobs remake-prebuilt and publish-prebuilt act on the same runs as publish, for the images of
+       toolchain-images.yaml's job prebuilt (the Python toolchain images with a prebuilt CPython runtime), and the file
+       has no other job. prebuilt's steps, and then remake-prebuilt's and publish-prebuilt's, run on the same
+       infra/toolchains.tsv, pass or refuse the same prebuilt rows. Both read prebuilt's digest where its upload lands,
+       from the run of toolchain-images.yaml. remake-prebuilt checks out the whole tree at the commit that prebuilt
+       built, makes the image again with the same make into its own registry, compares its digest with prebuilt's, and
+       uploads the image as an artifact that GitHub keeps 1 day. publish-prebuilt waits for it, checks out
+       infra/toolchains.tsv alone, pushes the image of that artifact into its own registry, and copies it to the same
+       package, under the tag python-prebuilt-<commit> or python-frame-pointers-prebuilt-<commit>, only after it
+       compared that image's digest with prebuilt's, and only when ghcr.io does not have the tag for another digest: a
+       tampered artifact, a tag of another digest, or a tag that it cannot read stops it before its push step. It fails
+       unless the image on ghcr.io holds one directory <flav>-<key> of the runtime of each flav. Only publish and
+       publish-prebuilt can write packages, and remake-prebuilt's token writes nothing. publish-prebuilt runs no docker
+       and no script of the repository. In both jobs the token goes to the pinned download of the digest alone, and in
+       publish-prebuilt to the push step's env too; each action is pinned by its commit, each checkout keeps no copy of
+       the token (persist-credentials: false), remake-prebuilt's make runs with no token in its environment and no
+       login of crane, and no step writes GITHUB_PATH or GITHUB_ENV (tests/test_token_jobs.py holds that make loads no
+       code from src/). The three jobs install crane only from the archive with the SHA-256 of its pin. prebuilt fails
+       unless the image that it made is the image that it starts from with one more layer, which holds only
+       /opt/oft-py/prebuilt: the manifest names the same base layers, in their order, and the configuration the same
+       diff ids. After make, it runs the probe on the image that it starts from and on the image that make made.
+       tests/test_python_runtime_scripts.py runs make and the probe themselves.
   (artifacts) Each script of .github/scripts that reads a file of a Build run's artifact (read_member) reads an
        artifact and a file that build.yaml uploads, with if-no-files-found: error. The step that writes the file, run
        in (s) and in tests/test_enroll_dispatch.py, writes it at the path of the upload.
@@ -514,53 +543,163 @@ class PullRequestWorkflows(unittest.TestCase):
         self.assertTrue(found)
         return found
 
-    def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
-        self.r_case()
-
     def test_control_r_a_calling_job_with_secrets_inherit(self):
         # toolchain-images.yaml's docker-tests calls frame-pointer-tests.yaml; with secrets: inherit it would pass that
         # workflow every secret, and the file would hold no text "secrets.".
-        copies = {}
-        for name in ("unchanged", "changed"):
-            copies[name] = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory())) / "workflows"
-            shutil.copytree(ROOT / ".github" / "workflows", copies[name])
-        calling = copies["changed"] / "toolchain-images.yaml"
+        root = pathlib.Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.copy_workflows(root)
+        self.assertEqual(self.pull_request_holds(root, "toolchain-images.yaml"), [], "the unchanged copy")
+        calling = root / ".github" / "workflows" / "toolchain-images.yaml"
         line = "    uses: ./.github/workflows/frame-pointer-tests.yaml\n"
         self.assertEqual(calling.read_text().count(line), 1, "the line of docker-tests that the control follows")
         calling.write_text(calling.read_text().replace(line, line + "    secrets: inherit\n"))
-        self.r_case(copies["unchanged"])
-        with self.assertRaises(AssertionError) as caught:
-            self.r_case(copies["changed"])
-        self.assertIn("toolchain-images.yaml, the job docker-tests", str(caught.exception))
+        self.assertIn("toolchain-images.yaml, the job docker-tests: it passes secrets to "
+                      "./.github/workflows/frame-pointer-tests.yaml",
+                      self.pull_request_holds(root, "toolchain-images.yaml"))
 
-    def r_case(self, directory=ROOT / ".github" / "workflows"):
-        """(r) on the workflow files of `directory`."""
-        for path in self.workflows(directory):
+    @staticmethod
+    def copy_workflows(root):
+        """Copy .github/workflows into the tree `root`, with the scripts of the rule (r): workflow-credentials, and
+        steering.py, which it imports."""
+        shutil.copytree(ROOT / ".github" / "workflows", root / ".github" / "workflows")
+        (root / ".github" / "scripts").mkdir()
+        for name in ("workflow-credentials", "steering.py"):
+            shutil.copy(ROOT / ".github" / "scripts" / name, root / ".github" / "scripts" / name)
+
+    def pull_request_holds(self, root, name):
+        """pull_request_holds of the tree `root`'s .github/scripts/workflow-credentials, the rule (r) that tests.yaml's
+        job suite runs: each way the workflow .github/workflows/<name> of `root` breaks (r), as "<file>, <where>: <why>"
+        or "<file>: <why>"."""
+        script = root / ".github" / "scripts" / "workflow-credentials"
+        self.assertTrue(script.is_file(), f"{script}: the tree has no rule (r)")
+        saved = list(sys.path)
+        try:
+            loader = importlib.machinery.SourceFileLoader("workflow_credentials_of_this_test", str(script))
+            module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+            loader.exec_module(module)
+        finally:
+            sys.path[:] = saved
+        return module.pull_request_holds(root, name)
+
+    def test_r_no_pull_request_target_and_a_pull_request_job_holds_nothing(self):
+        writers = []
+        for path in self.workflows():
+            workflow = yaml.load(path.read_text(), Loader=YAML_LOADER)
+            self.assertEqual(self.pull_request_holds(ROOT, path.name), [], path.name)
+            if "pull_request" in triggers(workflow):
+                writers += [(path.name, n) for n, job in workflow["jobs"].items()
+                            if isinstance(job.get("permissions"), dict) and "write" in job["permissions"].values()]
+        # The rule's one exception has a case in this tree, so the rule is read on it: CodeQL's push jobs.
+        self.assertIn(("codeql-python.yml", "push"), writers)
+
+    # Controls of (r): each changes a copy of .github/workflows, and the rule must name the change.
+    CONTROLS = {
+        "a write job with no if": ("codeql-python.yml", "    if: github.event_name == 'push'\n", "",
+                                   "codeql-python.yml, the job push: security-events: write, but its if is not"),
+        "a write job whose if also holds on pull_request": (
+            "codeql-python.yml", "    if: github.event_name == 'push'\n",
+            "    if: github.event_name == 'push' || github.event_name == 'pull_request'\n",
+            "codeql-python.yml, the job push: security-events: write, but its if is not"),
+        "write permissions for the whole workflow": (
+            "codeql-python.yml", "permissions: {}\n", "permissions: {security-events: write}\n",
+            "codeql-python.yml, the workflow: security-events: write, but the workflow's permissions reach every job"),
+        "a workflow with no permissions": ("codeql-python.yml", "permissions: {}\n", "",
+                                           "codeql-python.yml, the workflow: no permissions are given"),
+        "a called job with an environment": ("codeql.yml", "    runs-on: ubuntu-24.04\n",
+                                             "    environment: comment\n    runs-on: ubuntu-24.04\n",
+                                             "codeql.yml, the job analyze: it has an environment"),
+        "a called job asking for write on pull_request": (
+            "codeql.yml", "    runs-on: ubuntu-24.04\n",
+            "    permissions: {security-events: write}\n    runs-on: ubuntu-24.04\n",
+            "codeql.yml, the job analyze: security-events: write, but its if is not"),
+        "secrets passed to a called workflow": (
+            "codeql-python.yml", "      language: python\n      build-mode: none\n\n",
+            "      language: python\n      build-mode: none\n    secrets: inherit\n\n",
+            "codeql-python.yml, the job pull-request: it passes secrets to"),
+        "a push job with write-all": (
+            "codeql-python.yml", "    permissions:\n      actions: read\n      contents: read\n"
+            "      security-events: write # to record main's results\n", "    permissions: write-all\n",
+            "codeql-python.yml, the job push: it has id-token: write"),
+        "a workflow with write-all": (
+            "codeql-python.yml", "permissions: {}\n", "permissions: write-all\n",
+            "codeql-python.yml, the workflow: permissions write-all, but its if is not"),
+        "a called job with write-all": (
+            "codeql.yml", "    runs-on: ubuntu-24.04\n",
+            "    permissions: write-all\n    runs-on: ubuntu-24.04\n",
+            "codeql.yml, the job analyze: it has id-token: write"),
+        "a secret read with bracket notation": (
+            "codeql-python.yml", "permissions: {}\n",
+            "permissions: {}\nenv:\n  CREDENTIAL: ${{ secrets['TOKEN'] }}\n",
+            "codeql-python.yml: it reads a secret"),
+        "a secret context read as JSON": (
+            "codeql-python.yml", "permissions: {}\n",
+            "permissions: {}\nenv:\n  CREDENTIAL: ${{ toJSON(secrets) }}\n",
+            "codeql-python.yml: it reads a secret"),
+        "a push job with an identity token": (
+            "codeql-python.yml", "      security-events: write # to record main's results\n",
+            "      security-events: write # to record main's results\n      id-token: write\n",
+            "codeql-python.yml, the job push: it has id-token: write"),
+        "a push job with packages: write": (
+            "codeql-python.yml", "      security-events: write # to record main's results\n",
+            "      security-events: write # to record main's results\n      packages: write\n",
+            "codeql-python.yml, the job push: packages: write, but a push job may write only security-events"),
+        "a called workflow with write permissions": (
+            "codeql.yml", "jobs:\n", "permissions: {security-events: write}\n\njobs:\n",
+            "codeql.yml, the workflow: security-events: write, but the workflow's permissions reach every job"),
+        "a workflow on pull_request_target": (
+            "codeql-python.yml", "  pull_request:\n", "  pull_request_target:\n",
+            "codeql-python.yml: it starts on pull_request_target"),
+    }
+
+    def test_r_workflow_read_all_permissions_hold_no_write_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self.copy_workflows(root)
+            path = root / ".github" / "workflows" / "codeql-python.yml"
             text = path.read_text()
-            workflow = yaml.load(text, Loader=YAML_LOADER)
-            on = triggers(workflow)
-            self.assertNotIn("pull_request_target", on, path.name)
-            if "pull_request" not in on:
-                continue
-            self.assertNotIn("secrets.", text, path.name)
-            holders = [("the workflow", workflow)] + [(f"the job {n}", job) for n, job in workflow["jobs"].items()]
-            for where, holder in holders:
-                if holder is not workflow:
-                    self.assertNotIn("environment", holder, f"{path.name}, {where}")
-                    # A job that calls a workflow passes it a secret by its key secrets (secrets: inherit passes all),
-                    # with no text "secrets." in the file.
-                    self.assertNotIn("secrets", holder, f"{path.name}, {where}")
-                permissions = holder.get("permissions")
-                if permissions is None:
-                    # A job with no permissions of its own takes the workflow's.
-                    self.assertIn("permissions", workflow, f"{path.name}, {where}: no permissions are given")
-                    continue
-                if isinstance(permissions, str):
-                    self.assertEqual(permissions, "read-all", f"{path.name}, {where}")
-                    continue
-                self.assertNotIn("id-token", permissions, f"{path.name}, {where}")
-                for scope, level in permissions.items():
-                    self.assertIn(level, ("read", "none"), f"{path.name}, {where}: {scope}")
+            self.assertEqual(text.count("permissions: {}\n"), 1)
+            path.write_text(text.replace("permissions: {}\n", "permissions: read-all\n", 1))
+            self.assertEqual(self.pull_request_holds(root, "codeql-python.yml"), [])
+
+    def test_codeql_concurrency_replaces_only_runs_of_the_same_pull_request(self):
+        from test_outside_screen import evaluate
+
+        for language in ("actions", "c-cpp", "python"):
+            with self.subTest(language):
+                workflow = parse((ROOT / ".github" / "workflows" / f"codeql-{language}.yml").read_text())
+                concurrency = workflow["concurrency"]
+
+                def context(event, run, sha, pull=None):
+                    return {"github.event_name": event, "github.run_id": run, "github.sha": sha,
+                            "github.event.pull_request.number": pull}
+
+                def group(ctx):
+                    return evaluate(concurrency["group"], ctx)
+
+                first = context("push", 1, HEAD)
+                repeat = context("push", 2, HEAD)
+                self.assertNotEqual(group(first), group(repeat), "distinct push events at the same commit")
+                self.assertFalse(evaluate(concurrency["cancel-in-progress"], first))
+                pull = context("pull_request", 3, HEAD, 7)
+                newer = context("pull_request", 4, OTHER, 7)
+                another = context("pull_request", 5, HEAD, 8)
+                self.assertEqual(group(pull), group(newer))
+                self.assertNotEqual(group(pull), group(another))
+                self.assertNotEqual(group(pull), group(first))
+                self.assertTrue(evaluate(concurrency["cancel-in-progress"], pull))
+
+    def test_r_control_each_change_breaks_the_rule(self):
+        for label, (file, old, new, said) in self.CONTROLS.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self.copy_workflows(root)
+                self.assertEqual(self.pull_request_holds(root, "codeql-python.yml"), [], "the unchanged copy")
+                path = root / ".github" / "workflows" / file
+                text = path.read_text()
+                self.assertEqual(text.count(old), 1, label)
+                path.write_text(text.replace(old, new, 1))
+                problems = self.pull_request_holds(root, "codeql-python.yml")
+                self.assertTrue(any(p.startswith(said) for p in problems), (label, problems))
 
     # A command of a step that builds the code of a pull request: oss-verify check (but --print-toolchain, which only
     # names the toolchain), or docker.
@@ -587,11 +726,16 @@ class PullRequestWorkflows(unittest.TestCase):
 
 class ToolchainPublish(Stand):
     """(publish): toolchain-images-publish.yaml (Toolchain images: publish) starts when a run of toolchain-images.yaml
-    (Toolchain images) on main completes. Its one job, publish, has packages: write, and acts only when that run was
-    of toolchain-images.yaml, for a push to main of this repository, and passed. It copies the three images to one
-    package, each under a tag that names the language of its base row (OSSV-276)."""
+    (Toolchain images) on main completes. Its jobs act only when that run was of toolchain-images.yaml, for a push to
+    main of this repository, and passed. publish has packages: write, and copies the three frame-pointer images to one
+    package, each under a tag that names the language of its base row (OSSV-276). remake-prebuilt, whose token can only
+    read, makes the images of toolchain-images.yaml's job prebuilt again, and hands each over as an artifact.
+    publish-prebuilt, which has packages: write too, runs only pinned actions and crane: it copies the image of that
+    artifact to the same package, only when its digest is the one that prebuilt made (INFRA-5359)."""
 
     PUBLISH, IMAGES = "toolchain-images-publish.yaml", "toolchain-images.yaml"
+    # The jobs of publish's file: each acts only on the runs that publish acts on.
+    JOBS = ("publish", "remake-prebuilt", "publish-prebuilt")
     # The run of Toolchain images that completed: its event, its conclusion, its head branch, its head repository and
     # its workflow file. A pull request from a fork, or from this repository, can have a head branch named main.
     # workflow_run finds the workflow by its name, so a file of another path with the name Toolchain images starts
@@ -614,20 +758,41 @@ class ToolchainPublish(Stand):
     # The start of the name of publish's step that pushes.
     PUSH = "unless ghcr.io holds it"
     # The stand-in crane of the push step: a registry in $FAKE_CRANE/registry.json. Its images map a reference by
-    # digest (repository@digest) to a manifest and a configuration, and its tags map repository:tag to a digest. made
-    # maps a base image to the image that crane mutate --env OFT_FRAME_POINTERS=1 makes of it, with that image's
-    # digest. `manifest`, `config` and `digest` of a reference answer from the registry, and fail as crane does for a
-    # reference that it does not hold. `mutate <base> --env OFT_FRAME_POINTERS=1 -t <repository>:<tag>` puts the image
-    # made of the base there, and prints repository@digest, as crane does. `copy <from> <to>` puts the image of <from>
-    # at <to>. A command that writes to ghcr.io fails unless `auth login ghcr.io` read a password, with no logout after
-    # it: the login is the file $FAKE_CRANE/login. With FAKE_CRANE_NO_PACKAGES_WRITE=1, which run_push sets for a job
-    # whose token cannot write packages, such a command also fails, as ghcr.io refuses that token (DENIED). Each call
+    # digest (repository@digest) to a manifest, a configuration and, for the export, the entries of its files (each
+    # [path, "dir" or "file"]); its tags map repository:tag to a digest, and its blobs map the digest of a layer that
+    # append made to its bytes (base64). made maps a base image to the image that crane mutate --env
+    # OFT_FRAME_POINTERS=1 makes of it, with that image's digest. `manifest`, `config` and `digest` of a reference
+    # answer from the registry, and fail as crane does for a reference that it does not hold. `mutate <base> --env
+    # OFT_FRAME_POINTERS=1 -t <repository>:<tag>` puts the image made of the base there, and prints repository@digest,
+    # as crane does. `copy <from> <to>` puts the image of <from> at <to>. `append -b <base> -f <tar> -t
+    # <repository>:<tag>` puts there the base image with one more layer, the tar gzipped: its manifest names the layer
+    # after the base image's, its configuration has the layer's diff id and one more entry of history, and its files
+    # are the base image's and the tar's. It prints repository@digest. FAKE_CRANE_APPEND_FAULT gives the new image one
+    # fault: with environment, the configuration also has one more variable; with "media type", the manifest has
+    # another media type; with "another base layer", the manifest names another digest for the base image's first
+    # layer, and with "base layers reordered", the base image's layers in reverse order, so the count of the layers
+    # stays; with "another diff id" and "diff ids reordered", the configuration has the same faults in the base image's
+    # diff ids; with "last diff id", the layer's diff id is the digest of the gzipped layer, not the SHA-256 of the tar.
+    # `blob <repository>@<digest>` writes the bytes of such a layer. `export <reference> -` writes a tar of
+    # the image's files. `pull --format=oci <reference> <path>` writes an OCI image layout of the image at <path>: the
+    # manifest as a blob named by the SHA-256 of its bytes (json.dumps with sort_keys, so that this is the manifest's
+    # digest), index.json, which names that blob, and stand-in.json, the image's configuration and files. `push <path>
+    # <repository>:<tag>` reads the manifest of the layout that index.json names, puts the image at the SHA-256 of the
+    # manifest's bytes, whatever name the blob has, and prints repository@digest, as crane does. A command that writes
+    # to ghcr.io fails unless `auth login ghcr.io` read a password, with no logout after it: the login is the file
+    # $FAKE_CRANE/login. With FAKE_CRANE_NO_PACKAGES_WRITE=1, which run_push sets for a job whose token cannot write
+    # packages, such a command also fails, as ghcr.io refuses that token (DENIED). A command that reads the reference
+    # $FAKE_CRANE_UNREADABLE fails with another error than MANIFEST_UNKNOWN, as when ghcr.io does not answer. Each call
     # goes to $FAKE_CRANE/calls: its arguments, as a JSON list on one line. The stand-in runs no other command.
     CRANE = r"""#!/usr/bin/env python3
+import base64
+import gzip
+import hashlib
 import json
 import os
 import pathlib
 import sys
+import tarfile
 
 home = pathlib.Path(os.environ["FAKE_CRANE"])
 args = sys.argv[1:]
@@ -638,11 +803,18 @@ registry = json.loads((home / "registry.json").read_text())
 
 def held(ref):
     # (the digest, the image) of a reference by digest or by tag
+    if ref == os.environ.get("FAKE_CRANE_UNREADABLE"):
+        sys.exit(f"Error: GET https://{ref}: TOOMANYREQUESTS: too many requests")
     repository, digest = ref.split("@", 1) if "@" in ref else (ref.rpartition(":")[0], registry["tags"].get(ref))
     image = registry["images"].get(f"{repository}@{digest}")
     if image is None:
         sys.exit(f"Error: fetching manifest {ref}: MANIFEST_UNKNOWN: manifest unknown")
     return digest, image
+
+
+def digest_of(value):
+    # the digest of a manifest, as ToolchainPublish.digest_of gives it
+    return "sha256:" + hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
 def put(to, digest, image):
@@ -676,42 +848,149 @@ match args:
         print(put(to, made["digest"], made["image"]) + "@" + made["digest"])
     case ["copy", source, to]:
         put(to, *held(source))
+    case ["append", "-b", base, "-f", path, "-t", to]:
+        image = held(base)[1]
+        fault = os.environ.get("FAKE_CRANE_APPEND_FAULT", "")
+        data = pathlib.Path(path).read_bytes()
+        blob = gzip.compress(data, mtime=0)
+        with tarfile.open(path) as archive:
+            entries = [[member.name, "dir" if member.isdir() else "file"] for member in archive.getmembers()]
+        layer = "sha256:" + hashlib.sha256(blob).hexdigest()
+        registry.setdefault("blobs", {})[layer] = base64.b64encode(blob).decode()
+        config = json.loads(json.dumps(image["config"]))
+        rootfs = config.setdefault("rootfs", {"type": "layers", "diff_ids": []})
+        below = rootfs.get("diff_ids", [])
+        if fault == "another diff id":
+            below = ["sha256:" + "0" * 64, *below[1:]]
+        elif fault == "diff ids reordered":
+            below = below[::-1]
+        diff_id = layer if fault == "last diff id" else "sha256:" + hashlib.sha256(data).hexdigest()
+        rootfs["diff_ids"] = [*below, diff_id]
+        config["history"] = [*config.get("history", []), {"created_by": "crane append"}]
+        if fault == "environment":
+            config["config"]["Env"] = [*config["config"]["Env"], "FAULT=1"]
+        layers = image["manifest"]["layers"]
+        if fault == "another base layer":
+            layers = [{**layers[0], "digest": "sha256:" + "0" * 64}, *layers[1:]]
+        elif fault == "base layers reordered":
+            layers = layers[::-1]
+        added = {"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "size": len(blob), "digest": layer}
+        manifest = {**image["manifest"], "config": {**image["manifest"]["config"], "digest": digest_of(config)},
+                    "layers": [*layers, added]}
+        if fault == "media type":
+            manifest["mediaType"] = "application/vnd.docker.distribution.manifest.v2+json"
+        new = {"manifest": manifest, "config": config, "files": [*image.get("files", []), *entries]}
+        print(put(to, digest_of(manifest), new) + "@" + digest_of(manifest))
+    case ["blob", ref] if "@" in ref:
+        data = registry.get("blobs", {}).get(ref.partition("@")[2])
+        if data is None:
+            sys.exit(f"Error: fetching blob {ref}: BLOB_UNKNOWN: blob unknown to registry")
+        sys.stdout.buffer.write(base64.b64decode(data))
+    case ["export", ref, "-"]:
+        image = held(ref)[1]
+        with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as archive:
+            for name, kind in image.get("files", []):
+                member = tarfile.TarInfo(name)
+                member.type = tarfile.DIRTYPE if kind == "dir" else tarfile.REGTYPE
+                archive.addfile(member)
+    case ["pull", "--format=oci", ref, path]:
+        image = held(ref)[1]
+        layout = pathlib.Path(path)
+        data = json.dumps(image["manifest"], sort_keys=True).encode()
+        name = hashlib.sha256(data).hexdigest()
+        (layout / "blobs" / "sha256").mkdir(parents=True, exist_ok=True)
+        (layout / "blobs" / "sha256" / name).write_bytes(data)
+        (layout / "oci-layout").write_text(json.dumps({"imageLayoutVersion": "1.0.0"}))
+        (layout / "index.json").write_text(json.dumps({"schemaVersion": 2, "manifests": [
+            {"mediaType": image["manifest"].get("mediaType"), "digest": f"sha256:{name}", "size": len(data)}]}))
+        (layout / "stand-in.json").write_text(json.dumps({"config": image["config"], "files": image.get("files", [])}))
+    case ["push", path, to]:
+        layout = pathlib.Path(path)
+        manifests = json.loads((layout / "index.json").read_text())["manifests"]
+        if len(manifests) != 1:
+            sys.exit(f"Error: layout contains {len(manifests)} entries, consider --index")
+        data = (layout / "blobs" / manifests[0]["digest"].replace(":", "/")).read_bytes()
+        digest = "sha256:" + hashlib.sha256(data).hexdigest()
+        image = {"manifest": json.loads(data), **json.loads((layout / "stand-in.json").read_text())}
+        print(put(to, digest, image) + "@" + digest)
     case _:
         sys.exit(f"the stand-in crane does not run: crane {' '.join(args)}")
 (home / "registry.json").write_text(json.dumps(registry))
 """
 
     def case(self, tree=ROOT):
+        """Each job of publish's file acts on one run alone: a push run on main of this repository, of the file
+        toolchain-images.yaml, that passed. Its if is evaluated over each run (EVENTS, CONCLUSIONS, BRANCHES, HEADS,
+        PATHS). The file has the jobs JOBS and no other, so that no job of it acts without this test."""
         import test_outside_screen
-        job = self.workflow(tree, self.PUBLISH)["jobs"]["publish"]
-        acts = set()
-        for run in itertools.product(self.EVENTS, self.CONCLUSIONS, self.BRANCHES, self.HEADS, self.PATHS):
-            event, conclusion, branch, head, path = run
-            ctx = {"github.repository": REPO, "github.event.workflow_run.event": event,
-                   "github.event.workflow_run.conclusion": conclusion,
-                   "github.event.workflow_run.head_branch": branch,
-                   "github.event.workflow_run.head_repository.full_name": head,
-                   "github.event.workflow_run.path": path}
-            if test_outside_screen.evaluate(job.get("if", "true"), ctx):
-                acts.add(run)
-        self.assertEqual(acts, {("push", "success", "main", REPO, self.PATHS[0])}, "the runs that publish acts on")
+        jobs = self.workflow(tree, self.PUBLISH)["jobs"]
+        self.assertEqual(sorted(jobs), sorted(self.JOBS), f"the jobs of {self.PUBLISH}")
+        for name in self.JOBS:
+            acts = set()
+            for run in itertools.product(self.EVENTS, self.CONCLUSIONS, self.BRANCHES, self.HEADS, self.PATHS):
+                event, conclusion, branch, head, path = run
+                ctx = {"github.repository": REPO, "github.event.workflow_run.event": event,
+                       "github.event.workflow_run.conclusion": conclusion,
+                       "github.event.workflow_run.head_branch": branch,
+                       "github.event.workflow_run.head_repository.full_name": head,
+                       "github.event.workflow_run.path": path}
+                if test_outside_screen.evaluate(jobs[name].get("if", "true"), ctx):
+                    acts.add(run)
+            self.assertEqual(acts, {("push", "success", "main", REPO, self.PATHS[0])}, f"the runs that {name} acts on")
 
     def test_publish_acts_only_on_a_push_run_on_main_of_this_repository_that_passed(self):
         self.case()
 
-    def test_control_publish_event_check_taken_out_of_the_jobs_if(self):
+    @staticmethod
+    def in_job(job, old, new=""):
+        """A change of copy_tree: the text `old` becomes `new` in the job `job` alone, from its line `  <job>:` to the
+        line of the next job, or to the end of the file. The job holds `old` once. The jobs of both files hold many of
+        the same lines, so a control that changes one job's line names the job."""
+        def change(text):
+            start = re.search(rf"(?m)^  {re.escape(job)}:\n", text)
+            assert start, f"the file has no job {job}"
+            end = re.compile(r"(?m)^  [A-Za-z0-9_-]+:\n").search(text, start.end())
+            stop = end.start() if end else len(text)
+            count = text.count(old, start.start(), stop)
+            assert count == 1, f"the job {job} holds the text that the control changes {count} times, not once: {old!r}"
+            return text[:start.start()] + text[start.start():stop].replace(old, new) + text[stop:]
+        return change
+
+    def if_fails(self, job, old, said):
+        """case passes on an unchanged copy of the tree, and fails, saying `said`, on a copy whose publish file has the
+        text `old` taken out of the job `job` (in_job)."""
         self.passes_unchanged(self.case)
-        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.EVENT_CHECK, "")])
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.in_job(job, old))])
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
-        self.assertIn("the runs that publish acts on", str(caught.exception))
+        self.assertIn(said, str(caught.exception))
+
+    def test_control_publish_event_check_taken_out_of_the_jobs_if(self):
+        self.if_fails("publish", self.EVENT_CHECK, "the runs that publish acts on")
 
     def test_control_publish_path_check_taken_out_of_the_jobs_if(self):
+        self.if_fails("publish", self.PATH_CHECK, "the runs that publish acts on")
+
+    def test_control_publish_prebuilt_event_check_taken_out_of_the_jobs_if(self):
+        self.if_fails("publish-prebuilt", self.EVENT_CHECK, "the runs that publish-prebuilt acts on")
+
+    def test_control_publish_prebuilt_path_check_taken_out_of_the_jobs_if(self):
+        self.if_fails("publish-prebuilt", self.PATH_CHECK, "the runs that publish-prebuilt acts on")
+
+    def test_control_remake_prebuilt_event_check_taken_out_of_the_jobs_if(self):
+        self.if_fails("remake-prebuilt", self.EVENT_CHECK, "the runs that remake-prebuilt acts on")
+
+    def test_control_remake_prebuilt_path_check_taken_out_of_the_jobs_if(self):
+        self.if_fails("remake-prebuilt", self.PATH_CHECK, "the runs that remake-prebuilt acts on")
+
+    def test_control_a_job_of_the_publish_file_that_the_case_does_not_know(self):
+        # A job with no if acts on each run that completes.
         self.passes_unchanged(self.case)
-        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.PATH_CHECK, "")])
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", lambda text: text + (
+            "\n  other:\n    runs-on: ubuntu-24.04\n    permissions: {}\n    steps:\n      - run: \"true\"\n"))])
         with self.assertRaises(AssertionError) as caught:
             self.case(changed)
-        self.assertIn("the runs that publish acts on", str(caught.exception))
+        self.assertIn(f"the jobs of {self.PUBLISH}", str(caught.exception))
 
     @staticmethod
     def digest_of(value):
@@ -858,10 +1137,12 @@ match args:
     def registry_of(self, bases):
         """The stand-in registry with the base image of each row of `bases`, and what crane mutate makes of it: the
         base image's configuration with OFT_FRAME_POINTERS=1 added, and a manifest that names it and the base image's
-        layers. Return the registry, and for each row the digest and the image that crane mutate makes."""
+        layers. The configuration names the diff id of each layer, as an image's does. Return the registry, and for
+        each row the digest and the image that crane mutate makes."""
         registry, made, fp = {"images": {}, "tags": {}, "made": {}}, {}, {}
         for row, (_, base) in bases.items():
-            config = {"architecture": "amd64", "os": "linux", "config": {"Env": ["PATH=/usr/local/bin:/usr/bin:/bin"]}}
+            config = {"architecture": "amd64", "os": "linux", "config": {"Env": ["PATH=/usr/local/bin:/usr/bin:/bin"]},
+                      "rootfs": {"type": "layers", "diff_ids": [self.digest_of([row, "diff id", n]) for n in range(3)]}}
             manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
                         "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "size": 1,
                                    "digest": self.digest_of(config)},
@@ -937,9 +1218,10 @@ match args:
     # The parts of handover_case, as its messages name them.
     EQUAL, RUN = "the values that both files hold", "make, then publish, on one table"
     # The run steps of make that part 2 of handover_case runs, in their order: the base image, the new image, the row
-    # check and the digest. make's other run steps install crane and check the new image. They give publish nothing.
+    # check and the digest. make's other run steps install crane, check the new image and probe it. They give publish
+    # nothing.
     MAKE_STEPS = ("the base image, from infra/toolchains.tsv", "make the image in the runner's registry", ROW_CHECK,
-                  "the digest, for probe, docker-tests and publish")
+                  "the digest, for compare-digests and publish")
 
     def handover_case(self, tree=ROOT, upto=RUN):
         """What toolchain-images.yaml hands over to publish (toolchain-images-publish.yaml): values, the digest
@@ -962,21 +1244,29 @@ match args:
             if part == upto:
                 return tuple(found)
 
+    # Each job of publish's file, and the job of toolchain-images.yaml whose matrix and job env it copies.
+    COPIES = {"publish": "make", "remake-prebuilt": "prebuilt", "publish-prebuilt": "prebuilt"}
+
     def shared_values(self, publish, images, tree):
-        """Part 1 of handover_case: the values that both files hold, each as (publish's, toolchain-images.yaml's):
+        """Part 1 of handover_case: the values that both files hold, each as (publish's file's, the other's):
           - each name of the workflow's env that both files define,
-          - each pin in toolchain-images.yaml of an action that publish uses, and publish's pin of it,
-          - the image and the ports of each service of publish, in each job of toolchain-images.yaml with that service,
-          - each key of publish's matrix (make's), and each name of publish's job env that make's job env has too.
+          - each pin in toolchain-images.yaml of an action that a job of publish's file uses, and that file's pins of
+            it,
+          - the image and the ports of each service of each job of publish's file (COPIES), in each job of
+            toolchain-images.yaml with that service,
+          - each key of the matrix of each job of publish's file and of the job that it copies (COPIES: make's for
+            publish, prebuilt's for remake-prebuilt and publish-prebuilt), and each name of its job env that that job's
+            env has too.
+        A value of publish's own job is named as before remake-prebuilt; a value of remake-prebuilt or of
+        publish-prebuilt starts with the job's name.
         A job of toolchain-images.yaml that calls a workflow of `tree` (uses: ./<path>) has no steps, services or env
         there: the called workflow holds them, and a caller's env does not reach it. So the jobs and the env of that
         workflow count as toolchain-images.yaml's here, and their values name its path.
         Each kind has at least one value, and each pair is equal. The message names each value that differs. Other
         tests hold the trigger: test_publish_acts_only_on_a_push_run_on_main_of_this_repository_that_passed runs
-        publish's if over each run (case) and holds that publish acts only on a push run on main of this repository
+        the if of each job over each run (case) and holds that each acts only on a push run on main of this repository
         that passed, and test_publish_starts_on_the_runs_of_toolchain_images_by_its_name_alone holds the name of the
         workflow that publish listens to."""
-        job, make = publish["jobs"]["publish"], images["jobs"]["make"]
         kinds = {"the env": {}, "the actions": {}, "the services": {}, "the matrix": {}, "the job env": {}}
         # Each job, by the words that name it in a value ("make's"), and each env, by the words after its names.
         jobs, envs = {}, {"": images.get("env") or {}}
@@ -995,25 +1285,30 @@ match args:
                 if name in theirs:
                     kinds["the env"][f"the env {name}{where}"] = (value, theirs[name])
         pins = {}
-        for step in job["steps"]:
-            if action_of(step):
-                pins.setdefault(action_of(step), set()).add(step["uses"].partition("@")[2])
+        for name in self.COPIES:
+            for step in publish["jobs"][name]["steps"]:
+                if action_of(step):
+                    pins.setdefault(action_of(step), set()).add(step["uses"].partition("@")[2])
         for who, held in jobs.items():
             for n, step in enumerate(held.get("steps") or [], 1):
                 if action_of(step) in pins:
                     kinds["the actions"][f"the pin of {action_of(step)} ({who} step {n})"] = (
                         " ".join(sorted(pins[action_of(step)])), step["uses"].partition("@")[2])
-        for service, given in (job.get("services") or {}).items():
-            for who, held in jobs.items():
-                if service in (held.get("services") or {}):
-                    for key in ("image", "ports"):
-                        kinds["the services"][f"the {key} of the service {service} ({who})"] = (
-                            given.get(key), held["services"][service].get(key))
-        for key, value in job["strategy"]["matrix"].items():
-            kinds["the matrix"][f"the matrix {key} (make's)"] = (value, make["strategy"]["matrix"].get(key))
-        for name, value in (job.get("env") or {}).items():
-            if name in (make.get("env") or {}):
-                kinds["the job env"][f"the job env {name} (make's)"] = (value, make["env"][name])
+        for name, copied in self.COPIES.items():
+            job, theirs = publish["jobs"][name], images["jobs"][copied]
+            label = "" if name == "publish" else f"{name}: "
+            for service, given in (job.get("services") or {}).items():
+                for who, held in jobs.items():
+                    if service in (held.get("services") or {}):
+                        for key in ("image", "ports"):
+                            kinds["the services"][f"{label}the {key} of the service {service} ({who})"] = (
+                                given.get(key), held["services"][service].get(key))
+            matrix, their_matrix = job["strategy"]["matrix"], theirs["strategy"]["matrix"]
+            for key in sorted(set(matrix) | set(their_matrix)):
+                kinds["the matrix"][f"{label}the matrix {key} ({copied}'s)"] = (matrix.get(key), their_matrix.get(key))
+            for env, value in (job.get("env") or {}).items():
+                if env in (theirs.get("env") or {}):
+                    kinds["the job env"][f"{label}the job env {env} ({copied}'s)"] = (value, theirs["env"][env])
         for kind, found in kinds.items():
             self.assertTrue(found, f"{self.EQUAL}: {kind}: no value that both files hold")
         values = {what: pair for found in kinds.values() for what, pair in found.items()}
@@ -1214,34 +1509,32 @@ match args:
         caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.FP_TESTS}", other_crane))
         self.assertTrue(caught.endswith(f"the env CRANE_VERSION of .github/workflows/{self.FP_TESTS}"), caught)
 
-    # frame-pointer-tests.yaml, the base rows that its step FP_MAKE reads, and that step: it makes the two images that
-    # FramePointersC and FramePointersRust build on, and compares each with make's digest. toolchain-images.yaml calls
-    # the file, which has no trigger of its own.
+    # frame-pointer-tests.yaml and its step FP_MAKE: it makes the two images that FramePointersC and FramePointersRust
+    # build on, from FP_ROWS, and writes the digest of each for an upload of its job. toolchain-images.yaml calls the
+    # file, which has no trigger of its own, as its job docker-tests, beside make; the step COMPARE of its job
+    # compare-digests fails unless each of those digests is make's.
     FP_TESTS = "frame-pointer-tests.yaml"
     FP_ROWS = ("oss-fuzz-theorems-2026.10", "oss-fuzz-theorems-2026.10-rust")
-    FP_MAKE = "make the C and C++ image and the Rust image, with the digests that make made"
+    FP_MAKE = "make the C and C++ image and the Rust image"
+    COMPARE = "each image that docker-tests tested has the digest that make made"
     # A stand-in docker: `docker pull --quiet <image>` passes, and each call goes to $FAKE_DOCKER_CALLS. It runs no other
     # command.
     DOCKER = ('#!/bin/sh\necho "$*" >> "$FAKE_DOCKER_CALLS"\n[ "$1 $2" = "pull --quiet" ] && [ $# -eq 3 ] && exit 0\n'
               'echo "the stand-in docker does not run: docker $*" >&2\nexit 1\n')
 
-    def fp_make(self, digests=None):
-        """frame-pointer-tests.yaml's step FP_MAKE, with the stand-in crane and docker, on this repository's FP_ROWS.
-        digests, a function of the digests that crane mutate makes ({row: digest}), gives the files of make's
-        artifact, fp-digest/<row>.digest; with no digests there is no fp-digest directory. Return its exit status, its
-        log, its outputs, the digests that crane mutate makes, and the images that docker pulled."""
-        tests = self.workflow(ROOT, self.FP_TESTS)
+    def fp_make(self, tree=ROOT):
+        """frame-pointer-tests.yaml's step FP_MAKE of `tree`, with the stand-in crane and docker, on a table of the base
+        rows of make's matrix, and then each upload of its job docker-tests: an upload of a directory holds each file
+        in it, under its name. Return its exit status, its log, its outputs, the digests that crane mutate makes, the
+        images that docker pulled, and each file that an upload gives, as (the artifact, the file)."""
+        tests = self.workflow(tree, self.FP_TESTS)
         step = self.step(tests, "docker-tests", self.FP_MAKE)
-        bases = self.base_rows(self.FP_ROWS)
+        bases = self.base_rows(self.workflow(tree, self.IMAGES)["jobs"]["make"]["strategy"]["matrix"]["base"])
         registry, made, _ = self.registry_of(bases)
         home, temp = self.crane_home(registry), pathlib.Path(tempfile.mkdtemp(dir=self.dir))
         self.put_crane(temp / "bin")
         (temp / "bin" / "docker").write_text(self.DOCKER)
         (temp / "bin" / "docker").chmod(0o755)
-        if digests is not None:
-            (temp / "fp-digest").mkdir()
-            for row, digest in digests(made).items():
-                (temp / "fp-digest" / f"{row}.digest").write_text(digest + "\n")
         calls = temp / "docker-calls"
         calls.write_text("")
         rc, log, got = self.run_script(step["run"], self.checkout_of(bases), RUNNER_TEMP=str(temp),
@@ -1249,7 +1542,13 @@ match args:
                                        PATH=f"{temp / 'bin'}{os.pathsep}{self.env['PATH']}",
                                        **env_of(tests, "docker-tests", step, {}))
         pulled = [line.removeprefix("pull --quiet ") for line in calls.read_text().splitlines()]
-        return rc, log, got, made, pulled
+        handed = []
+        for up in (s.get("with") or {} for s in tests["jobs"]["docker-tests"]["steps"]
+                   if action_of(s) == "actions/upload-artifact"):
+            path = pathlib.Path(render(up.get("path", ""), {"runner.temp": str(temp)}))
+            files = sorted(path.iterdir()) if path.is_dir() else [path] if path.is_file() else []
+            handed += [(render(up.get("name", "artifact"), {}), file) for file in files]
+        return rc, log, got, made, pulled, handed
 
     def fp_images(self, made):
         """The images that FP_MAKE gives FramePointers, as its outputs c and rust: each made in the runner's registry,
@@ -1261,30 +1560,130 @@ match args:
         pulled = [image for row in self.FP_ROWS for image in (bases[row][1], refs[row])]
         return {"c": refs[self.FP_ROWS[0]], "rust": refs[self.FP_ROWS[1]]}, pulled
 
-    def test_frame_pointer_tests_compares_with_make(self):
-        # Called by toolchain-images.yaml, with make's digests: each image has make's digest.
-        rc, log, got, made, pulled = self.fp_make(lambda made: made)
+    def test_frame_pointer_tests_hands_over_the_digests_of_the_images_that_it_tests(self):
+        # FramePointers gets each image by its digest, and an upload holds that digest, in <row>.digest, for each row.
+        rc, log, got, made, pulled, handed = self.fp_make()
         self.assertEqual((rc, (got, pulled)), (0, self.fp_images(made)), log)
-        self.assertEqual(log.count(", the digest that make made"), 2, log)
+        self.assertEqual({file.name: file.read_text() for _, file in handed},
+                         {f"{row}.digest": made[row] + "\n" for row in self.FP_ROWS}, log)
 
     def test_frame_pointer_tests_starts_only_when_toolchain_images_calls_it(self):
         # tests.yaml's job docker runs FramePointersC and FramePointersRust for every other change.
         self.assertEqual(list(triggers(self.workflow(ROOT, self.FP_TESTS))), ["workflow_call"])
 
-    def test_frame_pointer_tests_called_fails_without_makes_digest_or_on_another(self):
-        c, rust = self.FP_ROWS
-        cases = {
-            "no fp-digest": (None, f"::error::make gave no digest for {c}: ''"),
-            "no digest of the Rust row": (lambda made: {c: made[c]}, f"::error::make gave no digest for {rust}: ''"),
-            "another digest of the C row": (lambda made: {**made, c: "sha256:" + "0" * 64},
-                                            f"but make made sha256:{'0' * 64}"),
-        }
-        for case, (digests, error) in cases.items():
-            with self.subTest(case=case):
-                rc, log, got, _, _ = self.fp_make(digests)
-                self.assertNotEqual(rc, 0, log)
-                self.assertIn(error, log)
-                self.assertNotIn("rust", got, log)
+    def compare_case(self, tree=ROOT, tested=None):
+        """make's steps (run_make) for each base row of its matrix, and frame-pointer-tests.yaml's step FP_MAKE and its
+        uploads (fp_make), on one table with no frame-pointer row. Then the step COMPARE of compare-digests, with each
+        file of those uploads where the downloads of compare-digests put it (lands). `tested`, a function of the files
+        of docker-tests ({(the artifact, the file's name): its text}), gives the files that docker-tests hands over in
+        their place. compare-digests must wait for each job whose upload a download of it reads (needs): else it can
+        start before the file is there. Return COMPARE's exit status, its log, the digests that make made, and the
+        rows of the files of docker-tests."""
+        images = self.workflow(tree, self.IMAGES)
+        job = images["jobs"]["compare-digests"]
+        rows = images["jobs"]["make"]["strategy"]["matrix"]["base"]
+        bases = self.base_rows(rows)
+        registry, made, _ = self.registry_of(bases)
+        handed = {}
+        for row in rows:
+            outcome, log, files = self.run_make(images, row, self.checkout_of(bases), self.crane_home(registry))
+            self.assertEqual(outcome, "passes", log)
+            handed.update({("make", artifact, file.name): file.read_text() for artifact, file in files})
+        rc, log, _, _, _, files = self.fp_make(tree)
+        self.assertEqual(rc, 0, log)
+        theirs = {(artifact, file.name): file.read_text() for artifact, file in files}
+        theirs = tested(theirs) if tested else theirs
+        handed.update({("docker-tests", *key): text for key, text in theirs.items()})
+        temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        downloads = [s.get("with") or {} for s in job["steps"] if action_of(s) == "actions/download-artifact"]
+        read = set()
+        for (by, artifact, name), text in handed.items():
+            for down in downloads:
+                to = self.lands(down, artifact, name, str(temp))
+                if to is not None:
+                    read.add(by)
+                    pathlib.Path(to).parent.mkdir(parents=True, exist_ok=True)
+                    pathlib.Path(to).write_text(text)
+        needs = job.get("needs") or []
+        self.assertEqual(read - set([needs] if isinstance(needs, str) else needs), set(),
+                         "the jobs whose uploads compare-digests reads, and does not wait for")
+        step = self.step(images, "compare-digests", self.COMPARE)
+        rc, log, _ = self.run_script(step["run"], temp, RUNNER_TEMP=str(temp), GITHUB_STEP_SUMMARY=str(temp / "summary"),
+                                     **env_of(images, "compare-digests", step, {"runner.temp": str(temp)}))
+        return rc, log, made, [name.removesuffix(".digest") for _, name in theirs]
+
+    def compare_passes(self, tree=ROOT):
+        """compare_case passes, and names the digest of each row of FP_ROWS."""
+        rc, log, made, _ = self.compare_case(tree)
+        self.assertEqual(rc, 0, log)
+        for row in self.FP_ROWS:
+            self.assertIn(f"{row}: docker-tests tested `{made[row]}`, the image that make made", log)
+
+    def test_compare_digests_passes_on_the_images_that_make_made(self):
+        self.compare_passes()
+
+    def test_control_docker_tests_uploads_its_digests_under_another_name(self):
+        # compare-digests' download then gets no file of docker-tests.
+        self.passes_unchanged(self.compare_passes)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.FP_TESTS}", "name: fp-tested-digest\n",
+                                              "name: fp-tested-digests\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.compare_passes(changed)
+        self.assertIn("::error::docker-tests gave no digest for oss-fuzz-theorems-2026.10: ''", str(caught.exception))
+
+    def test_control_compare_digests_does_not_wait_for_docker_tests(self):
+        images = f".github/workflows/{self.IMAGES}"
+        self.passes_unchanged(self.compare_passes)
+        changed = self.copy_tree("changed", [(images, "    needs: [make, docker-tests]\n", "    needs: make\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.compare_passes(changed)
+        self.assertIn("the jobs whose uploads compare-digests reads, and does not wait for", str(caught.exception))
+
+    def tested_rows_case(self, tree=ROOT):
+        """docker-tests hands over a digest of FP_ROWS alone, and compare-digests requires each of them: it passes with
+        these files, and fails when the file of any one of them is missing. So the rows that compare-digests requires
+        are the rows of which docker-tests keeps a digest."""
+        rc, log, _, rows = self.compare_case(tree)
+        self.assertEqual((rc, sorted(rows)), (0, sorted(self.FP_ROWS)), log)
+        for row in rows:
+            rc, log, _, _ = self.compare_case(
+                tree, lambda files, row=row: {k: v for k, v in files.items() if k[1] != f"{row}.digest"})
+            self.assertNotEqual(rc, 0, f"compare-digests passes without docker-tests' digest of {row}: {log}")
+            self.assertIn(f"::error::docker-tests gave no digest for {row}: ''", log)
+
+    def test_compare_digests_requires_each_row_that_docker_tests_tests(self):
+        self.tested_rows_case()
+
+    def test_control_compare_digests_requires_the_c_row_alone(self):
+        # Without the Rust row in TESTED_ROWS, compare-digests passes when docker-tests gives no digest of it.
+        self.passes_unchanged(self.tested_rows_case)
+        rows = "      TESTED_ROWS: oss-fuzz-theorems-2026.10 oss-fuzz-theorems-2026.10-rust\n"
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", rows,
+                                              "      TESTED_ROWS: oss-fuzz-theorems-2026.10\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.tested_rows_case(changed)
+        self.assertIn("compare-digests passes without docker-tests' digest of oss-fuzz-theorems-2026.10-rust",
+                      str(caught.exception))
+
+    def other_digest_case(self, tree=ROOT):
+        """docker-tests hands over another digest of the C and C++ row than make made: compare-digests fails, and names
+        both digests."""
+        c, other = self.FP_ROWS[0], "sha256:" + "0" * 64
+        rc, log, made, _ = self.compare_case(
+            tree, lambda files: {k: other + "\n" if k[1] == f"{c}.digest" else v for k, v in files.items()})
+        self.assertNotEqual(rc, 0, log)
+        self.assertIn(f"::error::docker-tests tested the image {other} of {c}, but make made {made[c]}", log)
+
+    def test_compare_digests_fails_when_docker_tests_tested_another_image(self):
+        self.other_digest_case()
+
+    def test_control_compare_digests_without_its_comparison(self):
+        self.passes_unchanged(self.other_digest_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}",
+                                              '            elif [ "$tested" != "$made" ]; then\n',
+                                              "            elif false; then\n")])
+        with self.assertRaises(AssertionError):
+            self.other_digest_case(changed)
 
     def test_control_fp_package_changed_in_publish_alone(self):
         line = f"  FP_PACKAGE: {self.PACKAGE}\n"
@@ -1293,8 +1692,8 @@ match args:
         self.assertTrue(caught.endswith(f"{self.IMAGES}'s): the env FP_PACKAGE"), caught)
 
     def test_control_registry_image_changed_in_publish_alone(self):
-        caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.PUBLISH}", "image: registry:2@",
-                                                  "image: registry:3@"))
+        caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.PUBLISH}",
+                                                  self.in_job("publish", "image: registry:2@", "image: registry:3@")))
         self.assertIn("the image of the service registry (make's)", caught)
 
     def test_control_digest_artifact_renamed_in_make_alone(self):
@@ -1321,8 +1720,8 @@ match args:
         # none of make's. make stays whole, but publish downloads no digest.
         publish = f".github/workflows/{self.PUBLISH}"
         caught = self.handover_fails(
-            self.RUN, (publish, "          run-id: ${{ github.event.workflow_run.id }}\n", ""),
-            (publish, "          github-token: ${{ github.token }}\n", ""))
+            self.RUN, (publish, self.in_job("publish", "          run-id: ${{ github.event.workflow_run.id }}\n", "")),
+            (publish, self.in_job("publish", "          github-token: ${{ github.token }}\n", "")))
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: '': nothing pushed", caught)
 
@@ -1337,8 +1736,8 @@ match args:
     def test_control_publish_checks_out_main_not_the_built_commit(self):
         # With no ref, publish checks out main's newest commit, whose infra/toolchains.tsv names another base image of
         # the row. publish then makes another image than make made, and pushes nothing.
-        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}",
-                                                "          ref: ${{ github.event.workflow_run.head_sha }}\n", ""))
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish", "          ref: ${{ github.event.workflow_run.head_sha }}\n", "")))
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("::error::the image made here from oss-fuzz-theorems-2026.10 is ", caught)
         self.assertIn(", but make made sha256:", caught)
@@ -1363,16 +1762,16 @@ match args:
         # With cone mode off, the sparse checkout then takes infra/other.tsv alone, and leaves infra/toolchains.tsv out
         # (sparse_takes). make stays whole, but publish fails.
         publish = f".github/workflows/{self.PUBLISH}"
-        caught = self.handover_fails(self.RUN, (publish, "sparse-checkout: infra/toolchains.tsv",
-                                                "sparse-checkout: infra/other.tsv"))
+        caught = self.handover_fails(self.RUN, (publish, self.in_job("publish", "sparse-checkout: infra/toolchains.tsv",
+                                                                     "sparse-checkout: infra/other.tsv")))
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertRegex(caught, r"awk: .*infra/toolchains\.tsv.*No such file or directory")
 
     def test_control_publish_push_step_writes_github_env(self):
         # The push step then changes the env of the job's later steps, in a job with packages: write.
         line = '          PATH="$RUNNER_TEMP/bin:$PATH"\n'
-        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", line,
-                                                line + '          echo "X=1" >> "$GITHUB_ENV"\n'))
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish", line, line + '          echo "X=1" >> "$GITHUB_ENV"\n')))
         self.assertIn("wrote GITHUB_PATH or GITHUB_ENV", caught)
 
     def test_control_publish_tag_in_the_package_of_the_base_image(self):
@@ -1388,8 +1787,8 @@ match args:
     def test_control_make_row_check_without_its_comparison(self):
         # make's row check passes each row that ghcr.io holds, whatever image it names. publish refuses a row that
         # does not name the image that make made.
-        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.IMAGES}",
-                                                '          [ "$named" = "$want" ] ||\n', '          true ||\n'))
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.IMAGES}", self.in_job(
+            "make", '          [ "$named" = "$want" ] ||\n', '          true ||\n')))
         self.assertIn("oss-fuzz-theorems-2026.10, other digest: make passes, publish refuses the row", caught)
         self.assertIn("oss-fuzz-theorems-2026.10-rust, base package: make passes, publish refuses the row", caught)
 
@@ -1398,8 +1797,8 @@ match args:
         # That line read NAME, which the step's env no longer gives, so this line takes the package from the made
         # image: localhost:5000/<the path of the base package>@<digest>. make then passes the row of the base package,
         # and publish refuses it.
-        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.IMAGES}", 'want="$FP_PACKAGE@${MADE#*@}"',
-                                                'want="ghcr.io/${MADE#localhost:5000/}"'))
+        caught = self.handover_fails(self.RUN, (f".github/workflows/{self.IMAGES}", self.in_job(
+            "make", 'want="$FP_PACKAGE@${MADE#*@}"', 'want="ghcr.io/${MADE#localhost:5000/}"')))
         self.assertIn("oss-fuzz-theorems-2026.10-rust, base package: make passes, publish refuses the row", caught)
         self.assertIn("oss-fuzz-theorems-2026.10-rust, made: make refuses the row, publish passes", caught)
 
@@ -1411,7 +1810,7 @@ match args:
         self.assertIn("oss-fuzz-theorems-2026.10, none: make passes, publish fails", caught)
         self.assertIn("make gave no digest for oss-fuzz-theorems-2026.10: 'localhost:5000/", caught)
 
-    # make's line that writes the digest of its row, which probe, docker-tests and publish read.
+    # make's line that writes the digest of its row, which compare-digests and publish read.
     DIGEST_WRITE = '          echo "${MADE#*@}" > "$RUNNER_TEMP/fp-digest/$BASE_ROW.digest"\n'
 
     def no_digest_case(self, name, *changes):
@@ -1436,15 +1835,15 @@ match args:
 
     def test_control_make_upload_without_if_no_files_found_error(self):
         with self.assertRaises(AssertionError) as caught:
-            self.no_digest_case("no digest, no error", (f".github/workflows/{self.IMAGES}",
-                                                        "          if-no-files-found: error\n", ""))
+            self.no_digest_case("no digest, no error", (f".github/workflows/{self.IMAGES}", self.in_job(
+                "make", "          if-no-files-found: error\n", "")))
         self.assertIn("when no file is at the path of its upload", str(caught.exception))
 
-    def guard_fails(self, case, old, new=""):
-        """`case` passes on an unchanged copy of the tree, and fails on a copy whose publish file has `new` for `old`
-        (copy_tree). Return its message."""
+    def guard_fails(self, case, old, new="", job="publish"):
+        """`case` passes on an unchanged copy of the tree, and fails on a copy whose publish file has `new` for `old` in
+        the job `job`, publish unless another is named (copy_tree, in_job). Return its message."""
         self.passes_unchanged(case)
-        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", old, new)])
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.in_job(job, old, new))])
         with self.assertRaises(AssertionError) as caught:
             case(changed)
         return str(caught.exception)
@@ -1557,14 +1956,14 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
 """
 
     def install_case(self, tree=ROOT):
-        """publish's step install crane, with the stand-in CURL first on PATH, which gives a tar.gz of one file, crane.
-        The step must fetch CRANE_ARCHIVE of the release CRANE_VERSION of go-containerregistry. The workflow's pin
-        CRANE_SHA256 is not the SHA-256 of this archive, so the step must fail and put no crane in $RUNNER_TEMP/bin.
-        With CRANE_SHA256 set to the archive's own SHA-256, it must put the archive's crane there. After each run,
-        GITHUB_PATH and GITHUB_ENV (file_commands) are still empty: a step that writes them changes the PATH or the env
-        of the push step, in a job with packages: write."""
+        """The step install crane of each job of publish's file (JOBS), with the stand-in CURL first on PATH, which
+        gives a tar.gz of one file, crane. The step must fetch CRANE_ARCHIVE of the release CRANE_VERSION of
+        go-containerregistry. The workflow's pin CRANE_SHA256 is not the SHA-256 of this archive, so the step must fail
+        and put no crane in $RUNNER_TEMP/bin. With CRANE_SHA256 set to the archive's own SHA-256, it must put the
+        archive's crane there. After each run, GITHUB_PATH and GITHUB_ENV (file_commands) are still empty: a step that
+        writes them changes the PATH or the env of the job's later steps, and in publish and publish-prebuilt, of the
+        push step, in a job with packages: write. Each message names the job."""
         publish = self.workflow(tree, self.PUBLISH)
-        step = self.step(publish, "publish", "install crane")
         fake = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
         (fake / "bin").mkdir()
         (fake / "bin" / "curl").write_text(self.CURL)
@@ -1575,26 +1974,30 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
             member.size, member.mode = len(crane), 0o755
             archive.addfile(member, io.BytesIO(crane))
         own = hashlib.sha256((fake / "archive").read_bytes()).hexdigest()
-        pin = env_of(publish, "publish", step, {})
-        self.assertNotEqual(own, pin["CRANE_SHA256"])
-        url = ("https://github.com/google/go-containerregistry/releases/download/"
-               f"{pin['CRANE_VERSION']}/{pin['CRANE_ARCHIVE']}")
-        for what, given in (("an archive whose SHA-256 is not CRANE_SHA256", {}),
-                            ("CRANE_SHA256 set to the archive's SHA-256", {"CRANE_SHA256": own})):
-            temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
-            files = self.file_commands(temp)
-            (fake / "urls").write_text("")
-            rc, log, _ = self.run_script(step["run"], self.dir, RUNNER_TEMP=str(temp), FAKE_CURL=str(fake),
-                                         PATH=f"{fake / 'bin'}{os.pathsep}{self.env['PATH']}",
-                                         **{name: str(path) for name, path in files.items()},
-                                         **env_of(publish, "publish", step, {}, given))
-            self.assertEqual((fake / "urls").read_text().splitlines(), [url],
-                             f"install crane, with {what}: the addresses that curl fetched")
-            installed = temp / "bin" / "crane"
-            self.assertEqual((rc == 0, installed.is_file() and installed.read_bytes() == crane), (bool(given),) * 2,
-                             f"install crane, with {what}: (it passes, crane is in $RUNNER_TEMP/bin). Its log:\n{log}")
-            self.assertEqual({name: path.read_text() for name, path in files.items()}, dict.fromkeys(files, ""),
-                             f"install crane, with {what}: GITHUB_PATH and GITHUB_ENV after the step")
+        for job in self.JOBS:
+            step = self.step(publish, job, "install crane")
+            pin = env_of(publish, job, step, {})
+            self.assertNotEqual(own, pin["CRANE_SHA256"])
+            url = ("https://github.com/google/go-containerregistry/releases/download/"
+                   f"{pin['CRANE_VERSION']}/{pin['CRANE_ARCHIVE']}")
+            for what, given in (("an archive whose SHA-256 is not CRANE_SHA256", {}),
+                                ("CRANE_SHA256 set to the archive's SHA-256", {"CRANE_SHA256": own})):
+                temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+                files = self.file_commands(temp)
+                (fake / "urls").write_text("")
+                rc, log, _ = self.run_script(step["run"], self.dir, RUNNER_TEMP=str(temp), FAKE_CURL=str(fake),
+                                             PATH=f"{fake / 'bin'}{os.pathsep}{self.env['PATH']}",
+                                             **{name: str(path) for name, path in files.items()},
+                                             **env_of(publish, job, step, {}, given))
+                self.assertEqual((fake / "urls").read_text().splitlines(), [url],
+                                 f"{job}: install crane, with {what}: the addresses that curl fetched")
+                installed = temp / "bin" / "crane"
+                self.assertEqual((rc == 0, installed.is_file() and installed.read_bytes() == crane),
+                                 (bool(given),) * 2,
+                                 f"{job}: install crane, with {what}: (it passes, crane is in $RUNNER_TEMP/bin). Its "
+                                 f"log:\n{log}")
+                self.assertEqual({name: path.read_text() for name, path in files.items()}, dict.fromkeys(files, ""),
+                                 f"{job}: install crane, with {what}: GITHUB_PATH and GITHUB_ENV after the step")
 
     def test_publish_installs_crane_only_from_the_archive_of_its_pin(self):
         self.install_case()
@@ -1604,6 +2007,20 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
                                   '          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -\n')
         self.assertIn("install crane, with an archive whose SHA-256 is not CRANE_SHA256: (it passes, crane is in "
                       "$RUNNER_TEMP/bin)", caught)
+
+    def test_control_publish_prebuilt_install_without_its_check_of_the_archive(self):
+        caught = self.guard_fails(self.install_case,
+                                  '          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -\n',
+                                  job="publish-prebuilt")
+        self.assertIn("publish-prebuilt: install crane, with an archive whose SHA-256 is not CRANE_SHA256: (it passes, "
+                      "crane is in $RUNNER_TEMP/bin)", caught)
+
+    def test_control_remake_prebuilt_install_without_its_check_of_the_archive(self):
+        caught = self.guard_fails(self.install_case,
+                                  '          echo "$CRANE_SHA256  $RUNNER_TEMP/$CRANE_ARCHIVE" | sha256sum -c -\n',
+                                  job="remake-prebuilt")
+        self.assertIn("remake-prebuilt: install crane, with an archive whose SHA-256 is not CRANE_SHA256: (it passes, "
+                      "crane is in $RUNNER_TEMP/bin)", caught)
 
     def test_control_publish_install_writes_github_path(self):
         tar = '          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane\n'
@@ -1716,17 +2133,1284 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
                  for p in sorted((ROOT / ".github" / "workflows").iterdir()) if p.suffix in (".yml", ".yaml")]
         self.assertEqual(names.count(images["name"]), 1, names)
 
-    def test_publish_runs_no_docker_and_no_script_of_it_reads_github_sha_or_holds_an_expression(self):
-        steps = self.workflow(ROOT, self.PUBLISH)["jobs"]["publish"]["steps"]
-        # crane alone: no step runs docker.
+    def tracked(self):
+        """The path of each file of this repository that git tracks: what a checkout of the whole tree gives."""
+        done = subprocess.run([REAL_GIT, "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True)
+        names = [name for name in done.stdout.split("\0") if name]
+        self.assertIn("infra/toolchains.tsv", names, "git enumerated no infra/toolchains.tsv among the tracked files")
+        return names
+
+    def no_docker_case(self, tree=ROOT):
+        """publish and publish-prebuilt run crane alone: no step runs docker or uses an action of docker.
+        remake-prebuilt runs docker, through make (token_case holds where its token goes, and writers_case that it
+        cannot write). publish-prebuilt runs no script of the repository either: of the files that git tracks
+        (tracked), its checkout gives infra/toolchains.tsv alone (sparse_takes), and no script of it names the path of
+        another one. In a workflow_run run, GITHUB_SHA is main's newest commit, not the commit that the run of Toolchain
+        images built: no script of the file reads it. No script of the file holds an expression."""
+        publish = self.workflow(tree, self.PUBLISH)
+        for name in self.JOBS:
+            steps = publish["jobs"][name]["steps"]
+            if name != "remake-prebuilt":
+                for step in steps:
+                    run = "\n".join(line for line in str(step.get("run", "")).splitlines()
+                                    if not line.lstrip().startswith("#"))
+                    self.assertNotRegex(run, r"\bdocker\b", f"{name}: {step.get('name')}")
+                    self.assertFalse(str(step.get("uses", "")).startswith(("docker://", "docker/")), f"{name}: {step}")
+            self.assertFalse([s.get("name") for s in steps if "GITHUB_SHA" in str(s.get("run", ""))
+                              or "${{" in str(s.get("run", ""))],
+                             f"{name}: the steps whose script reads GITHUB_SHA or holds an expression")
+        files, steps = self.tracked(), publish["jobs"]["publish-prebuilt"]["steps"]
+        checkouts = [step.get("with") or {} for step in steps if action_of(step) == "actions/checkout"]
+        self.assertEqual([[path for path in files if self.sparse_takes(given, path)] for given in checkouts],
+                         [["infra/toolchains.tsv"]], "publish-prebuilt: the files that each of its checkouts gives")
+        named = []
         for step in steps:
-            run = "\n".join(line for line in str(step.get("run", "")).splitlines()
-                            if not line.lstrip().startswith("#"))
-            self.assertNotRegex(run, r"\bdocker\b", step.get("name"))
-        # In a workflow_run run, GITHUB_SHA is main's newest commit, not the commit that the run of Toolchain images
-        # built. No script holds an expression.
-        self.assertFalse([s.get("name") for s in steps if "GITHUB_SHA" in str(s.get("run", ""))
-                          or "${{" in str(s.get("run", ""))])
+            run = "\n".join(line for line in str(step.get("run", "")).splitlines() if not line.lstrip().startswith("#"))
+            named += [f"{step.get('name')}: {path}" for path in files if path != "infra/toolchains.tsv"
+                      and re.search(rf"(?<![\w.-]){re.escape(path)}(?![\w.-])", run)]
+        self.assertEqual(named, [], "publish-prebuilt: the steps whose script names a file of the repository")
+
+    def test_publish_runs_no_docker_and_no_script_of_it_reads_github_sha_or_holds_an_expression(self):
+        self.no_docker_case()
+
+    def no_docker_fails(self, job, old, new, said):
+        """no_docker_case passes on an unchanged copy of the tree, and fails, saying `said`, on a copy whose job `job`
+        has `new` for `old` (in_job)."""
+        self.passes_unchanged(self.no_docker_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.in_job(job, old, new))])
+        with self.assertRaises(AssertionError) as caught:
+            self.no_docker_case(changed)
+        self.assertIn(said, str(caught.exception))
+
+    def test_control_publish_runs_docker(self):
+        line = '          PATH="$RUNNER_TEMP/bin:$PATH"\n'
+        self.no_docker_fails("publish", line, line + '          docker pull --quiet "$BASE_ROW" > /dev/null\n',
+                             f"publish: {self.PUSH}")
+
+    def test_control_publish_prebuilt_runs_docker(self):
+        line = '          crane copy "$ours@$WANT" "$TAG"\n'
+        self.no_docker_fails("publish-prebuilt", line, '          docker pull --quiet "$TAG" > /dev/null\n' + line,
+                             f"publish-prebuilt: {self.PREBUILT_PUSH}")
+
+    def test_control_publish_prebuilt_checks_out_the_whole_tree(self):
+        self.no_docker_fails("publish-prebuilt", "          sparse-checkout: infra/toolchains.tsv\n", "",
+                             "publish-prebuilt: the files that each of its checkouts gives")
+
+    def test_control_publish_prebuilt_runs_make(self):
+        # make is not on the runner, since the checkout gives infra/toolchains.tsv alone; the step names it all the
+        # same.
+        line = '          loaded=$(crane push "$RUNNER_TEMP/prebuilt-image" "$ours:$ROW")\n'
+        self.no_docker_fails("publish-prebuilt", line,
+                             '          .github/scripts/python-runtime/make "$WANT" "$ours:$ROW"\n' + line,
+                             "publish-prebuilt: the steps whose script names a file of the repository")
+
+    def test_control_publish_prebuilt_script_reads_github_sha(self):
+        self.passes_unchanged(self.no_docker_case)
+        line = '          tag="$FP_PACKAGE:$kind-prebuilt-$HEAD_SHA"\n'
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", line, '          tag="$FP_PACKAGE:$kind-prebuilt-$GITHUB_SHA"\n'))])
+        with self.assertRaises(AssertionError) as caught:
+            self.no_docker_case(changed)
+        self.assertIn("publish-prebuilt: the steps whose script reads GITHUB_SHA", str(caught.exception))
+
+    def writers_case(self, tree=ROOT):
+        """The jobs of the workflows of `tree` whose token can write packages (grants): publish and publish-prebuilt
+        alone. A job whose token has the repository's default permissions, where neither the job nor its workflow sets
+        any, counts too: that default can write. A workflow that starts only on workflow_call has no token of its own:
+        its jobs run with the calling job's permissions at most, and this reads the calling job itself, as
+        .github/scripts/workflow-credentials does."""
+        found = set()
+        for path in sorted((tree / ".github" / "workflows").iterdir()):
+            if path.suffix not in (".yml", ".yaml"):
+                continue
+            workflow = parse(path.read_text())
+            called_only = list(triggers(workflow)) == ["workflow_call"]
+            for name, job in (workflow.get("jobs") or {}).items():
+                default = "permissions" not in job and "permissions" not in workflow and not called_only
+                if default or self.grants(workflow, name, "packages") == "write":
+                    found.add((path.name, name))
+        self.assertEqual(found, {(self.PUBLISH, "publish"), (self.PUBLISH, "publish-prebuilt")},
+                         "the jobs of the workflows whose token can write packages")
+
+    def test_only_publish_and_publish_prebuilt_can_write_packages(self):
+        self.writers_case()
+
+    def test_control_prebuilt_with_packages_write(self):
+        # prebuilt of toolchain-images.yaml runs the code of a pull request, and runs on pull_request.
+        self.passes_unchanged(self.writers_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", self.in_job(
+            "prebuilt", "    permissions:\n", "    permissions:\n      packages: write\n"))])
+        with self.assertRaises(AssertionError) as caught:
+            self.writers_case(changed)
+        self.assertIn("the jobs of the workflows whose token can write packages", str(caught.exception))
+        self.assertIn("'prebuilt'", str(caught.exception))
+
+    def test_control_remake_prebuilt_with_packages_write(self):
+        # remake-prebuilt runs docker and the code of the commit that the run of Toolchain images built.
+        self.passes_unchanged(self.writers_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", "    permissions:\n", "    permissions:\n      packages: write\n"))])
+        with self.assertRaises(AssertionError) as caught:
+            self.writers_case(changed)
+        self.assertIn("the jobs of the workflows whose token can write packages", str(caught.exception))
+        self.assertIn("'remake-prebuilt'", str(caught.exception))
+
+    def test_control_called_workflow_with_packages_write(self):
+        # A job of a workflow that starts only on workflow_call (codeql.yml) is not counted for its default token, but
+        # a write that it asks for is.
+        self.passes_unchanged(self.writers_case)
+        changed = self.copy_tree("changed", [(".github/workflows/codeql.yml", self.in_job(
+            "analyze", "    timeout-minutes: 30\n", "    timeout-minutes: 30\n    permissions:\n      packages: write\n"))])
+        with self.assertRaises(AssertionError) as caught:
+            self.writers_case(changed)
+        self.assertIn("('codeql.yml', 'analyze')", str(caught.exception))
+
+    def test_control_called_workflow_that_starts_on_push_too(self):
+        # The same job with no permissions counts as soon as its workflow starts on an event of its own.
+        self.passes_unchanged(self.writers_case)
+        changed = self.copy_tree("changed", [(".github/workflows/codeql.yml", "on:\n  workflow_call:\n",
+                                              "on:\n  push:\n  workflow_call:\n")])
+        with self.assertRaises(AssertionError) as caught:
+            self.writers_case(changed)
+        self.assertIn("('codeql.yml', 'analyze')", str(caught.exception))
+
+    # remake-prebuilt's step that runs make and compares its digest with prebuilt's. publish-prebuilt's step that pushes
+    # the image of remake-prebuilt's artifact into the runner's registry and compares its digest with prebuilt's, its
+    # step that checks the tag on ghcr.io, the start of the name of its one step that gets the token and pushes, and its
+    # step that checks the files of the image on ghcr.io.
+    MAKE_AGAIN = "make the image again in the runner's registry, and compare its digest with prebuilt's"
+    PREBUILT_LOAD = "push remake-prebuilt's image into the runner's registry, and compare its digest with prebuilt's"
+    PREBUILT_TAG = "the tag of the image, unless ghcr.io has it for another digest"
+    PREBUILT_PUSH = "copy the image of the runner's registry to ghcr.io"
+    PREBUILT_LISTING = "the files of the image on ghcr.io under /opt/oft-py/prebuilt"
+    # An expression that gives a step the job's token or a secret.
+    TOKEN = re.compile(r"\bgithub\.token\b|\bsecrets\.")
+
+    def given_token(self, step):
+        """Where the file gives the step `step` the job's token or a secret (TOKEN): each name of its env and of its
+        inputs whose value names one, and its script when that names one."""
+        found = [f"{part} {key}" for part in ("env", "with") for key, value in (step.get(part) or {}).items()
+                 if self.TOKEN.search(str(value))]
+        return found + (["run"] if self.TOKEN.search(str(step.get("run", ""))) else [])
+
+    def token_case(self, tree=ROOT):
+        """Where the file gives the steps of remake-prebuilt and of publish-prebuilt the job's token or a secret
+        (given_token), each step by its number and its name or action.
+          - remake-prebuilt runs make, which runs docker and the code of the commit. Its token writes no scope, and the
+            file gives it to one step alone: the pinned download of prebuilt's digest from the run of Toolchain images
+            (reads_run; its input github-token), before the step MAKE_AGAIN.
+          - publish-prebuilt holds packages: write. The file gives its token to two steps alone: the same download (its
+            input github-token), and the one push step, whose name starts with PREBUILT_PUSH (its env GH_TOKEN), after
+            PREBUILT_LOAD, which compares the digest of the image with prebuilt's, and after PREBUILT_TAG. So no run
+            step before the push step gets the token from the file.
+        Each step of either job that uses an action names it by its commit (sha-pinned). actions/checkout takes the
+        token too, by its own default, which the file does not show: each checkout of either job sets
+        persist-credentials: false, so that it keeps no copy of the token for the later steps. And no script of either
+        job names GITHUB_PATH or GITHUB_ENV, whose writes change the PATH or the env of the job's later steps, the push
+        step among them. Each message names the job."""
+        publish = self.workflow(tree, self.PUBLISH)
+        for job, first, last in (("remake-prebuilt", self.MAKE_AGAIN, None),
+                                 ("publish-prebuilt", self.PREBUILT_LOAD, self.PREBUILT_PUSH)):
+            steps = publish["jobs"][job]["steps"]
+            labels = [f"{n} {step.get('name') or step.get('uses')}" for n, step in enumerate(steps, 1)]
+            names = [str(step.get("name", "")) for step in steps]
+            self.assertIn(first, names, f"the steps of {job}")
+            downloads = [n for n, step in enumerate(steps) if action_of(step) == "actions/download-artifact"
+                         and self.reads_run(step.get("with") or {}, publish, job) == self.MAKE_RUN]
+            push = [n for n, name in enumerate(names) if last and name.startswith(last)]
+            self.assertEqual((len(downloads), len(push)), (1, 1 if last else 0),
+                             f"{job}: its downloads of the run of Toolchain images, and its push steps")
+            given = {labels[n]: where for n, step in enumerate(steps) if (where := self.given_token(step))}
+            self.assertEqual(given, {labels[downloads[0]]: ["with github-token"],
+                                     **{labels[n]: ["env GH_TOKEN"] for n in push}},
+                             f"{job}: the steps that the file gives the token or a secret, and where")
+            order = [downloads[0], names.index(first), *([names.index(self.PREBUILT_TAG), push[0]] if last else [])]
+            self.assertEqual(order, sorted(order), f"{job}: the order of its steps {[labels[n] for n in order]}")
+            self.assertEqual([label for label, step in zip(labels, steps)
+                              if "uses" in step and not re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", step["uses"])],
+                             [], f"{job}: the steps that use an action not pinned by its commit")
+            permissions = publish["jobs"][job].get("permissions", publish.get("permissions"))
+            self.assertEqual(sorted(scope for scope, level in permissions.items() if level == "write")
+                             if isinstance(permissions, dict) else [permissions],
+                             ["packages"] if last else [], f"{job}: the scopes that its token can write")
+            writes = [label for label, step in zip(labels, steps)
+                      if any(re.search(r"\bGITHUB_(?:PATH|ENV)\b", line)
+                             for line in str(step.get("run", "")).splitlines() if not line.lstrip().startswith("#"))]
+            self.assertEqual(writes, [], f"{job}: the steps whose script names GITHUB_PATH or GITHUB_ENV")
+            checkouts = [step.get("with") or {} for step in steps if action_of(step) == "actions/checkout"]
+            self.assertEqual([as_text(inputs.get("persist-credentials")) for inputs in checkouts], ["false"],
+                             f"{job}: persist-credentials of each of its checkouts")
+
+    def test_remake_prebuilt_and_publish_prebuilt_give_the_token_to_pinned_actions_and_the_push_step_alone(self):
+        self.token_case()
+
+    def token_fails(self, old, new, said, job="publish-prebuilt"):
+        """token_case passes on an unchanged copy of the tree, and fails, saying `said`, on a copy whose job `job`,
+        publish-prebuilt unless another is named, has `new` for `old`."""
+        self.passes_unchanged(self.token_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}", self.in_job(job, old, new))])
+        with self.assertRaises(AssertionError) as caught:
+            self.token_case(changed)
+        self.assertIn(said, str(caught.exception))
+
+    # The line of remake-prebuilt's make step that gives make the image to start from.
+    MAKE_START = "          START: ${{ steps.start.outputs.image }}\n"
+    # The line of the step want of remake-prebuilt and of publish-prebuilt that reads prebuilt's digest, and a line that
+    # reads the token.
+    WANT_LINE = '          want=$(cat "$RUNNER_TEMP/prebuilt-digest/$ROW.digest" 2> /dev/null || true)\n'
+    READS_TOKEN = '          echo "${{ github.token }}" > "$RUNNER_TEMP/token"\n'
+
+    def test_control_remake_prebuilt_make_step_gets_the_token(self):
+        self.token_fails(self.MAKE_START, self.MAKE_START + "          GH_TOKEN: ${{ github.token }}\n",
+                         "remake-prebuilt: the steps that the file gives the token or a secret",
+                         job="remake-prebuilt")
+
+    def test_control_remake_prebuilt_step_before_make_reads_the_token(self):
+        self.token_fails(self.WANT_LINE, self.WANT_LINE + self.READS_TOKEN,
+                         "remake-prebuilt: the steps that the file gives the token or a secret",
+                         job="remake-prebuilt")
+
+    def test_control_remake_prebuilt_with_contents_write(self):
+        self.token_fails("      contents: read  # to check out the commit that the run of Toolchain images built\n",
+                         "      contents: write\n", "remake-prebuilt: the scopes that its token can write",
+                         job="remake-prebuilt")
+
+    def test_control_publish_prebuilt_step_before_the_push_reads_the_token(self):
+        self.token_fails(self.WANT_LINE, self.WANT_LINE + self.READS_TOKEN,
+                         "publish-prebuilt: the steps that the file gives the token or a secret")
+
+    def test_control_publish_prebuilt_uses_an_action_by_its_tag(self):
+        line = "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)\n"
+        self.token_fails(line, "      - uses: actions/checkout@v7\n",
+                         "publish-prebuilt: the steps that use an action not pinned by its commit")
+
+    def test_control_publish_prebuilt_install_writes_github_path(self):
+        tar = '          tar -xzf "$RUNNER_TEMP/$CRANE_ARCHIVE" -C "$RUNNER_TEMP/bin" crane\n'
+        self.token_fails(tar, tar + '          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"\n',
+                         "publish-prebuilt: the steps whose script names GITHUB_PATH or GITHUB_ENV")
+
+    def test_control_publish_prebuilt_checkout_without_persist_credentials(self):
+        # actions/checkout then keeps the token, its default true.
+        self.token_fails("          persist-credentials: false\n", "",
+                         "publish-prebuilt: persist-credentials of each of its checkouts")
+
+    def test_control_publish_prebuilt_checkout_with_persist_credentials_true(self):
+        self.token_fails("          persist-credentials: false\n", "          persist-credentials: true\n",
+                         "publish-prebuilt: persist-credentials of each of its checkouts")
+
+    def test_control_remake_prebuilt_checkout_without_persist_credentials(self):
+        self.token_fails("          persist-credentials: false\n", "",
+                         "remake-prebuilt: persist-credentials of each of its checkouts", job="remake-prebuilt")
+
+    def push_case(self, tree=ROOT):
+        """publish-prebuilt's push step (PREBUILT_PUSH) for each row of its matrix, run alone with the stand-in crane,
+        whose registry on the runner holds the image of remake-prebuilt's artifact, by the digest that prebuilt made,
+        with the tag of PREBUILT_TAGS that the step PREBUILT_TAG gives. Three runs:
+          - honest: the step PREBUILT_LOAD gives that image: the step logs in, copies it by its digest to the tag, reads
+            the tag's digest, logs out, and passes;
+          - another image: the step PREBUILT_LOAD gives another digest than prebuilt's: the step fails, and runs no
+            command of crane before it fails: no login, no copy;
+          - another digest for the tag: ghcr.io gives another digest for the tag that the step pushed: the step fails,
+            after its logout.
+        In none of them is a login of crane left at the end."""
+        publish = self.workflow(tree, self.PUBLISH)
+        job = publish["jobs"]["publish-prebuilt"]
+        steps = [s for s in job["steps"] if str(s.get("name", "")).startswith(self.PREBUILT_PUSH)]
+        self.assertEqual(len(steps), 1, f"the steps of publish-prebuilt whose name starts with {self.PREBUILT_PUSH!r}")
+        ours = f"localhost:5000/{self.PACKAGE.removeprefix('ghcr.io/')}"
+        image = {"manifest": {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                              "layers": []}, "config": {}}
+        want, other = self.digest_of(image["manifest"]), "sha256:" + "e" * 64
+        login = ["auth", "login", "ghcr.io", "--username", "github-actions[bot]", "--password-stdin"]
+        logout = ["auth", "logout", "ghcr.io"]
+        got, expected, logs = {}, {}, {}
+        for entry in job["strategy"]["matrix"]["include"]:
+            row = entry["row"]
+            tag = f"{self.PACKAGE}:{self.PREBUILT_TAGS.get(row)}"
+            copied = ["copy", f"{ours}@{want}", tag]
+            expected.update({(row, "honest"): (True, [login, copied, ["digest", tag], logout], False),
+                             (row, "another image"): (False, [], False),
+                             (row, "another digest for the tag"): (False, [login, copied, logout], False)})
+            for run in ("honest", "another image", "another digest for the tag"):
+                home = self.crane_home({"images": {f"{ours}@{want}": image}, "tags": {}, "made": {}})
+                temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+                self.put_crane(temp / "bin")
+                if run == "another digest for the tag":
+                    # crane digest of a tag of PACKAGE gives another digest; every other command is the stand-in's.
+                    self.put_crane(temp / "real")
+                    real = temp / "real" / "crane"
+                    (temp / "bin" / "crane").write_text(
+                        "#!/usr/bin/env python3\nimport os\nimport sys\n"
+                        f"if sys.argv[1:2] == ['digest'] and sys.argv[2].startswith({self.PACKAGE + ':'!r}):\n"
+                        "    print('sha256:' + 'd' * 64)\nelse:\n"
+                        f"    os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])\n")
+                loaded = f"{ours}@{other if run == 'another image' else want}"
+                ctx = {"matrix.row": row, "matrix.base": entry["base"],
+                       "matrix.frame_pointers": entry["frame_pointers"], "github.token": WORKFLOW_TOKEN,
+                       "github.event.workflow_run.head_sha": HEAD}
+                rc, log, _ = self.run_script(steps[0]["run"], self.dir, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home),
+                                             GITHUB_ACTOR="github-actions[bot]",
+                                             **env_of(publish, "publish-prebuilt", steps[0], ctx,
+                                                      {"WANT": want, "LOADED": loaded, "TAG": tag}))
+                calls = [json.loads(line) for line in (home / "calls").read_text().splitlines()]
+                got[(row, run)] = (rc == 0, calls, (home / "login").exists())
+                logs[(row, run)] = log
+        self.assertEqual(got, expected,
+                         "publish-prebuilt's push step on each row: (it passes, its commands of crane, a login of "
+                         "crane left at its end). Its logs:" + "".join(f"\n{key}:\n{log}" for key, log in logs.items()))
+
+    def test_publish_prebuilt_copies_only_after_its_comparison_of_the_digest(self):
+        self.push_case()
+
+    def push_fails(self, *changes):
+        """push_case passes on an unchanged copy of the tree, and fails on a copy whose publish-prebuilt has the
+        changes `changes`, each (old, new) (in_job)."""
+        self.passes_unchanged(self.push_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}",
+                                              self.in_job("publish-prebuilt", old, new)) for old, new in changes])
+        with self.assertRaises(AssertionError) as caught:
+            self.push_case(changed)
+        self.assertIn("publish-prebuilt's push step on each row: (it passes, its commands of crane",
+                      str(caught.exception))
+
+    def test_control_publish_prebuilt_push_without_its_comparison(self):
+        self.push_fails(('          [ "$LOADED" = "$ours@$WANT" ] ||\n', "          true ||\n"))
+
+    def test_control_publish_prebuilt_logs_in_before_its_comparison(self):
+        login = '          echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin\n'
+        first = '          [[ "$WANT" =~ ^sha256:[0-9a-f]{64}$ ]] ||\n'
+        self.push_fails((login, ""), (first, login + first))
+
+    def test_control_publish_prebuilt_without_its_check_of_the_pushed_digest(self):
+        self.push_fails(('          [ "$pushed" = "$WANT" ] ||\n', "          true ||\n"))
+
+    def test_control_prebuilt_row_changed_in_toolchain_images_alone(self):
+        row = "          - row: oss-fuzz-theorems-2026.10-python-prebuilt\n"
+        caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.IMAGES}", self.in_job(
+            "prebuilt", row, row.replace("-prebuilt\n", "-prebuilt-2\n"))))
+        self.assertIn("publish-prebuilt: the matrix include (prebuilt's)", caught)
+
+    def test_control_registry_image_changed_in_publish_prebuilt_alone(self):
+        caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", "image: registry:2@", "image: registry:3@")))
+        self.assertIn("publish-prebuilt: the image of the service registry (prebuilt's)", caught)
+
+    def test_control_registry_image_changed_in_remake_prebuilt_alone(self):
+        caught = self.handover_fails(self.EQUAL, (f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", "image: registry:2@", "image: registry:3@")))
+        self.assertIn("remake-prebuilt: the image of the service registry (prebuilt's)", caught)
+
+    # The stand-in of .github/scripts/python-runtime/make BASE_IMAGE TARGET, which builds the runtime with docker. It
+    # writes a layer as the contract of make has it: under opt/oft-py/prebuilt, a directory <flav>-<key> for each
+    # flav, with runtime/libpython3.11.a, records/compiles.jsonl and manifest, as a tar of fixed times and owners.
+    # <key> comes from BASE_IMAGE, so that another image to start from gives another layer, and the same image the same
+    # layer. It appends the layer with crane append -b BASE_IMAGE -f <the tar> -t TARGET, and prints last the line
+    # "made <repository>@<digest>", as make does. Each call goes to $FAKE_MAKE_CALLS: its arguments, as a JSON list on
+    # one line. With FAKE_MAKE_SEEN, each call also adds to that file, as a JSON list on one line, the names of the
+    # variables of its environment whose value holds $FAKE_MAKE_WATCHED, and "a login of crane" when the stand-in crane
+    # has one ($FAKE_CRANE/login). With FAKE_MAKE_FAULT=outside, the layer holds etc/oft-py too; with
+    # FAKE_MAKE_FAULT=twice, make appends a second layer.
+    MAKE = r"""#!/usr/bin/env python3
+import hashlib
+import io
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+if len(sys.argv) != 3:
+    sys.exit(2)
+base, target = sys.argv[1:]
+with open(os.environ["FAKE_MAKE_CALLS"], "a") as calls:
+    calls.write(json.dumps(sys.argv[1:]) + "\n")
+if os.environ.get("FAKE_MAKE_SEEN"):
+    token = os.environ.get("FAKE_MAKE_WATCHED", "")
+    seen = sorted(name for name, value in os.environ.items() if token and token in value and name != "FAKE_MAKE_WATCHED")
+    if (pathlib.Path(os.environ["FAKE_CRANE"]) / "login").exists():
+        seen.append("a login of crane")
+    with open(os.environ["FAKE_MAKE_SEEN"], "a") as file:
+        file.write(json.dumps(seen) + "\n")
+fault = os.environ.get("FAKE_MAKE_FAULT", "")
+entries = {"opt/oft-py/prebuilt": None}
+for flav in ("plain", "ubsan", "asan", "asanubsan"):
+    top = f"opt/oft-py/prebuilt/{flav}-" + hashlib.sha256(f"{base} {flav}".encode()).hexdigest()
+    entries.update({top: None, f"{top}/runtime": None, f"{top}/records": None,
+                    f"{top}/runtime/libpython3.11.a": f"libpython {top}\n".encode(),
+                    f"{top}/records/compiles.jsonl": b"{}\n", f"{top}/manifest": f"key {top}\n".encode()})
+if fault == "outside":
+    entries["etc/oft-py"] = b"outside\n"
+
+
+def append(start, names):
+    with tempfile.TemporaryDirectory() as scratch:
+        path = os.path.join(scratch, "layer.tar")
+        with tarfile.open(path, "w") as archive:
+            for name in sorted(names):
+                member = tarfile.TarInfo(name)
+                member.mtime = member.uid = member.gid = 0
+                if names[name] is None:
+                    member.type, member.mode = tarfile.DIRTYPE, 0o755
+                    archive.addfile(member)
+                else:
+                    member.size, member.mode = len(names[name]), 0o644
+                    archive.addfile(member, io.BytesIO(names[name]))
+        return subprocess.run(["crane", "append", "-b", start, "-f", path, "-t", target], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+
+print(f"make: the runtime of each flav, built in the builder FROM {base}")
+made = append(base, entries)
+if fault == "twice":
+    made = append(made, {"opt/oft-py/prebuilt/README": b"twice\n"})
+print(f"made {made}")
+"""
+
+    def put_make(self, where):
+        """`where`, with the stand-in MAKE at .github/scripts/python-runtime/make, where a checkout of the whole tree
+        puts make."""
+        path = where / ".github" / "scripts" / "python-runtime" / "make"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.MAKE)
+        path.chmod(0o755)
+        return where
+
+    # The stand-in of .github/scripts/python-runtime/probe BASE_IMAGE DERIVED_IMAGE, which builds the fixture with
+    # docker. Each call adds to $FAKE_PROBE_CALLS, as a JSON list on one line, its arguments and the number of calls of
+    # the stand-in MAKE before it (the lines of $FAKE_MAKE_CALLS).
+    PROBE = r"""#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+made = pathlib.Path(os.environ["FAKE_MAKE_CALLS"]).read_text().splitlines()
+with open(os.environ["FAKE_PROBE_CALLS"], "a") as calls:
+    calls.write(json.dumps([sys.argv[1:], len(made)]) + "\n")
+"""
+
+    def put_probe(self, where):
+        """`where`, with the stand-in PROBE at .github/scripts/python-runtime/probe."""
+        path = where / ".github" / "scripts" / "python-runtime" / "probe"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(self.PROBE)
+        path.chmod(0o755)
+        return where
+
+    @staticmethod
+    def lands_tree(down, ctx, artifact, inside, held):
+        """Where actions/download-artifact, with the inputs `down` rendered for ctx, puts the file at the path `inside`
+        of the artifact `artifact`, of `held`, the artifacts of the run that it reads: None if it does not download that
+        artifact. By name, with merge-multiple, or when its pattern matches one artifact alone, it puts each file at its
+        path under `path`; else each artifact gets a directory of its own name there (src/download-artifact.ts of the
+        pin)."""
+        into = pathlib.Path(render(down.get("path", ""), ctx))
+        if "name" in down:
+            return into / inside if artifact == render(down["name"], ctx) else None
+        matched = [name for name in held if fnmatch.fnmatchcase(name, render(down.get("pattern", "*"), ctx))]
+        if artifact not in matched:
+            return None
+        merge = str(down.get("merge-multiple", "")).lower() == "true"
+        return into / inside if merge or len(matched) == 1 else into / artifact / inside
+
+    def run_job(self, workflow, job, ctx, where, artifacts, own_run, home, on_path=True, probes=False, **extra):
+        """The job `job` of `workflow`, step by step, as a runner of its own runs it, in `where`, its checkout, with a
+        new $RUNNER_TEMP (the stand-in crane in its bin/) and the stand-in registry of `home`. ctx gives the job's
+        context (matrix, github). `artifacts` maps (a run, an artifact) to the files of the artifact, {its path in the
+        artifact: the file}; this job's own run is `own_run`. `extra` goes to each step's environment.
+          - GitHub skips a step whose if is false (test_outside_screen.evaluate, with the outputs of the steps before
+            it), and stops the job at its first step that fails.
+          - The steps that the stand-ins replace do not run: actions/checkout (`where` is the checkout), install crane,
+            and a step that runs a probe, which runs docker. With probes, a step that runs a probe runs too: `where`
+            then holds a stand-in of the probe (put_probe).
+          - actions/download-artifact puts each file of each artifact of the run that it reads (reads_run) where the
+            action puts it (lands_tree). A download by name of an artifact that that run does not hold fails, as the
+            action does.
+          - actions/upload-artifact hands over the files of its path, and fails with if-no-files-found: error when there
+            is none.
+          - With on_path, crane is on the job's PATH, where install crane puts it (GITHUB_PATH). Else a crane that fails
+            comes first on PATH, so that a step reaches the stand-in only by putting $RUNNER_TEMP/bin first on its own
+            PATH, as the steps of a job with packages: write do.
+        Return (the outcome: "passes", or "fails at <the step>"; the log; the uploads, {(own_run, the artifact): its
+        files}; the runner temp; ctx with the outputs of the steps)."""
+        import test_outside_screen
+        temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        self.put_crane(temp / "bin")
+        ctx = {**ctx, "runner.temp": str(temp)}
+        first = temp / "bin"
+        if not on_path:
+            first = temp / "no-crane"
+            first.mkdir()
+            (first / "crane").write_text('#!/bin/sh\necho "crane: command not found" >&2\nexit 127\n')
+            (first / "crane").chmod(0o755)
+        given = {"RUNNER_TEMP": str(temp), "FAKE_CRANE": str(home), "PATH": f"{first}{os.pathsep}{self.env['PATH']}",
+                 "GITHUB_STEP_SUMMARY": str(temp / "summary"), "GITHUB_ACTOR": "github-actions[bot]",
+                 **{name: str(path) for name, path in self.file_commands(temp).items()}, **extra}
+        log, uploads = "", {}
+        for n, step in enumerate(workflow["jobs"][job]["steps"], 1):
+            label = str(step.get("name") or action_of(step) or n)
+            action = action_of(step)
+            if "if" in step and not test_outside_screen.evaluate(step["if"], ctx):
+                continue
+            if action == "actions/checkout" or label == "install crane" or (
+                    not probes and "/probe " in str(step.get("run", ""))):
+                continue
+            if action == "actions/download-artifact":
+                down = step.get("with") or {}
+                run = self.reads_run(down, workflow, job)
+                run = own_run if run == "publish's own run" else run
+                held = {artifact: files for (at, artifact), files in artifacts.items() if at == run}
+                if "name" in down and render(down["name"], ctx) not in held:
+                    return f"fails at {label}", f"{log}{label}:\nArtifact '{render(down['name'], ctx)}' not found\n", \
+                        uploads, temp, ctx
+                for artifact, files in held.items():
+                    for inside, source in files.items():
+                        to = self.lands_tree(down, ctx, artifact, inside, held)
+                        if to is not None:
+                            to.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copyfile(source, to)
+                continue
+            if action == "actions/upload-artifact":
+                up = step.get("with") or {}
+                source = pathlib.Path(render(up.get("path", ""), ctx))
+                files = ({str(f.relative_to(source)): f for f in sorted(source.rglob("*")) if f.is_file()}
+                         if source.is_dir() else {source.name: source} if source.is_file() else {})
+                if not files and up.get("if-no-files-found") == "error":
+                    return f"fails at its upload of {source}", log, uploads, temp, ctx
+                uploads[(own_run, render(up.get("name", "artifact"), ctx))] = files
+                continue
+            rc, out, got = self.run_script(step["run"], where, **{**given, **env_of(workflow, job, step, ctx)})
+            log += f"{label}:\n{out}"
+            if rc:
+                return f"fails at {label}", log, uploads, temp, ctx
+            if "id" in step:
+                ctx.update({f"steps.{step['id']}.outputs.{k}": v for k, v in got.items()})
+        return "passes", log, uploads, temp, ctx
+
+    @staticmethod
+    def no_runner_registry(home):
+        """The stand-in registry of `home` without the images of a runner's registry (localhost:5000): each job has a
+        registry service of its own, which holds none of another job's images."""
+        state = json.loads((home / "registry.json").read_text())
+        for part in ("images", "tags"):
+            state[part] = {at: value for at, value in state[part].items() if not at.startswith("localhost:")}
+        (home / "registry.json").write_text(json.dumps(state))
+
+    # The name of the message of prebuilt_case.
+    PREBUILT_RUN = "prebuilt, remake-prebuilt and publish-prebuilt, on one table"
+    # The tag of the image of each row of prebuilt, for the commit HEAD.
+    PREBUILT_TAGS = {"oss-fuzz-theorems-2026.10-python-prebuilt": f"python-prebuilt-{HEAD}",
+                     "oss-fuzz-theorems-2026.10-python-frame-pointers-prebuilt":
+                         f"python-frame-pointers-prebuilt-{HEAD}"}
+    # The tables of prebuilt_case: infra/toolchains.tsv with no row of the image, with the row naming the image that
+    # prebuilt makes (ghcr.io holds it), with the row naming another digest (ghcr.io holds it), and with the row naming
+    # the image that prebuilt makes, which ghcr.io does not hold yet.
+    PREBUILT_TABLES = ("none", "made", "other digest", "made, not on ghcr.io")
+
+    def after_prebuilt(self, publish, job, ctx, where, artifacts, home, found, **extra):
+        """The job `job` of publish's file (run_job) in `where`, after the job before it, on the stand-in registry of
+        `home`, with the artifacts `artifacts`: its runner's registry starts empty (no_runner_registry), no login of
+        crane is there, and its uploads go to this run, publish's own. It runs with crane off its PATH: each of its
+        steps that runs crane, make among them, puts it on its own PATH. `found`, a dict, gets what it did: the calls
+        of the stand-in MAKE (makes), the names of the variables of make's environment that hold the token, and a login
+        of crane that make sees (sights), its calls of crane (crane), whether a login of crane is left at its end
+        (login), and what it wrote to GITHUB_PATH and GITHUB_ENV (written). Return its outcome, its log and its
+        uploads."""
+        scratch = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        calls, seen = scratch / "make-calls", scratch / "make-seen"
+        for path in (calls, seen, home / "calls"):
+            path.write_text("")
+        self.no_runner_registry(home)
+        (home / "login").unlink(missing_ok=True)
+        result, log, uploads, temp, _ = self.run_job(publish, job, ctx, where, artifacts, "this run", home,
+                                                     on_path=False, FAKE_MAKE_CALLS=str(calls),
+                                                     FAKE_MAKE_SEEN=str(seen), FAKE_MAKE_WATCHED=WORKFLOW_TOKEN,
+                                                     **extra)
+        found.update(makes=[json.loads(line) for line in calls.read_text().splitlines()],
+                     sights=[json.loads(line) for line in seen.read_text().splitlines()],
+                     crane=[json.loads(line) for line in (home / "calls").read_text().splitlines()],
+                     login=(home / "login").exists(),
+                     written={name: path.read_text() for name, path in self.file_commands(temp).items()
+                              if path.read_text()})
+        return result, log, uploads
+
+    def prebuilt_case(self, tree=ROOT):
+        """What toolchain-images.yaml's job prebuilt hands over to remake-prebuilt, and remake-prebuilt to
+        publish-prebuilt, run as each job runs (run_job, after_prebuilt), for each row of prebuilt's matrix, on the
+        tables PREBUILT_TABLES. Each table holds the base row of this repository's infra/toolchains.tsv. The three jobs
+        check out the commit HEAD that prebuilt built: prebuilt and remake-prebuilt the whole tree, with the stand-in
+        MAKE, and publish-prebuilt infra/toolchains.tsv alone; here publish-prebuilt runs in the whole tree too, so
+        that a step of it that runs make shows. Each job has a runner and a registry of its own, and shares ghcr.io with
+        the others. Each upload of prebuilt reaches the run MAKE_RUN, and each upload of remake-prebuilt this run. On a
+        table where a job refuses the row, it uploads nothing: there the job after it gets the uploads of the table
+        none, the same digest and the same image. GitHub skips publish-prebuilt where remake-prebuilt failed (needs);
+        here it runs there too, so that its own row check shows. The checks:
+          - publish-prebuilt waits for remake-prebuilt (needs);
+          - both check out HEAD, and remake-prebuilt's checkout gives make and the builder;
+          - prebuilt's make starts from the base row's image, or, for frame_pointers 1, from the image that crane
+            mutate makes of it, as make makes it; its target is in the runner's registry, in FP_PACKAGE's path;
+          - prebuilt passes the tables none and made, and refuses the row on the others;
+          - on none, made and other digest, the three jobs agree: all pass, or all refuse the row;
+          - remake-prebuilt makes the image again only where ghcr.io does not hold it, from the image that prebuilt
+            starts from, and its make sees no token in its environment and no login of crane; publish-prebuilt runs no
+            make;
+          - the commands of crane of both jobs name ghcr.io only in PACKAGE and as the row's base image; those of
+            remake-prebuilt write only to its own registry, and those of publish-prebuilt only to PACKAGE and to its
+            own registry;
+          - where the three pass and ghcr.io does not hold the image, publish-prebuilt copies the digest that prebuilt
+            made to PACKAGE, under the tag of PREBUILT_TAGS, and says so; where ghcr.io holds it, it copies nothing;
+          - publish-prebuilt logs out of ghcr.io after its copy and its check of the pushed tag, and leaves no login;
+            neither job writes GITHUB_PATH or GITHUB_ENV.
+        Return the outcome on each table, as (prebuilt's, remake-prebuilt's, publish-prebuilt's)."""
+        run = self.PREBUILT_RUN
+        publish, images = self.workflow(tree, self.PUBLISH), self.workflow(tree, self.IMAGES)
+        needs = publish["jobs"]["publish-prebuilt"].get("needs") or []
+        self.assertIn("remake-prebuilt", [needs] if isinstance(needs, str) else needs,
+                      f"{run}: the jobs that publish-prebuilt waits for (needs), and whose upload it downloads")
+        for job in ("remake-prebuilt", "publish-prebuilt"):
+            found = [s for s in publish["jobs"][job]["steps"] if action_of(s) == "actions/checkout"]
+            self.assertEqual(len(found), 1, f"{run}: the checkouts of {job}")
+            self.assertEqual(self.checks_out(found[0], publish, job), HEAD, f"{run}: the commit of {job}'s checkout")
+            if job == "remake-prebuilt":
+                given = found[0].get("with") or {}
+                self.assertTrue(all(self.sparse_takes(given, path) for path in (".github/scripts/python-runtime/make",
+                                                                               "infra/base-builder/compile")),
+                                f"{run}: remake-prebuilt's checkout gives make and the builder")
+        entries = {entry["row"]: entry for entry in images["jobs"]["prebuilt"]["strategy"]["matrix"]["include"]}
+        bases = self.base_rows(sorted({entry["base"] for entry in entries.values()}))
+        registry, mutated, _ = self.registry_of(bases)
+        ours = f"localhost:5000/{self.PACKAGE.removeprefix('ghcr.io/')}"
+        other = "sha256:" + "e" * 64
+        calls = pathlib.Path(tempfile.mkdtemp(dir=self.dir)) / "make-calls"
+        results, logs, made, starts, prebuilt, done = ({} for _ in range(6))
+        for row, entry in entries.items():
+            base = bases[entry["base"]][1]
+            starts[row] = (f"localhost:5000/{base.partition('@')[0].removeprefix('ghcr.io/')}@{mutated[entry['base']]}"
+                           if entry["frame_pointers"] else base)
+            ctx = {"matrix.row": row, "matrix.base": entry["base"], "matrix.frame_pointers": entry["frame_pointers"],
+                   "github.token": WORKFLOW_TOKEN, "github.event.workflow_run.head_sha": HEAD,
+                   "github.event.workflow_run.id": self.MAKE_RUN}
+            image, handed = None, {}
+
+            def outcome(result, log, row=row):
+                refusal = f"::error::infra/toolchains.tsv's row {row} names "
+                return "passes" if result == "passes" else "refuses the row" if refusal in log else result
+
+            for table in self.PREBUILT_TABLES:
+                key = (row, table)
+                named = {"none": None, "other digest": other}.get(table, made.get(row))
+                if table != "none" and row not in made:
+                    results[key] = ("no image of the table none",) * 3
+                    continue
+                more = f"{row}\t{self.PACKAGE}@{named}\n" if named else ""
+                where = self.put_make(self.checkout_of(bases, more))
+                ghcr = json.loads(json.dumps(registry))
+                if named and table != "made, not on ghcr.io":
+                    ghcr["images"][f"{self.PACKAGE}@{named}"] = image
+                home = self.crane_home(ghcr)
+                calls.write_text("")
+                result, log, uploads, _, out = self.run_job(images, "prebuilt", ctx, where, {}, self.MAKE_RUN, home,
+                                                            FAKE_MAKE_CALLS=str(calls))
+                prebuilt[key] = [json.loads(line) for line in calls.read_text().splitlines()]
+                if table == "none" and result == "passes":
+                    made[row] = out["steps.made.outputs.ref"].partition("@")[2]
+                    image = json.loads((home / "registry.json").read_text())["images"][f"{ours}@{made[row]}"]
+                    handed = dict(uploads)
+                logs[key] = f"prebuilt:\n{log}"
+                outcomes = [outcome(result, log)]
+                if table == "made, not on ghcr.io":
+                    results[key] = (outcomes[0], None, None)
+                    continue
+                artifacts = uploads if result == "passes" else {at: files for at, files in handed.items()
+                                                                if at[0] == self.MAKE_RUN}
+                for job in ("remake-prebuilt", "publish-prebuilt"):
+                    done[key + (job,)] = {}
+                    result, log, uploads = self.after_prebuilt(publish, job, ctx, where, artifacts, home,
+                                                               done[key + (job,)])
+                    logs[key] += f"{job}:\n{log}"
+                    outcomes.append(outcome(result, log))
+                    if job == "remake-prebuilt":
+                        if table == "none" and result == "passes":
+                            handed.update(uploads)
+                        artifacts = {**artifacts, **(uploads if result == "passes" else {
+                            at: files for at, files in handed.items() if at[0] == "this run"})}
+                results[key] = tuple(outcomes)
+
+        def shown(keys):
+            return "".join(f"\n{row}, {table}:\n{logs.get((row, table), '')}" for row, table in keys)
+
+        self.assertEqual({key: prebuilt.get(key) for key in results if key[1] == "none"},
+                         {(row, "none"): [[starts[row], f"{ours}:{row}"]] for row in entries},
+                         f"{run}: the images that prebuilt's make starts from, and its targets")
+        want = {key: "passes" if key[1] in ("none", "made") else "refuses the row" for key in results}
+        self.assertEqual({key: result[0] for key, result in results.items()}, want,
+                         f"{run}: prebuilt's outcome on each table. The logs where it differs:"
+                         + shown(key for key in want if results[key][0] != want[key]))
+        differ = {key: result for key, result in results.items() if result[1] is not None and len(set(result)) > 1}
+        self.assertEqual(differ, {}, f"{run}: the tables on which prebuilt, remake-prebuilt and publish-prebuilt "
+                         "disagree:" + "".join(f"\n  {row}, {table}: prebuilt {by_prebuilt}, remake-prebuilt "
+                                               f"{by_remake}, publish-prebuilt {by_publish}"
+                                               for (row, table), (by_prebuilt, by_remake, by_publish) in differ.items())
+                         + "\nTheir logs:" + shown(differ))
+        every = [key for key, result in results.items() if result == ("passes",) * 3]
+        self.assertEqual({key: done[key + ("remake-prebuilt",)]["makes"] for key in every},
+                         {key: [] if key[1] == "made" else [[starts[key[0]], f"{ours}:{key[0]}"]] for key in every},
+                         f"{run}: the calls of remake-prebuilt's make on each table that the three jobs pass"
+                         + shown(every))
+        self.assertEqual({key: found["makes"] for key, found in done.items()
+                          if key[2] == "publish-prebuilt" and found["makes"]}, {},
+                         f"{run}: the calls of make by publish-prebuilt, on each table")
+        sights = {key: found["sights"] for key, found in done.items() if any(found["sights"])}
+        self.assertEqual(sights, {}, f"{run}: the variables of the environment of remake-prebuilt's make that hold the "
+                         f"token, or a login of crane that it sees, on each table: {sights}")
+        foreign = {}
+        for (row, table, job), found in done.items():
+            base = bases[entries[row]["base"]][1]
+            allowed = ("localhost:5000/",) + ((f"{self.PACKAGE}:", f"{self.PACKAGE}@") if job == "publish-prebuilt"
+                                              else ())
+            targets = [call[2] if call[0] in ("copy", "push") else call[call.index("-t") + 1] for call in found["crane"]
+                       if call[0] in ("copy", "push") or "-t" in call]
+            # An argument of ghcr.io: its registry, the part before the first /, is ghcr.io.
+            names = [f"crane {' '.join(call)} names {arg}" for call in found["crane"] for arg in call
+                     if arg.partition("/")[:2] == ("ghcr.io", "/") and arg != base
+                     and not arg.startswith((f"{self.PACKAGE}@", f"{self.PACKAGE}:"))]
+            names += [f"crane writes to {to}" for to in targets if not to.startswith(allowed)]
+            if names:
+                foreign[(row, table, job)] = names
+        self.assertEqual(foreign, {}, f"{run}: the commands of crane of remake-prebuilt and of publish-prebuilt that "
+                         "name a package of ghcr.io other than PACKAGE and the row's base image, or write outside the "
+                         "job's own registry and, for publish-prebuilt, PACKAGE")
+        self.assertEqual({key: [(call[2], call[1].rpartition("@")[2]) for call in done[key + ("publish-prebuilt",)][
+                              "crane"] if call[0] == "copy"] for key in every},
+                         {key: [] if key[1] == "made" else [(f"{self.PACKAGE}:{self.PREBUILT_TAGS.get(key[0])}",
+                                                             made[key[0]])] for key in every},
+                         f"{run}: the targets of publish-prebuilt's crane copy, each with the digest that it copies, "
+                         "on each table that the three jobs pass" + shown(every))
+        for key in every:
+            how = "already on ghcr.io, nothing pushed" if key[1] == "made" else \
+                f"pushed under the tag {self.PREBUILT_TAGS[key[0]]}"
+            self.assertIn(f"`{self.PACKAGE}@{made[key[0]]}` ({how})", logs[key], f"{run}: {key}")
+        logouts = {}
+        for (row, table, job), found in done.items():
+            if job == "publish-prebuilt":
+                crane = found["crane"]
+                logins = [n for n, call in enumerate(crane) if call[:2] == ["auth", "login"]]
+                pushed = [n for n, call in enumerate(crane) if logins and n > logins[0] and (
+                    call[0] == "copy" or call == ["digest", f"{self.PACKAGE}:{self.PREBUILT_TAGS.get(row)}"])]
+                last = max(logins + pushed, default=0)
+                logouts[(row, table)] = (not logins or ["auth", "logout", "ghcr.io"] in crane[last + 1:],
+                                         found["login"])
+        self.assertEqual(logouts, dict.fromkeys(logouts, (True, False)),
+                         f"{run}: (a logout of ghcr.io after publish-prebuilt's copy and its check of the pushed tag, "
+                         "a login of crane left at its end) on each table")
+        self.assertEqual({key: found["written"] for key, found in done.items() if found["written"]}, {},
+                         f"{run}: the tables on which remake-prebuilt or publish-prebuilt wrote GITHUB_PATH or "
+                         "GITHUB_ENV, which change the PATH or the env of the job's later steps")
+        return results
+
+    def test_prebuilt_hands_over_to_remake_prebuilt_and_publish_prebuilt(self):
+        self.prebuilt_case()
+
+    def prebuilt_fails(self, *changes):
+        """prebuilt_case passes on an unchanged copy of the tree, and fails on a copy with `changes` (copy_tree). Its
+        message names PREBUILT_RUN. Return the message."""
+        self.passes_unchanged(self.prebuilt_case)
+        changed = self.copy_tree("changed", changes)
+        with self.assertRaises(AssertionError) as caught:
+            self.prebuilt_case(changed)
+        self.assertIn(f"{self.PREBUILT_RUN}: ", str(caught.exception))
+        return str(caught.exception)
+
+    def test_control_prebuilt_starts_the_frame_pointer_row_from_the_base_image(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.IMAGES}", self.in_job(
+            "prebuilt", "          case $FRAME_POINTERS in\n", '          case "" in\n')))
+        self.assertIn("the images that prebuilt's make starts from", caught)
+
+    def test_control_prebuilt_row_check_without_its_comparison(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.IMAGES}", self.in_job(
+            "prebuilt", '          [ "$named" = "$want" ] ||\n', "          true ||\n")))
+        self.assertIn("prebuilt's outcome on each table", caught)
+        self.assertIn("oss-fuzz-theorems-2026.10-python-prebuilt, other digest:", caught)
+
+    def test_control_prebuilt_digest_artifact_renamed_in_prebuilt_alone(self):
+        # The pattern prebuilt-digest-* of remake-prebuilt and publish-prebuilt then matches no upload of prebuilt.
+        caught = self.prebuilt_fails((f".github/workflows/{self.IMAGES}", self.in_job(
+            "prebuilt", "name: prebuilt-digest-${{ matrix.row }}", "name: prebuilt-made-${{ matrix.row }}")))
+        self.assertIn("oss-fuzz-theorems-2026.10-python-prebuilt, none: prebuilt passes", caught)
+        self.assertIn("::error::prebuilt gave no digest for oss-fuzz-theorems-2026.10-python-prebuilt: ''", caught)
+
+    # The line of the permissions of remake-prebuilt and of publish-prebuilt that lets their token read the artifacts of
+    # the run of Toolchain images.
+    ACTIONS_READ = ("      actions: read   # to download the artifacts prebuilt-digest-<row> of the run of Toolchain"
+                    " images\n")
+
+    def test_control_publish_prebuilt_without_actions_read(self):
+        # Its token then cannot read the artifacts of the run of Toolchain images.
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job("publish-prebuilt",
+                                                                                     self.ACTIONS_READ)))
+        self.assertIn("oss-fuzz-theorems-2026.10-python-prebuilt, none: prebuilt passes, remake-prebuilt passes, "
+                      "publish-prebuilt fails", caught)
+        self.assertIn("::error::prebuilt gave no digest for oss-fuzz-theorems-2026.10-python-prebuilt: ''", caught)
+
+    def test_control_remake_prebuilt_without_actions_read(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job("remake-prebuilt",
+                                                                                     self.ACTIONS_READ)))
+        self.assertIn("oss-fuzz-theorems-2026.10-python-prebuilt, none: prebuilt passes, remake-prebuilt fails", caught)
+        self.assertIn("::error::prebuilt gave no digest for oss-fuzz-theorems-2026.10-python-prebuilt: ''", caught)
+
+    def test_control_publish_prebuilt_digest_download_from_its_own_run(self):
+        # Its own run holds remake-prebuilt's uploads alone, which the pattern prebuilt-digest-* does not match.
+        publish = f".github/workflows/{self.PUBLISH}"
+        caught = self.prebuilt_fails(
+            (publish, self.in_job("publish-prebuilt", "          run-id: ${{ github.event.workflow_run.id }}\n")),
+            (publish, self.in_job("publish-prebuilt", "          github-token: ${{ github.token }}\n")))
+        self.assertIn("prebuilt gave no digest for oss-fuzz-theorems-2026.10-python-prebuilt: '': nothing pushed",
+                      caught)
+
+    def test_control_remake_prebuilt_makes_again_what_ghcr_io_holds(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", '          if crane manifest "$ref" > /dev/null 2>&1; then held=true; else held=false; '
+            'fi\n', "          held=false\n")))
+        self.assertIn("the calls of remake-prebuilt's make on each table that the three jobs pass", caught)
+
+    def test_control_publish_prebuilt_does_not_wait_for_remake_prebuilt(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", "    needs: remake-prebuilt\n")))
+        self.assertIn("the jobs that publish-prebuilt waits for (needs)", caught)
+
+    def test_control_publish_prebuilt_checks_out_main(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", "          ref: ${{ github.event.workflow_run.head_sha }}\n")))
+        self.assertIn("the commit of publish-prebuilt's checkout", caught)
+
+    def test_control_remake_prebuilt_checks_out_main(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", "          ref: ${{ github.event.workflow_run.head_sha }}\n")))
+        self.assertIn("the commit of remake-prebuilt's checkout", caught)
+
+    def test_control_remake_prebuilt_checks_out_infra_toolchains_tsv_alone(self):
+        line = "          ref: ${{ github.event.workflow_run.head_sha }}\n"
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", line, line + "          sparse-checkout: infra/toolchains.tsv\n")))
+        self.assertIn("remake-prebuilt's checkout gives make and the builder", caught)
+
+    def test_control_remake_prebuilt_make_step_gets_the_token_at_run_time(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", self.MAKE_START, self.MAKE_START + "          GH_TOKEN: ${{ github.token }}\n")))
+        self.assertIn("the variables of the environment of remake-prebuilt's make that hold the token", caught)
+        self.assertIn("['GH_TOKEN']", caught)
+
+    def test_control_remake_prebuilt_logs_in_before_make(self):
+        line = '          echo "start from $ref"\n'
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "remake-prebuilt", line,
+            line + '          echo x | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin\n')))
+        self.assertIn("['a login of crane']", caught)
+
+    def test_control_publish_prebuilt_tags_the_frame_pointer_image_as_the_other(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", "            1) kind=python-frame-pointers ;;\n", "            1) kind=python ;;\n")))
+        self.assertIn("the targets of publish-prebuilt's crane copy", caught)
+
+    def test_control_publish_prebuilt_without_its_logout(self):
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", "          crane auth logout ghcr.io\n")))
+        self.assertIn("a logout of ghcr.io after publish-prebuilt's copy", caught)
+
+    def test_control_publish_prebuilt_writes_to_a_second_package(self):
+        line = '          crane copy "$ours@$WANT" "$TAG"\n'
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", line, line + '          crane copy "$ours@$WANT" "$FP_PACKAGE-python:prebuilt"\n')))
+        self.assertIn("the commands of crane of remake-prebuilt and of publish-prebuilt that name a package of ghcr.io "
+                      "other than PACKAGE", caught)
+
+    def test_control_publish_prebuilt_push_step_writes_github_env(self):
+        line = '          crane copy "$ours@$WANT" "$TAG"\n'
+        caught = self.prebuilt_fails((f".github/workflows/{self.PUBLISH}", self.in_job(
+            "publish-prebuilt", line, line + '          echo "X=1" >> "$GITHUB_ENV"\n')))
+        self.assertIn("remake-prebuilt or publish-prebuilt wrote GITHUB_PATH or GITHUB_ENV", caught)
+
+    # The faults of the hand-over from remake-prebuilt to publish-prebuilt, each with the step of publish-prebuilt that
+    # must stop it: none, where publish-prebuilt passes; an artifact prebuilt-image-<row> whose manifest is another
+    # (tampered); ghcr.io has the row's tag for another digest; crane cannot read that tag (FAKE_CRANE_UNREADABLE).
+    ARTIFACT_FAULTS = {"none": None, "tampered artifact": PREBUILT_LOAD, "tag of another digest": PREBUILT_TAG,
+                       "tag unreadable": PREBUILT_TAG}
+    # The message of artifact_case.
+    ARTIFACT_RUN = "publish-prebuilt on each fault of the hand-over from remake-prebuilt"
+
+    @staticmethod
+    def tampered(files, where):
+        """A copy in `where` of the OCI image layout `files` ({its path in the layout: the file}) whose manifest has one
+        more annotation, under the digest of its own bytes, which index.json names: the layout that crane pull writes
+        of another image. Return the files of the copy, as `files`."""
+        for inside, source in files.items():
+            (where / inside).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, where / inside)
+        index = json.loads((where / "index.json").read_text())
+        blobs = where / "blobs" / "sha256"
+        manifest = json.loads((blobs / index["manifests"][0]["digest"].partition(":")[2]).read_bytes())
+        data = json.dumps({**manifest, "annotations": {"tampered": "yes"}}, sort_keys=True).encode()
+        (blobs / hashlib.sha256(data).hexdigest()).write_bytes(data)
+        index["manifests"][0].update(digest="sha256:" + hashlib.sha256(data).hexdigest(), size=len(data))
+        (where / "index.json").write_text(json.dumps(index))
+        return {str(path.relative_to(where)): path for path in sorted(where.rglob("*")) if path.is_file()}
+
+    def artifact_case(self, tree=ROOT):
+        """prebuilt's digest, remake-prebuilt's artifact of the image, and publish-prebuilt's push. For each row of
+        prebuilt's matrix, prebuilt and then remake-prebuilt run (run_job, after_prebuilt) on a table with no row of the
+        image, and both pass: remake-prebuilt uploads the artifact prebuilt-image-<row>. Then publish-prebuilt runs
+        after them with each fault of ARTIFACT_FAULTS. With none, it logs in, and copies the image of the digest that
+        prebuilt made, which it reads from prebuilt's artifact, to the row's tag. With each other fault, it fails at the
+        step that the fault names, before the push step: no login of crane and no copy, and the row's tag on ghcr.io
+        stays as it was."""
+        publish, images = self.workflow(tree, self.PUBLISH), self.workflow(tree, self.IMAGES)
+        entries = {entry["row"]: entry for entry in images["jobs"]["prebuilt"]["strategy"]["matrix"]["include"]}
+        bases = self.base_rows(sorted({entry["base"] for entry in entries.values()}))
+        registry, _, _ = self.registry_of(bases)
+        ours = f"localhost:5000/{self.PACKAGE.removeprefix('ghcr.io/')}"
+        login = ["auth", "login", "ghcr.io", "--username", "github-actions[bot]", "--password-stdin"]
+        other = "sha256:" + "e" * 64
+        calls = pathlib.Path(tempfile.mkdtemp(dir=self.dir)) / "make-calls"
+        got, want, logs = {}, {}, {}
+        for row, entry in entries.items():
+            ctx = {"matrix.row": row, "matrix.base": entry["base"], "matrix.frame_pointers": entry["frame_pointers"],
+                   "github.token": WORKFLOW_TOKEN, "github.event.workflow_run.head_sha": HEAD,
+                   "github.event.workflow_run.id": self.MAKE_RUN}
+            where, home = self.put_make(self.checkout_of(bases)), self.crane_home(registry)
+            calls.write_text("")
+            result, log, digests, _, out = self.run_job(images, "prebuilt", ctx, where, {}, self.MAKE_RUN, home,
+                                                        FAKE_MAKE_CALLS=str(calls))
+            self.assertEqual(result, "passes", f"{self.ARTIFACT_RUN}: {row}: prebuilt:\n{log}")
+            digest = out["steps.made.outputs.ref"].partition("@")[2]
+            image = json.loads((home / "registry.json").read_text())["images"][f"{ours}@{digest}"]
+            result, log, uploads = self.after_prebuilt(publish, "remake-prebuilt", ctx, where, digests, home, {})
+            self.assertEqual((result, [artifact for _, artifact in uploads]), ("passes", [f"prebuilt-image-{row}"]),
+                             f"{self.ARTIFACT_RUN}: {row}: remake-prebuilt and its uploads:\n{log}")
+            ghcr = json.loads((home / "registry.json").read_text())
+            tag = f"{self.PACKAGE}:{self.PREBUILT_TAGS.get(row)}"
+            for fault, step in self.ARTIFACT_FAULTS.items():
+                state, artifacts, extra = json.loads(json.dumps(ghcr)), {**digests, **uploads}, {}
+                if fault == "tampered artifact":
+                    artifacts.update({at: self.tampered(files, pathlib.Path(tempfile.mkdtemp(dir=self.dir)))
+                                      for at, files in uploads.items()})
+                elif fault == "tag of another digest":
+                    state["images"][f"{self.PACKAGE}@{other}"] = image
+                    state["tags"][tag] = other
+                elif fault == "tag unreadable":
+                    extra["FAKE_CRANE_UNREADABLE"] = tag
+                home, found = self.crane_home(state), {}
+                result, log, _ = self.after_prebuilt(publish, "publish-prebuilt", ctx, where, artifacts, home, found,
+                                                     **extra)
+                got[(row, fault)] = (result, [call for call in found["crane"]
+                                              if call[0] == "copy" or call[:2] == ["auth", "login"]],
+                                     json.loads((home / "registry.json").read_text())["tags"].get(tag))
+                want[(row, fault)] = (("passes", [login, ["copy", f"{ours}@{digest}", tag]], digest) if step is None
+                                      else (f"fails at {step}", [], state["tags"].get(tag)))
+                logs[(row, fault)] = log
+        self.assertEqual(got, want, f"{self.ARTIFACT_RUN}, on each row: its outcome; its logins of crane and its "
+                         "copies; the digest of the row's tag on ghcr.io at its end:"
+                         + "".join(f"\n  {row}, {fault}: {result}; {calls}; {at}"
+                                   for (row, fault), (result, calls, at) in got.items())
+                         + "\nIts logs:" + "".join(f"\n{key}:\n{log}" for key, log in logs.items()))
+
+    def test_publish_prebuilt_pushes_exactly_the_digest_that_prebuilt_made_from_remake_prebuilts_artifact(self):
+        self.artifact_case()
+
+    def artifact_fails(self, old, new):
+        """artifact_case passes on an unchanged copy of the tree, and fails on a copy whose publish-prebuilt has `new`
+        for `old`. Return the message."""
+        self.passes_unchanged(self.artifact_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}",
+                                              self.in_job("publish-prebuilt", old, new))])
+        with self.assertRaises(AssertionError) as caught:
+            self.artifact_case(changed)
+        self.assertIn(self.ARTIFACT_RUN, str(caught.exception))
+        return str(caught.exception)
+
+    def test_control_publish_prebuilt_without_its_comparison_after_crane_push(self):
+        # The tampered artifact then reaches the push step, the step that gets the token. Its own comparison stops it
+        # there, and its copy names prebuilt's digest, which the runner's registry does not hold.
+        caught = self.artifact_fails('          [ "$loaded" = "$ours@$WANT" ] ||\n', "          true ||\n")
+        self.assertIn(f"oss-fuzz-theorems-2026.10-python-prebuilt, tampered artifact: fails at {self.PREBUILT_PUSH}",
+                      caught)
+
+    def test_control_publish_prebuilt_without_its_check_of_the_tag_on_ghcr_io(self):
+        # It then moves the tag to the image that it pushes.
+        caught = self.artifact_fails('            [ "$named" = "$WANT" ] ||\n', "            true ||\n")
+        self.assertIn("oss-fuzz-theorems-2026.10-python-prebuilt, tag of another digest: passes; [[", caught)
+
+    def test_control_publish_prebuilt_takes_an_unreadable_tag_for_an_absent_one(self):
+        # It then logs in and copies to a tag that it could not read.
+        caught = self.artifact_fails('          elif ! grep -q MANIFEST_UNKNOWN "$RUNNER_TEMP/tag.log"; then\n',
+                                     "          elif false; then\n")
+        self.assertIn(f"oss-fuzz-theorems-2026.10-python-prebuilt, tag unreadable: fails at {self.PREBUILT_PUSH}",
+                      caught)
+
+    def upload_case(self, tree=ROOT):
+        """remake-prebuilt uploads one artifact: the image that it made, as prebuilt-image-<row>, which GitHub keeps
+        for 1 day (retention-days), and whose upload fails the job when it holds no file (if-no-files-found). The
+        artifact holds the whole image, and publish-prebuilt reads it when remake-prebuilt ends (artifact_case)."""
+        job = self.workflow(tree, self.PUBLISH)["jobs"]["remake-prebuilt"]
+        self.assertEqual([(up.get("name"), as_text(up.get("retention-days")), up.get("if-no-files-found"))
+                          for up in (step.get("with") or {} for step in job["steps"]
+                                     if action_of(step) == "actions/upload-artifact")],
+                         [("prebuilt-image-${{ matrix.row }}", "1", "error")],
+                         "remake-prebuilt's uploads: (the artifact, retention-days, if-no-files-found)")
+
+    def test_remake_prebuilt_keeps_the_image_for_1_day(self):
+        self.upload_case()
+
+    def upload_fails(self, old, new):
+        """upload_case passes on an unchanged copy of the tree, and fails on a copy whose remake-prebuilt has `new` for
+        `old`."""
+        self.passes_unchanged(self.upload_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}",
+                                              self.in_job("remake-prebuilt", old, new))])
+        with self.assertRaises(AssertionError) as caught:
+            self.upload_case(changed)
+        self.assertIn("remake-prebuilt's uploads: (the artifact, retention-days, if-no-files-found)",
+                      str(caught.exception))
+
+    def test_control_remake_prebuilt_keeps_the_image_for_30_days(self):
+        self.upload_fails("          retention-days: 1\n", "          retention-days: 30\n")
+
+    def test_control_remake_prebuilt_upload_without_retention_days(self):
+        # GitHub then keeps it for the repository's retention, by default 90 days.
+        self.upload_fails("          retention-days: 1\n", "")
+
+    # The faults of the image on ghcr.io that publish-prebuilt's step PREBUILT_LISTING checks for, in its files under
+    # /opt/oft-py/prebuilt.
+    LISTING_FAULTS = ("none", "no manifest of asan", "two directories of plain", "another directory", "no file")
+
+    @staticmethod
+    def prebuilt_entries(fault):
+        """The entries of the files of a prebuilt image ([path, "dir" or "file"]), as crane export gives them, with the
+        fault `fault` of LISTING_FAULTS."""
+        if fault == "no file":
+            return [["opt", "dir"], ["opt/musl-sysroot", "dir"]]
+        entries = [["opt", "dir"], ["opt/oft-py", "dir"], ["opt/oft-py/prebuilt", "dir"]]
+        for flav in ("plain", "ubsan", "asan", "asanubsan"):
+            keys = [hashlib.sha256(flav.encode()).hexdigest()]
+            if fault == "two directories of plain" and flav == "plain":
+                keys.append(hashlib.sha256(b"another plain").hexdigest())
+            for key in keys:
+                top = f"opt/oft-py/prebuilt/{flav}-{key}"
+                entries += [[top, "dir"], [f"{top}/runtime", "dir"], [f"{top}/runtime/libpython3.11.a", "file"],
+                            [f"{top}/records", "dir"], [f"{top}/records/compiles.jsonl", "file"]]
+                if not (fault == "no manifest of asan" and flav == "asan"):
+                    entries.append([f"{top}/manifest", "file"])
+        if fault == "another directory":
+            entries.append(["opt/oft-py/prebuilt/python", "dir"])
+        return entries
+
+    def listing_case(self, tree=ROOT):
+        """publish-prebuilt's step PREBUILT_LISTING for each row of its matrix, on a ghcr.io that holds the image of the
+        digest that prebuilt made, with each fault of LISTING_FAULTS. The step must pass only where there is no fault:
+        else a run on main ends green with an image that a row of infra/toolchains.tsv would then name. Where it
+        passes, its step summary lists one manifest of each flav."""
+        publish = self.workflow(tree, self.PUBLISH)
+        step = self.step(publish, "publish-prebuilt", self.PREBUILT_LISTING)
+        results, summaries = {}, {}
+        for entry in publish["jobs"]["publish-prebuilt"]["strategy"]["matrix"]["include"]:
+            row = entry["row"]
+            for fault in self.LISTING_FAULTS:
+                config = {"architecture": "amd64", "os": "linux", "config": {"Env": []}}
+                manifest = {"schemaVersion": 2, "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                            "config": {"digest": self.digest_of(config)}, "annotations": {"fault": fault, "row": row}}
+                digest, image = self.digest_of(manifest), {"manifest": manifest, "config": config,
+                                                           "files": self.prebuilt_entries(fault)}
+                home = self.crane_home({"images": {f"{self.PACKAGE}@{digest}": image}, "tags": {}, "made": {}})
+                temp = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+                self.put_crane(temp / "bin")
+                ctx = {"matrix.row": row, "matrix.base": entry["base"],
+                       "matrix.frame_pointers": entry["frame_pointers"]}
+                rc, log, _ = self.run_script(step["run"], self.dir, RUNNER_TEMP=str(temp), FAKE_CRANE=str(home),
+                                             GITHUB_STEP_SUMMARY=str(temp / "summary"),
+                                             **env_of(publish, "publish-prebuilt", step, ctx,
+                                                      {"WANT": digest, "HELD": "true", "TAG": ""}))
+                results[(row, fault)] = (rc, log)
+                summaries[(row, fault)] = (temp / "summary").read_text() if (temp / "summary").exists() else ""
+        self.assertEqual({key: rc == 0 for key, (rc, _) in results.items()},
+                         {key: key[1] == "none" for key in results},
+                         "publish-prebuilt's check of the files passes only on an image on ghcr.io with no fault: "
+                         f"{results}")
+        manifests = r"(?m)^opt/oft-py/prebuilt/(plain|ubsan|asan|asanubsan)-[0-9a-f]{64}/manifest$"
+        self.assertEqual({key: sorted(re.findall(manifests, text)) for key, text in summaries.items()
+                          if key[1] == "none"},
+                         {key: ["asan", "asanubsan", "plain", "ubsan"] for key in summaries if key[1] == "none"},
+                         "the manifests of each flav in publish-prebuilt's step summary")
+
+    def test_publish_prebuilt_checks_the_files_of_the_image_on_ghcr_io(self):
+        self.listing_case()
+
+    def listing_fails(self, old, new="            true ||\n"):
+        """listing_case passes on an unchanged copy of the tree, and fails on a copy whose publish-prebuilt has `new`
+        for `old`."""
+        self.passes_unchanged(self.listing_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.PUBLISH}",
+                                              self.in_job("publish-prebuilt", old, new))])
+        with self.assertRaises(AssertionError) as caught:
+            self.listing_case(changed)
+        self.assertIn("publish-prebuilt's check of the files passes only on an image on ghcr.io with no fault",
+                      str(caught.exception))
+
+    def test_control_publish_prebuilt_without_its_count_of_the_directories_of_a_flav(self):
+        self.listing_fails('            if [ "$count" != 1 ]; then\n', "            if false; then\n")
+
+    def test_control_publish_prebuilt_without_its_check_of_the_files_of_a_flav(self):
+        self.listing_fails('              grep -qxF "opt/oft-py/prebuilt/$dirs/$file" "$RUNNER_TEMP/prebuilt.txt" ||\n',
+                           "              true ||\n")
+
+    def test_control_publish_prebuilt_without_its_check_of_other_entries(self):
+        self.listing_fails('          [ -z "$others" ] ||\n', "          true ||\n")
+
+    # The faults of the image that prebuilt's make makes, which prebuilt's step CHECK checks for: a layer that holds an
+    # entry outside /opt/oft-py/prebuilt (MAKE), two layers more than the image it starts from (MAKE), a configuration
+    # with another environment, a manifest of another media type, a manifest that names another first layer or the
+    # layers of the image it starts from in another order, and a configuration with another first diff id or with the
+    # diff ids in another order (the stand-in crane's append). The last four keep the count of the layers and of the
+    # diff ids.
+    LAYER_FAULTS = {"none": {}, "outside": {"FAKE_MAKE_FAULT": "outside"}, "two layers": {"FAKE_MAKE_FAULT": "twice"},
+                    "another environment": {"FAKE_CRANE_APPEND_FAULT": "environment"},
+                    "another media type": {"FAKE_CRANE_APPEND_FAULT": "media type"},
+                    "another base layer": {"FAKE_CRANE_APPEND_FAULT": "another base layer"},
+                    "base layers reordered": {"FAKE_CRANE_APPEND_FAULT": "base layers reordered"},
+                    "another diff id": {"FAKE_CRANE_APPEND_FAULT": "another diff id"},
+                    "diff ids reordered": {"FAKE_CRANE_APPEND_FAULT": "diff ids reordered"}}
+    CHECK = "the new image is the image it starts from with one more layer, which holds only /opt/oft-py/prebuilt"
+
+    def layer_case(self, tree=ROOT):
+        """prebuilt's steps (run_job) for each row of its matrix, on a table with no prebuilt row, with each fault of
+        LAYER_FAULTS. The job must pass only where there is no fault, and fail at CHECK on each fault."""
+        images = self.workflow(tree, self.IMAGES)
+        entries = images["jobs"]["prebuilt"]["strategy"]["matrix"]["include"]
+        bases = self.base_rows(sorted({entry["base"] for entry in entries}))
+        registry, _, _ = self.registry_of(bases)
+        calls = pathlib.Path(tempfile.mkdtemp(dir=self.dir)) / "make-calls"
+        got = {}
+        for entry in entries:
+            ctx = {"matrix.row": entry["row"], "matrix.base": entry["base"],
+                   "matrix.frame_pointers": entry["frame_pointers"]}
+            for fault, extra in self.LAYER_FAULTS.items():
+                calls.write_text("")
+                result, log, _, _, _ = self.run_job(images, "prebuilt", ctx, self.put_make(self.checkout_of(bases)), {},
+                                                    self.MAKE_RUN, self.crane_home(registry),
+                                                    FAKE_MAKE_CALLS=str(calls), **extra)
+                got[(entry["row"], fault)] = (result, log)
+        self.assertEqual({key: result for key, (result, _) in got.items()},
+                         {key: "passes" if key[1] == "none" else f"fails at {self.CHECK}" for key in got},
+                         f"prebuilt's outcome on each fault of the image that make makes: {got}")
+
+    def test_prebuilt_checks_the_manifest_the_configuration_and_the_layer_of_the_image_it_made(self):
+        self.layer_case()
+
+    def layer_fails(self, old, new):
+        """layer_case passes on an unchanged copy of the tree, and fails on a copy whose prebuilt has `new` for
+        `old`. Return the message."""
+        self.passes_unchanged(self.layer_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", self.in_job("prebuilt", old, new))])
+        with self.assertRaises(AssertionError) as caught:
+            self.layer_case(changed)
+        self.assertIn("prebuilt's outcome on each fault of the image that make makes", str(caught.exception))
+        return str(caught.exception)
+
+    def test_control_prebuilt_without_its_check_of_the_manifest(self):
+        self.layer_fails("'$n[0].layers[:-1] == $b[0].layers"
+                         " and ($n[0].layers | length) == ($b[0].layers | length) + 1\n"
+                         "             and $b[0].mediaType == $n[0].mediaType'", "'true'")
+
+    def test_control_prebuilt_without_its_check_of_the_configuration(self):
+        self.layer_fails("($b[0] | del(.history, .rootfs.diff_ids)) == ($n[0] | del(.history, .rootfs.diff_ids))",
+                         "true")
+
+    def test_control_prebuilt_without_its_check_of_the_entries_of_the_layer(self):
+        self.layer_fails('          [ "$outside" = 0 ] ||\n', "          true ||\n")
+
+    def test_control_prebuilt_without_its_comparison_of_the_base_layers(self):
+        # The count of the layers stays: a manifest that names another first layer, or the same layers in another
+        # order, then passes.
+        caught = self.layer_fails("'$n[0].layers[:-1] == $b[0].layers and (", "'(")
+        for fault in ("another base layer", "base layers reordered"):
+            self.assertIn(f"'{fault}'): ('passes'", caught)
+
+    def test_control_prebuilt_without_its_comparison_of_the_base_diff_ids(self):
+        # The count of the diff ids stays: a configuration with another first diff id, or the same diff ids in another
+        # order, then passes.
+        caught = self.layer_fails("             and $n[0].rootfs.diff_ids[:-1] == $b[0].rootfs.diff_ids\n", "")
+        for fault in ("another diff id", "diff ids reordered"):
+            self.assertIn(f"'{fault}'): ('passes'", caught)
+
+    # The name of the message of probe_case.
+    PROBE_RUN = "prebuilt's outcome, and its calls of the probe"
+
+    def probe_case(self, tree=ROOT):
+        """prebuilt's steps (run_job, with probes) for each row of its matrix, on a table with no prebuilt row, with the
+        stand-ins MAKE and PROBE. The job must pass, and run the probe once, after make: with the image that it starts
+        from (the base row's image, or for frame_pointers 1 the image that crane mutate makes of it), then the image
+        that make made, by its digest."""
+        images = self.workflow(tree, self.IMAGES)
+        entries = images["jobs"]["prebuilt"]["strategy"]["matrix"]["include"]
+        bases = self.base_rows(sorted({entry["base"] for entry in entries}))
+        registry, mutated, _ = self.registry_of(bases)
+        scratch = pathlib.Path(tempfile.mkdtemp(dir=self.dir))
+        makes, probes = scratch / "make-calls", scratch / "probe-calls"
+        got, want = {}, {}
+        for entry in entries:
+            row, base = entry["row"], bases[entry["base"]][1]
+            start = (f"localhost:5000/{base.partition('@')[0].removeprefix('ghcr.io/')}@{mutated[entry['base']]}"
+                     if entry["frame_pointers"] else base)
+            ctx = {"matrix.row": row, "matrix.base": entry["base"], "matrix.frame_pointers": entry["frame_pointers"]}
+            for path in (makes, probes):
+                path.write_text("")
+            where = self.put_probe(self.put_make(self.checkout_of(bases)))
+            result, log, _, _, out = self.run_job(images, "prebuilt", ctx, where, {}, self.MAKE_RUN,
+                                                  self.crane_home(registry), probes=True, FAKE_MAKE_CALLS=str(makes),
+                                                  FAKE_PROBE_CALLS=str(probes))
+            made = out.get("steps.made.outputs.ref", "")
+            self.assertRegex(made, r"^localhost:5000/[^@]+@sha256:[0-9a-f]{64}$", f"{row}: the image that make made")
+            got[row] = (result, [json.loads(line) for line in probes.read_text().splitlines()], log)
+            # The probe's arguments, and the number of calls of make before it.
+            want[row] = ("passes", [[[start, made], 1]])
+        self.assertEqual({row: found[:2] for row, found in got.items()}, want,
+                         f"{self.PROBE_RUN} on each row: (the outcome, [[its arguments, the calls of make before "
+                         "it]]). "
+                         "Its logs:" + "".join(f"\n{row}:\n{found[2]}" for row, found in got.items()))
+
+    def test_prebuilt_probes_the_image_it_starts_from_and_the_image_that_make_made(self):
+        self.probe_case()
+
+    def probe_fails(self, *changes):
+        """probe_case passes on an unchanged copy of the tree, and fails on a copy whose prebuilt has the changes
+        `changes`, each (old, new) (in_job)."""
+        self.passes_unchanged(self.probe_case)
+        changed = self.copy_tree("changed", [(f".github/workflows/{self.IMAGES}", self.in_job("prebuilt", old, new))
+                                             for old, new in changes])
+        with self.assertRaises(AssertionError) as caught:
+            self.probe_case(changed)
+        self.assertIn(f"{self.PROBE_RUN} on each row", str(caught.exception))
+
+    # prebuilt's step that runs the probe, and the comment above it.
+    PROBE_STEP = ("      # The probe reads the image that this job made and checked, from this job's registry: the"
+                  " image of"
+                  " the digest\n      # above.\n"
+                  "      - name: the probe, on the image it starts from and on the new image\n"
+                  "        env:\n"
+                  "          START: ${{ steps.start.outputs.image }}\n"
+                  "          NEW: ${{ steps.made.outputs.ref }}\n"
+                  '        run: .github/scripts/python-runtime/probe "$START" "$NEW"\n')
+
+    def test_control_prebuilt_without_its_probe(self):
+        self.probe_fails((self.PROBE_STEP, ""))
+
+    def test_control_prebuilt_probe_with_its_images_swapped(self):
+        self.probe_fails(('probe "$START" "$NEW"\n', 'probe "$NEW" "$START"\n'))
+
+    def test_control_prebuilt_probe_before_make(self):
+        # Its NEW is then empty: make has not run.
+        make = '      # make prints what it does, and last the line "made <repository>@<digest>".\n'
+        self.probe_fails((self.PROBE_STEP, ""), (make, self.PROBE_STEP + "\n" + make))
 
 
 class FirstRunArtifact(Stand):
@@ -1836,7 +3520,8 @@ class FirstRunArtifact(Stand):
             ctx.update({"needs.route.outputs.free": "", "needs.gather.result": "success",
                         "needs.gather.outputs.checks": build["checks"], "needs.gather.outputs.sizes": build["sizes"],
                         "needs.gather.outputs.screen": "true",
-                        "needs.gather.outputs.name": "x", "needs.screen.result": "success",
+                        "needs.gather.outputs.name": "x", "needs.gather.outputs.outside": "0",
+                        "needs.screen.result": "success",
                         "needs.screen.outputs.verdict": "clean", "needs.screen.outputs.checks": "claude",
                         "needs.review.result": "success", "needs.review.outputs.comment": "Thanks.\n",
                         "needs.review.outputs.verdicts": json.dumps({check: "pass" for check in ids}),
@@ -1849,7 +3534,12 @@ class FirstRunArtifact(Stand):
             sent = [r for r in self.requests(since) if r["method"] != "GET"]
             self.assertEqual([(r["token"], r["method"], r["endpoint"]) for r in sent],
                              [(APP_TOKEN, "POST", f"repos/{REPO}/issues/7/comments"),
+                              (APP_TOKEN, "POST", f"repos/{REPO}/check-runs"),
                               (APP_TOKEN, "POST", f"repos/{REPO}/check-runs")], f"the comment job's post ({label})")
+            # After Enrollment review, the check run review: this enrollment changes only projects/x/.
+            self.assertEqual((sent[1]["body"]["name"], sent[2]["body"]["name"], sent[2]["body"]["head_sha"],
+                              sent[2]["body"]["conclusion"]), ("Enrollment review", "review", HEAD, "success"),
+                             f"the comment job's post ({label})")
             self.assertTrue(sent[0]["body"]["body"].endswith(f"\n<!-- oss-verify-review-head {HEAD} -->\n"),
                             f"the comment job's post ({label})")
             self.assertEqual((sent[1]["body"]["head_sha"], sent[1]["body"]["external_id"]), (HEAD, PR),
@@ -2205,7 +3895,8 @@ class WorkflowRunNames(Stand):
     one workflow file of .github/workflows."""
 
     # The files that listen to a workflow_run at the head.
-    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "review.yml", "toolchain-images-publish.yaml"}
+    LISTENERS = {"enroll-dispatch.yml", "held-runs.yml", "required-checks.yml", "review.yml",
+                 "toolchain-images-publish.yaml"}
 
     def case(self, tree=ROOT):
         """Each workflow file of `tree` with a workflow_run trigger, and each name in its workflows: exactly one
@@ -2262,33 +3953,77 @@ class WorkflowRunNames(Stand):
 class SteeringFiles(unittest.TestCase):
     """(u): the list of steering files."""
 
-    # The patterns of .github/CODEOWNERS at commit 62081ee (#194), the last commit that changed them, in their order.
-    CODEOWNERS_62081EE = (
+    # The steering list: the patterns that .github/CODEOWNERS owned at commit 62081ee (#194), in their order. CODEOWNERS
+    # now owns only the files under /.github/ that run with a credential, and this list stays as broad as it was: an
+    # enrollment that changes any file under /.github/ waits for a person before Enroll dispatch sends it.
+    STEERING_62081EE = (
         "/.github/", "/src/", "/infra/", "/seeds/", ".claude/", "CLAUDE*.md", "AGENTS*.md", "/.mcp.json", "/*.py",
         "/pytest.ini", "/.pytest.ini", "/pyproject.toml", "/uv.lock", "/.python-version", "/setup.cfg", "/tox.ini",
         "/review.md", "/review-change.md", "/review-issue.md", "/.claude/skills/write-to-maintainer/",
         "/.github/CODEOWNERS")
+    TEAMS = {"@theorem-labs/engineering", "@theorem-labs/research"}
+    # The four patterns at the top of CODEOWNERS give agent instructions and skills at any depth the same owners, and
+    # add no steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that
+    # Claude Code loads in the review job is under .claude/.
+    INSTRUCTIONS = ("**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/")
+    # Owned, but no steering file, each with why: a change to it changes no code that a workflow runs, and nothing that
+    # Claude Code loads in the review job.
+    NOT_STEERING = {"/docs/seeded-projects.tsv": "take-project and triage.py read it from the base branch, never from "
+                                                 "the pull request",
+                    "/app/sentences.yaml": "only tests read it, as data, and no workflow runs it"}
 
-    def test_u_the_steering_files_are_the_last_owned_patterns_of_codeowners(self):
+    @staticmethod
+    def steering():
         path = ROOT / ".github" / "scripts" / "steering.py"
-        self.assertTrue(path.is_file(), ".github/scripts/steering.py is absent")
         spec = importlib.util.spec_from_file_location("steering_of_this_test", path)
         steering = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steering)
-        self.assertEqual(list(steering.STEERING), list(self.CODEOWNERS_62081EE))
-        for name in (".github/workflows/build.yaml", ".github/workflows/review.yml", "projects/x/AGENTS.md",
-                     "projects/x/.claude/settings.json", "docs/CLAUDE.md"):
+        return steering
+
+    def owned_but_not_steering(self, codeowners, steering):
+        """Each pattern of the CODEOWNERS text that either team owns, but the four at its top, whose files are not all
+        steering files. A pattern stands for its files by a path it matches: its * as x, and a file x under a
+        directory."""
+        found = []
+        for line in codeowners.splitlines():
+            fields = line.split()
+            if not fields or fields[0].startswith("#") or not self.TEAMS & set(fields[1:]) \
+                    or fields[0] in self.INSTRUCTIONS or fields[0] in self.NOT_STEERING:
+                continue
+            pattern = fields[0]
+            path = pattern.lstrip("/").replace("*", "x") + ("x" if pattern.endswith("/") else "")
+            self.assertTrue(steering.matches(pattern, path), (pattern, path))
+            if not steering.is_steering(path):
+                found.append(pattern)
+        return found
+
+    def test_u_each_owned_file_is_a_steering_file(self):
+        path = ROOT / ".github" / "scripts" / "steering.py"
+        self.assertTrue(path.is_file(), ".github/scripts/steering.py is absent")
+        steering = self.steering()
+        self.assertEqual(list(steering.STEERING), list(self.STEERING_62081EE))
+        for name in (".github/workflows/build.yaml", ".github/workflows/review.yml", ".github/scripts/binary-sizes",
+                     "projects/x/AGENTS.md", "projects/x/.claude/settings.json", "docs/CLAUDE.md"):
             self.assertTrue(steering.is_steering(name), name)
         for name in ("projects/x/build.sh", "docs/build-contract.md", "tests/test_x.py"):
             self.assertFalse(steering.is_steering(name), name)
-        # A line counts when either team owns it; each line of CODEOWNERS names both.
-        teams = {"@theorem-labs/engineering", "@theorem-labs/research"}
-        owned = [line.split()[0] for line in (ROOT / ".github" / "CODEOWNERS").read_text().splitlines()
-                 if line.strip() and not line.startswith("#") and teams & set(line.split()[1:])]
-        # The four patterns at the top give agent instructions and skills at any depth the same owners, and add no
-        # steering file: AGENTS*.md and CLAUDE*.md already match each AGENTS.md and CLAUDE.md, and a skill that Claude
-        # Code loads in the review job is under .claude/.
-        self.assertEqual(owned, ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "skills/", *steering.STEERING])
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
+        self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
+        # The check reads the owned lines: /.github/ is one of them.
+        self.assertIn("/.github/ @theorem-labs/engineering @theorem-labs/research", codeowners)
+        # src/ has no owner, on purpose, and every file under it is still a steering file.
+        self.assertIn("/src/", steering.STEERING)
+        patterns = [line.split()[0] for line in codeowners.splitlines() if line.strip() and not line.startswith("#")]
+        self.assertFalse([pattern for pattern in patterns if pattern.startswith("/src")], patterns)
+        for name in ("src/oss_verify/validate.py", "src/oss_verify/syscall_shapes.py", "src/yaml.py"):
+            self.assertTrue(steering.is_steering(name), name)
+
+    def test_u_control_an_owned_file_that_is_not_steering(self):
+        steering = self.steering()
+        codeowners = (ROOT / ".github" / "CODEOWNERS").read_text()
+        self.assertEqual(self.owned_but_not_steering(codeowners, steering), [])
+        changed = codeowners + "/docs/ @theorem-labs/engineering @theorem-labs/research\n"
+        self.assertEqual(self.owned_but_not_steering(changed, steering), ["/docs/"])
 
 
 class SteeringGate(Stand):
@@ -2773,8 +4508,11 @@ class HeldApproval(Stand):
         """The check run that the step records for that hold when the oss-verify App has no check run Enrollment
         review of pull request 7 at HEAD: the body of its request."""
         rc, log, out, sent = self.hold_of_held_head(trust, screen, verdict, self.not_app_runs)
-        self.assertEqual((rc, out, [(r["method"], r["endpoint"]) for r in sent]),
-                         (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs")]), log)
+        self.assertEqual((rc, out, [(r["method"], r["endpoint"], r["body"]["name"]) for r in sent]),
+                         (0, {"recorded": "true"}, [("POST", f"repos/{REPO}/check-runs", "Enrollment review"),
+                                                    ("POST", f"repos/{REPO}/check-runs", "review")]), log)
+        # The hold fails the check run review too.
+        self.assertEqual(sent[1]["body"]["conclusion"], "failure", log)
         return sent[0]["body"]
 
     def test_held_a_hold_of_a_held_head_replaces_no_verdict_of_the_review_at_that_head(self):
@@ -2815,7 +4553,8 @@ class HeldApproval(Stand):
                 self.assertEqual(earlier["output"]["title"], title)
                 rc, log, out, sent = self.hold_of_held_head(*screen_hold, (*self.not_app_runs, earlier))
                 self.assertEqual((rc, out), (0, {"recorded": "true"}), f"the earlier hold stands: {log}")
-                self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent],
+                self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent
+                                  if r["body"]["name"] == "Enrollment review"],
                                  [("POST", f"repos/{REPO}/check-runs", alone)], log)
 
     def test_held_the_newest_check_run_of_the_app_at_a_held_head_decides(self):
@@ -2831,7 +4570,8 @@ class HeldApproval(Stand):
                 rc, log, out, sent = self.hold_of_held_head(*self.HOLDS[0][1:4], runs)
                 if replaced:
                     self.assertEqual((rc, out), (0, {"recorded": "true"}), f"the newer hold stands: {log}")
-                    self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent],
+                    self.assertEqual([(r["method"], r["endpoint"], r["body"]) for r in sent
+                                      if r["body"]["name"] == "Enrollment review"],
                                      [("POST", f"repos/{REPO}/check-runs", self.recorded(*self.HOLDS[0][1:4]))], log)
                 else:
                     self.assertEqual((rc, out, sent), (0, {}, []), f"the hold replaces the newer verdict: {log}")
@@ -3186,7 +4926,7 @@ class HeldScreen(Stand):
                     {"id": n * 10, "name": name, "expired": False, "workflow_run": {"id": n}} for n in marked]})
             rc, log, _ = self.run_script(".github/scripts/screened-review-cap", ROOT, REPO=REPO, RUN_ID="1000",
                                          ACCOUNT="mallory", NOW=now,
-                                         **{k: str(review["env"][k]) for k in ("ALLOWED_BOTS", "REVIEW_CAP",
+                                         **{k: str(review["env"][k]) for k in ("WRITER_BOTS", "REVIEW_CAP",
                                                                                 "REVIEW_CAP_AUTHOR")})
             self.assertEqual(rc, 0, log)
             self.assertEqual(dict(re.findall(r"^(count|account_count)=(.*)$", log, re.M)),

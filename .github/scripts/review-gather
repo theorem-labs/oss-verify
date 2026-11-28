@@ -6,15 +6,15 @@
 #
 #   KIND=enrollment GH_TOKEN=<read-only token> REPO=<owner>/<name> PR=<number> NAME=<project> COMMIT=<built commit> \
 #     [BUILD=<result line> BINARIES=<table> CHECKS=<report>] [HEAD_SHA=<head commit> LAST_REVIEW=<file>] \
-#     .github/scripts/review-gather <directory>
+#     [OUTSIDE=<count>] .github/scripts/review-gather <directory>
 #   KIND=change GH_TOKEN=... REPO=... PR=<number> HEAD_SHA=<head commit> [LAST_REVIEW=<file>] \
 #     .github/scripts/review-gather <directory>
 #   KIND=issue GH_TOKEN=... REPO=... ISSUE=<number> .github/scripts/review-gather <directory>
 #
 # review.yml's gather job runs it from the checkout of main, after take-project has put the pull request's
 # projects/<name>/ into that checkout. It runs no code of the pull request or of the project: it reads the pull request
-# through the API, clones the project's repository at the built commit as data, and runs this repository's own
-# oss-verify validate and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
+# through the API, clones the project's repository at the built commit as data, and runs the rules of oss-verify
+# validate and .github/scripts/triage.py on them, as the validate and triage workflows do. The directory gets
 # the files that the section "In CI" of .claude/skills/review-enrollment/SKILL.md lists, the build's results (BUILD,
 # BINARIES and CHECKS, which .github/scripts/take-build-results reads from the Build run) among them. A failed read
 # leaves its file with the error in it, and the review says what it could not check, with one exception: when COMMIT
@@ -26,7 +26,10 @@
 # GITHUB_OUTPUT, `session` and `last`, so that the review resumes that session for the diff alone.
 # For an enrollment it also writes to GITHUB_OUTPUT `criticality_score`, the repository's criticality score as a JSON
 # number, and `oss_fuzz`, true or false for whether the repository is in OSS-Fuzz, as .github/scripts/triage.py --facts
-# gives them: each is null when triage.py does not know it. They go in no file of the directory.
+# gives them: each is null when triage.py does not know it. They go in no file of the directory. OUTSIDE is
+# take-project's count of the files that the pull request changes outside projects/<name>/, which only a branch of
+# this repository can: when it is not 0, this writes their names to outside.txt and each as it is at HEAD_SHA under
+# head/, as for a change, and the review judges them by review-change.md too (.github/scripts/review-prompt).
 # KIND is route's decision in review.yml, and this chooses its path on it once, here at its top.
 # KIND=change, a change review (review-change.md): only the pull request, its diff, its checks and review comments,
 # and each changed file as it is at HEAD_SHA, as data under head/, cut at 1 MiB. It resumes the session of the last
@@ -44,9 +47,11 @@ resume=$(openssl rand -hex 16) && echo "::stop-commands::$resume"
 trap 'echo "::$resume::"' EXIT
 set -uo pipefail
 export LC_ALL=C
-# This repository's package, for python3 -P -m oss_verify and the import below: -P keeps the top of the checkout off
-# sys.path, and PYTHONPATH names its src/ alone.
-export PYTHONPATH="$PWD/src"
+# The rules of oss-verify validate, for python3 -P -m validate_rules.validate and the import below:
+# .github/scripts/validate_rules/, the copy of src/oss_verify/validate.py for the jobs that hold a token, which load no
+# code from src/ (.github/scripts/copy-validate-rules). -P keeps the top of the checkout off sys.path, and PYTHONPATH
+# names .github/scripts alone.
+export PYTHONPATH="$PWD/.github/scripts"
 
 out=${1:?usage: review-gather <directory>}
 # Run a command, and keep its standard output and error in a file, whatever its status.
@@ -103,21 +108,47 @@ status=$?
 { { [ "$status" = 0 ] && jq -r '.[0]' "$out/review-comments.json" 2> /dev/null; } || echo "-"
   echo "(exit status $status)"; } > "$out/review-comment-authors.txt"
 rm -f "$out/review-comments.json"
-if [ "$KIND" = change ]; then
-  # Claude Code reads a CLAUDE.md or .claude/ beside a file it reads as instructions: the pull request's are data.
-  # Every file, not only the first 100 that pr.json lists.
-  gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[].filename' 2> /dev/null \
-    | while IFS= read -r path; do
+# Each file of the pull request that the function $1 keeps, by its name and by its previous name, as it is at HEAD_SHA,
+# as data under head/, cut at 1 MiB, and its name in $2 when $2 is given. Every file, not only the first 100 that
+# pr.json lists. Claude Code reads a CLAUDE.md or .claude/ beside a file it reads as instructions: the pull request's
+# are data, so they get no copy. It fails (status 1) when the list cannot be read, or when the pull request changes
+# more files than the 3,000 the API lists: a review of part of the files is no review of the change.
+heads() {
+  local wanted=$1 names=${2:-} changed listed status
+  changed=$(gh api "repos/$REPO/pulls/$PR" --jq .changed_files 2> /dev/null) || changed=""
+  if ! [[ $changed =~ ^[0-9]+$ ]] || (( changed > 3000 )); then
+    echo "review-gather: the pull request changes ${changed:-an unknown number of} files, which the API cannot list whole" >&2
+    return 1
+  fi
+  listed=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" --jq '.[] | .filename, (.previous_filename // empty)') \
+    || { echo "review-gather: the pull request's files could not be listed" >&2; return 1; }
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    "$wanted" "$path" || continue
+    if [ -n "$names" ]; then printf '%s\n' "$path" >> "$out/$names"; fi
     [[ $path =~ ^[A-Za-z0-9._/-]+$ && $path != *..* && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || continue
     [[ ${path,,} =~ (^|/)(claude[^/]*\.md|agents[^/]*\.md|\.claude)(/|$) ]] && continue
     mkdir -p "$out/head/$(dirname "$path")"
-    # Cut at 1 MiB: the pull request's author chooses each file's size. gh stopped by head at the cut (status 141)
-    # read the file; any other failure leaves no file.
+    # The pull request's author chooses each file's size. gh stopped by head at the cut (status 141) read the file;
+    # any other failure (a removed file, a previous name) leaves no file.
     gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO/contents/$path?ref=$HEAD_SHA" 2> /dev/null \
       | head -c 1048576 > "$out/head/$path"
     status=${PIPESTATUS[0]}
     [ "$status" = 0 ] || [ "$status" = 141 ] || rm -f "$out/head/$path"
-  done
+  done <<< "$listed"
+}
+every_file() { return 0; }
+# A file that is not directly inside projects/$NAME/, as take-project counts them (a file of a subdirectory of the
+# project is outside it).
+outside_the_project() {
+  case $1 in
+    "projects/$NAME/"*/*) return 0 ;;
+    "projects/$NAME/"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+if [ "$KIND" = change ]; then
+  heads every_file || exit 1
   reviewed=$(reviewed_head)
   # The cache's file gives the session's id, and its head must be the one the review comment gave: a session kept for
   # another head (a review whose save did not happen, an older run's entry) is not the session of that review.
@@ -142,6 +173,10 @@ if [ "$KIND" = change ]; then
   exit 0
 fi
 mkdir -p "$out/build" "$out/seeds"
+if [[ ${OUTSIDE:-0} =~ ^[1-9][0-9]*$ ]]; then
+  : > "$out/outside.txt"
+  heads outside_the_project outside.txt || exit 1
+fi
 printf '%s\n' "${BUILD:-}" > "$out/build/result.md"
 printf '%s\n' "${BINARIES:-}" > "$out/build/binaries.md"
 printf '%s\n' "${CHECKS:-}" > "$out/build/checks.md"
@@ -165,14 +200,14 @@ facts=$(jq -rs 'if length == 1 and (.[0] | type) == "object" then .[0] else {} e
   || facts=$'criticality_score=null\noss_fuzz=null'
 rm -f "$out.facts.json"
 echo "$facts" >> "${GITHUB_OUTPUT:-/dev/null}"
-keep validate.txt python3 -P -m oss_verify validate "$dir"
+keep validate.txt python3 -P -m validate_rules.validate "$dir"
 # Claude Code reads a CLAUDE.md beside a file that it reads as instructions. The pull request's are data, so they go
 # from the checkout once the validator has reported them (rule 1 of review.md).
 find "$dir" -maxdepth 1 \( -iname 'CLAUDE*.md' -o -iname 'AGENTS*.md' \) -delete
 
 # Check B of review.md: each box of the description against today's template.
 jq -r '.body // ""' "$out/pr.json" > "$out/description.md" 2>/dev/null
-keep checklist.txt python3 - "$NAME" "$out/description.md" <<'EOF'
+keep checklist.txt python3 -P - "$NAME" "$out/description.md" <<'EOF'
 import re, sys
 name, body = sys.argv[1], open(sys.argv[2], encoding="utf-8", errors="replace").read()
 box = re.compile(r'^\s*[-*] \[([ xX])\] (.*?)\s*$', re.M)
@@ -193,27 +228,54 @@ keep template-history.txt git log --format='%h %cI %s' -- .github/PULL_REQUEST_T
 # stored or deflated member, and gives a line for each other member that says that it is not read. open() raises
 # RuntimeError for an encrypted member, because this gives no password. So this reads no member whose bit 0x1 of the
 # general purpose bit flag is set, as read_member of .github/scripts/artifact.py does, and gives a line for it too.
+# open() raises NotImplementedError for a member whose bit 0x20 (compressed patched data) or bit 0x40 (strong
+# encryption) is set, also without bit 0x1, so this reads no such member either, and gives a line for it. It tests these
+# reasons in this order and writes the first that holds. A member that open() or the read refuses with any other error
+# (a corrupt deflate stream, a bad CRC, data cut short, a local header that does not match the central directory, or
+# one whose bit 0x800 says that its name is UTF-8 when it is not) gets a line with the error, and this goes on with the
+# next member. ZipFile() reads the central directory before any member, and refuses a zip cut short, which has lost its
+# central directory (BadZipFile; the listing holds the error of unzip -l too), and one whose central directory gives a
+# name with bit 0x800 set that is not UTF-8, as a zip tool sets it (UnicodeDecodeError; unzip -l lists each member of
+# it). For a zip that ZipFile() refuses with any error, the hexadecimal file holds one line, `(not read: <the error's
+# name>: <its message>)`, the form of a member's line with an error, and no other, and the python exits 0. So no error
+# of zipfile leaves the file, or an input in it, with no line that says why it is not read.
 for zip in "$dir"/*_seed_corpus.zip; do
   [ -f "$zip" ] || continue
   target=$(basename "$zip" _seed_corpus.zip)
   keep "seeds/$target.listing.txt" unzip -l "$zip"
-  python3 - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
+  python3 -P - "$zip" "$out/seeds/$target.hex.txt" <<'EOF'
 import sys, zipfile
-with zipfile.ZipFile(sys.argv[1]) as archive, open(sys.argv[2], "w") as out:
-    for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
-        out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
-        if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
-            out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
-            continue
-        if info.flag_bits & 0x1:
-            out.write("(not read: encrypted)\n")
-            continue
-        with archive.open(info) as member:
-            data = member.read(512)
-        for at in range(0, len(data), 16):
-            row = data[at:at + 16]
-            text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-            out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
+with open(sys.argv[2], "w") as out:
+    try:
+        archive = zipfile.ZipFile(sys.argv[1])
+    except Exception as e:
+        out.write(f"(not read: {type(e).__name__}: {e})\n")
+    else:
+        with archive:
+            for info in [i for i in archive.infolist() if not i.is_dir()][:200]:
+                out.write(f"== {info.filename!r}: {info.file_size} bytes\n")
+                if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                    out.write(f"(not read: compression method {info.compress_type}, not stored or deflated)\n")
+                    continue
+                if info.flag_bits & 0x1:
+                    out.write("(not read: encrypted)\n")
+                    continue
+                if info.flag_bits & 0x20:
+                    out.write("(not read: compressed patched data)\n")
+                    continue
+                if info.flag_bits & 0x40:
+                    out.write("(not read: strong encryption)\n")
+                    continue
+                try:
+                    with archive.open(info) as member:
+                        data = member.read(512)
+                except Exception as e:
+                    out.write(f"(not read: {type(e).__name__}: {e})\n")
+                    continue
+                for at in range(0, len(data), 16):
+                    row = data[at:at + 16]
+                    text = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
+                    out.write(f"{at:04x}  {row.hex(' '):<47}  {text}\n")
 EOF
 done
 
@@ -222,7 +284,7 @@ done
 # an API path only if it has no `..` part.
 url=$(python3 -P - "$dir/project.yaml" <<'EOF' 2>/dev/null
 import sys
-from oss_verify import validate
+from validate_rules import validate
 url = validate.yaml.safe_load(open(sys.argv[1])).get("repo")
 print(url if validate.is_https_url(url) else "")
 EOF

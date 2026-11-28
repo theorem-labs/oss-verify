@@ -4,7 +4,8 @@
 
 A fuzz target is an executable in a build's $OUT whose ELF symbol table defines LLVMFuzzerTestOneInput. This is
 OSS-Fuzz's rule (infra/utils.py, is_fuzz_target_local), reading the symbol table instead of searching the bytes. A Go
-program has no such symbol, so `compile` lists the Go fuzz targets in $OUT/.go-fuzz-targets.
+program has no such symbol, so `compile` lists the Go fuzz targets in $OUT/.go-fuzz-targets; nor has a DSL fuzz
+target, whose driver calls target_run, so `compile` lists those in $OUT/.dsl-fuzz-targets.
 `compile` saves the stripped twin of each one as $OUT/.stripped/<sha256 of the executable>, and those stripped bytes
 are what is collected, published and pinned.
 
@@ -27,6 +28,7 @@ HARNESS_SCHEMA = "oss-fuzz-theorems/harness/1"
 ENTRY = b"LLVMFuzzerTestOneInput"
 STRIPPED = ".stripped"
 GO_TARGETS = ".go-fuzz-targets"
+DSL_TARGETS = ".dsl-fuzz-targets"
 
 SHT_SYMTAB = 2
 SHN_UNDEF = 0
@@ -239,9 +241,10 @@ def is_fuzz_target(path):
     return is_executable(path) and ENTRY in defined_symbols(path, {ENTRY})
 
 
-def go_fuzz_targets(out):
-    """The Go fuzz targets that `compile` lists in $OUT/.go-fuzz-targets, one name on each line: {name: path}."""
-    listing = pathlib.Path(out) / GO_TARGETS
+def listed_fuzz_targets(out, listing):
+    """The fuzz targets that `compile` lists in $OUT/<listing> (GO_TARGETS, DSL_TARGETS), one name on each line:
+    {name: path}."""
+    listing = pathlib.Path(out) / listing
     if listing.is_symlink() or not listing.is_file():
         return {}
     names = listing.read_text(encoding="utf-8", errors="replace").split()
@@ -249,11 +252,18 @@ def go_fuzz_targets(out):
             if "/" not in name and name not in (".", "..") and is_executable(pathlib.Path(out) / name)}
 
 
+def go_fuzz_targets(out):
+    """The Go fuzz targets that `compile` lists in $OUT/.go-fuzz-targets: {name: path}."""
+    return listed_fuzz_targets(out, GO_TARGETS)
+
+
 def discover(out):
-    """The fuzz targets in one build's $OUT: {name: path}, by the symbol table rule, and the Go fuzz targets."""
+    """The fuzz targets in one build's $OUT: {name: path}, by the symbol table rule, and the Go and DSL fuzz targets
+    that `compile` lists."""
     out = pathlib.Path(out)
     found = {path.name: path for path in out.iterdir() if is_fuzz_target(path)}
     found.update(go_fuzz_targets(out))
+    found.update(listed_fuzz_targets(out, DSL_TARGETS))
     return dict(sorted(found.items()))
 
 

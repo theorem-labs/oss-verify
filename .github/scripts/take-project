@@ -74,8 +74,9 @@
 # commit, or the base another branch, before or after the list is read, this fails rather than pair one commit's list
 # with another's files; the next run (for a newer commit, or after a change of base) checks it.
 #
-# Writes to $GITHUB_OUTPUT: name (empty when there is nothing to build or validate), sha, and same_repository (true
-# for a branch of this repository).
+# Writes to $GITHUB_OUTPUT: name (empty when there is nothing to build or validate), sha, same_repository (true for a
+# branch of this repository), and with a name, outside: how many files the pull request changes outside
+# projects/<name>/ (0 for a fork, which may change none), which review.yml's change checks judge too.
 set -euo pipefail
 export LC_ALL=C  # a-z below is ASCII only
 
@@ -246,6 +247,12 @@ else
 fi
 # Same rule as NAME in oss-verify validate.
 [[ $name =~ ^[a-z0-9][a-z0-9._-]{0,62}$ ]] || fail "The directory name under projects/ must be a-z 0-9 . _ - (starting with a letter or digit, at most 63)."
+# For a branch of this repository: every path that merging changes but a file directly inside projects/$name/,
+# another project's files and a project that the merge removes included. review.yml judges those by
+# review-change.md (the output outside). A fork changes none: it failed above.
+if [ "$same_repository" = true ]; then
+  outside=$({ grep -z -c -v -E "^projects/${name//./\\.}/[^/]+\$" "$RUNNER_TEMP/merged" || true; } | tr -d '\0')
+fi
 # A fork's enrollment of a project that the base branch's docs/seeded-projects.tsv marks seeded fails, whether it
 # changes the project's files or removes them (the top of this file). The table is read as data. The generator ends
 # each line of the table with a newline, the last line too, and the test Committed keeps main's table as the generator
@@ -283,4 +290,5 @@ if (( outside )); then
 fi
 echo "$doing projects/$name/ as it is $from:"
 ls -l "projects/$name"
+echo "outside=$outside" >> "$GITHUB_OUTPUT"
 echo "name=$name" >> "$GITHUB_OUTPUT"

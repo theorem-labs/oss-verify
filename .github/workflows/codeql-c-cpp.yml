@@ -1,0 +1,66 @@
+# Copyright 2026 Theorem Labs, PBC
+# SPDX-License-Identifier: Apache-2.0
+name: "CodeQL: C/C++"
+# CodeQL's analysis of this repository's C and C++ (.github/workflows/codeql.yml says how, and why each language has a
+# file of its own). It runs on each push to main, and on a pull request into main that changes a file of the paths
+# below: a C or C++ file outside seeds/, projects/, tests/fixtures/ and .github/scripts/frame-pointers/, which no
+# analysis reads, or a file of the analysis. A C or C++ file: a name with a suffix that CodeQL reads as C or C++.
+# GitHub's patterns read + as "one or more", so it is written \+.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    paths:
+      - '**.c'
+      - '**.cc'
+      - '**.cpp'
+      - '**.c\+\+'
+      - '**.cxx'
+      - '**.h'
+      - '**.hh'
+      - '**.hpp'
+      - '**.h\+\+'
+      - '**.hxx'
+      # The analysis.
+      - .github/codeql/codeql-config.yml
+      - .github/workflows/codeql.yml
+      - .github/workflows/codeql-c-cpp.yml
+      # Never analysed (.github/codeql/codeql-config.yml).
+      - '!seeds/**'
+      - '!projects/**'
+      - '!tests/fixtures/**'
+      - '!.github/scripts/frame-pointers/**'
+
+permissions: {}
+
+concurrency:
+  # A pull request's newer run cancels its older one. Each push run has its own group and is never cancelled.
+  group: >-
+    ${{ github.event_name == 'push' && format('codeql-c-cpp-push-{0}', github.run_id)
+        || format('codeql-c-cpp-{0}', github.event.pull_request.number) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pull-request:
+    if: github.event_name == 'pull_request'
+    permissions:
+      actions: read          # codeql-action lists the Actions cache for main's database
+      contents: read
+      security-events: read
+    uses: ./.github/workflows/codeql.yml
+    with:
+      language: c-cpp
+      build-mode: none
+
+  push:
+    if: github.event_name == 'push'
+    permissions:
+      actions: read
+      contents: read
+      security-events: write # to record main's results
+    uses: ./.github/workflows/codeql.yml
+    with:
+      language: c-cpp
+      build-mode: none

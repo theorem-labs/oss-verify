@@ -10,7 +10,9 @@ name: "Review"
 #   workflow_run       a run of build.yaml (Build) or triage.yaml (Triage) of a pull request completed. After a Build
 #                      run, it reviews the head that the run built: an enrollment with the Build run's results, or a
 #                      change. After a Triage run that ended success, it writes the triage comment of a pull request
-#                      that touches projects/.
+#                      that touches projects/. After a run of review-approvals.yml (Review approvals: a review of the
+#                      pull request was submitted as an approval or a request for changes, or dismissed), it posts the
+#                      check run review of that head again, with the approvals read then (the comment job, below).
 #   issues             an issue was opened, edited or reopened: it drafts the reply to the issue.
 #   workflow_dispatch  a run by hand, on main (below): of a pull request, of an issue, or a measurement of the screen.
 #
@@ -18,13 +20,16 @@ name: "Review"
 #   route    decides the kind of the run, its output `kind`: enrollment, change or issue, or nothing. It reads the item
 #            from the API, by its number. On workflow_run it reads only a run of .github/workflows/build.yaml or
 #            .github/workflows/triage.yaml on the event pull_request (a pull request can give a workflow file of its
-#            own the name Build), a Build run that ended success or failure, and a Triage run that ended success. Its
+#            own the name Build), a Build run that ended success or failure, and a Triage run that ended success, or a
+#            run of .github/workflows/review-approvals.yml on the event pull_request_review that ended success, started
+#            by a User with write access or by an App, for which it asks for the comment job's refresh alone (its
+#            output refresh) and gives no kind. Its
 #            pull request is the open one into the default branch whose head repository, branch and head commit are
 #            the run's. With none, nothing runs: the head moved, or the pull request is closed, and the run of the new
 #            head reviews it. After a Build run, a pull request into the default branch that changes at least one file
 #            and none under projects/ is a change: the review checks it against review-change.md. Any other pull
 #            request is an enrollment, and so is a change that an App the review's action refuses started
-#            (Dependabot's, say): .github/scripts/actor-kind decides that as the action does, by the account's type,
+#            (Copilot's, say): .github/scripts/actor-kind decides that as the action does, by the account's type,
 #            with the one list of admitted Apps, ALLOWED_BOTS below. An enrollment is reviewed with the results of
 #            that Build run (route's output build_run). After a Triage run, route asks for the triage comment alone
 #            (its output triage), when the pull request touches projects/. triage.yaml's paths filter starts Triage
@@ -42,7 +47,7 @@ name: "Review"
 #            `replay`.
 #            Its trust step then decides who goes first, its output `trust`. Write access is what GitHub's
 #            collaborator permission API answers, admin or write; membership of the organisation alone is not, and the
-#            Apps in ALLOWED_BOTS count as having it. `writer` when the author of the pull request or issue and the
+#            Apps in WRITER_BOTS count as having it. `writer` when the author of the pull request or issue and the
 #            account that started the run (the one that pushed, opened, edited or reopened, or started it by hand)
 #            both have write access: the review runs as it comes, unless the gather job finds comments of others in
 #            it (below). So a run started by hand is trusted as the item's author, as an event's run is. `screen`
@@ -56,18 +61,21 @@ name: "Review"
 #            pr or issue: the screen job alone runs, and measures its rules (below).
 #   gather   gathers what the review reads, once, with .github/scripts/review-gather (below), and keeps it as the
 #            artifact review-data, which the screen and the review take only by its SHA-256
-#            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model,
-#            no identity token and no write permission. It checks out main, never the pull request. Its first step
-#            reads the pull request again: when its head is no longer the head that route read, the job keeps nothing,
-#            because the push started a run of its own. For an enrollment it takes projects/<name>/ with
+#            (.github/scripts/take-review-data): the review reads exactly what the screen passed. It holds no model, no
+#            identity token and no write permission. It checks out main, never the pull request. Its first step reads
+#            the pull request again: when its head is no longer the head that route read, the job keeps nothing, because
+#            the push started a run of its own. For an enrollment it takes projects/<name>/ with
 #            .github/scripts/take-project, as the build does, and reads the Build run's results as data, with
-#            .github/scripts/take-build-results (below). When take-project takes no project from a head that is not
-#            held, the job keeps nothing, and no screen, review or comment runs. Its output `screen` is true for
+#            .github/scripts/take-build-results (below). When take-project takes no project (a pull request that changes
+#            several projects, or only removes one, a fork's too), the job gathers the pull request as a change, its
+#            output kind, which the later jobs read in place of route's: it gets a change review and its check run
+#            review. When the build took a project from a branch that changes other files too, its output outside counts
+#            them, and the enrollment review judges them by review-change.md as well. Its output `screen` is true for
 #            route's trust `screen`, and for a writer's item whose comments, reviews or review comments include one by
-#            an account without write access (or one GitHub cannot name; an App's own comment is told by the REST
-#            API's account type). Every item keeps the session of its last review, screened or not: the review job
-#            takes it, and the screen job does not. For every enrollment it gathers the project's repository at the
-#            built commit, and a fetch that fails fails this job (below).
+#            an account without write access (or one GitHub cannot name; an App's own comment is told by the REST API's
+#            account type). Every item keeps the session of its last review, screened or not: the review job takes it,
+#            and the screen job does not. For every enrollment it gathers the project's repository at the built commit,
+#            and a fetch that fails fails this job (below).
 #   screen   when the gather job's output `screen` is true (.github/scripts/screen.py): independent checks, which
 #            SCREEN_CHECKS lists, read the text that the pull request or the issue carries (for a writer's item, its
 #            comments, reviews and review comments alone, SCREEN_SCOPE comments): Google Cloud Model Armor's prompt
@@ -173,9 +181,23 @@ name: "Review"
 #            nothing, and the comment of an earlier head stays. Its step "Take the label review-held off" then deletes
 #            the App's hold comments from before and takes the label review-held off, so the review comment stays the
 #            App's only comment on an enrollment pull request. For a change pull request it posts the review comment
-#            the same way, with no check run. The comment starts with <!-- oss-verify-review -->, as the triage
-#            comment starts with its own marker; an enrollment's comment then gives the fixed first sentence of the
-#            check run's conclusion (.github/scripts/review-body).
+#            the same way, with no check run Enrollment review. The comment starts with <!-- oss-verify-review -->, as
+#            the triage comment starts with its own marker; an enrollment's comment then gives the fixed first
+#            sentence of the check run's conclusion, and a change's the title of its check run review
+#            (.github/scripts/review-body).
+#            For every pull request it reviews or holds, the same step, or the hold's step, also posts the check run
+#            review on the head the run reviewed (.github/scripts/review-check), which R14 of
+#            dispatch://INFRA-5359/spec has main's ruleset require from this App, once agent-infra's github/ program
+#            lists it: success when the review has no
+#            blocking item, failure otherwise, with a fixed title and a link to the review comment. A change passes
+#            when each of review-change.md's five checks is pass, each ordinary choice the review lists has its basis,
+#            and each choice reserved for a person has a person's approval of that head (.github/scripts/approval.py).
+#            An enrollment passes once its review ran without error, when it changes only files directly inside
+#            projects/<name>/: Enrollment review keeps the review's own conclusion. One that changes other files too
+#            (only a branch of this repository can) passes only as a change does, on the verdicts and choices that the
+#            same review gives those files. A hold fails it. A review that fails on a path that records no hold posts
+#            no check run review, so the head stays without one, and GitHub holds its merge. A newer head has no check
+#            run until its own review posts one.
 #            The review's text and the checks' report, which a pull request can steer, reach the comment only through
 #            .github/scripts/review-neutralize: with no mention, no reference to an issue or pull request, no unclosed
 #            HTML comment that hides what follows it, and no line that holds a marker of this comment, so no one else
@@ -197,6 +219,11 @@ name: "Review"
 #            On a run by hand for a merged pull request whose run of enroll-merged.yml GitHub holds (route's replay,
 #            below), its step "Replay the merge for Enroll dispatch" starts enroll-merged.yml for that pull request with
 #            the App's token, so that enroll-dispatch.yml runs on its completion. Such a run does nothing else.
+#            After a Review approvals run (route's refresh), its step "Post the check run review again, with the
+#            approvals read now" posts the check run review of route's head again from the record of the newest
+#            one, with the approvals read then (.github/scripts/review-check --refresh), so a choice reserved for a
+#            person passes once that person approves the head, and fails again when the approval is dismissed or
+#            followed by a request for changes. No model runs. Such a run does nothing else.
 #   triage-gather
 #            after a Triage run, or on a run by hand that a person starts, for a pull request that touches projects/
 #            (the paths GitHub lists for it, renames under both names): writes the triage comment with main's
@@ -218,15 +245,17 @@ name: "Review"
 # for a change or an issue with the label review-held. On a run by hand for a held head whose verdict of the review
 # stands (above), the comment job records nothing and passes. A gather, screen, review (after its second
 # attempt), hold or comment job that failed fails it, held or not, which a re-run of the failed jobs clears. It is no
-# check that the ruleset requires: a check of a workflow_run or workflow_dispatch run never satisfies a required check
-# (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated).
+# check that the ruleset requires: a check of a job of a workflow_run or workflow_dispatch run never satisfies a
+# required check
+# (https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks#checks-from-some-workflow-jobs-are-not-evaluated),
+# which is why the comment job posts the required check review itself, as the oss-verify App, through the API.
 # An open enrollment's statements start only when its check run Enrollment review is success (enroll-dispatch.yml).
 # The review is of a commit: build.yaml does not run on edited, so an edit of the description alone is reviewed with
 # the next push.
 #
 # workflow_run, issues and workflow_dispatch, not pull_request: each runs main's copy of this file and of
-# .github/scripts, whatever a pull request changes. The jobs that hold a key (screen, review, hold, comment and triage)
-# are safe on these events for these reasons:
+# .github/scripts, whatever a pull request changes. The jobs that hold a key (screen, review, hold, comment and
+# triage) are safe on these events for these reasons:
 #   - A pull request that changes the workflow or the scripts of its own Build and Triage runs (on pull_request)
 #     controls those runs, their checks and their artifacts. So this file reads only this of such a run: its file,
 #     event, conclusion, head repository, head branch and head commit, which GitHub gives, and for an enrollment its
@@ -257,9 +286,9 @@ name: "Review"
 # the action then prints the whole conversation, a held finding too, to the public log. The comment job and the triage
 # job alone write to this repository: they post as the oss-verify GitHub App (oss-verify[bot]), with an installation
 # token that can write pull requests in this repository only. The comment job's token can also write its checks and
-# issues (the check run, the label and the hold comment). For the approval of held runs and the replay of a merge
-# alone, the comment job makes a second token, which can write the runs of this repository and nothing else. Each job
-# makes its tokens from the App's client id below and its private key, which it reads at run time from Secret Manager
+# issues (the check run, the label and the hold comment). For the approval of held runs and the replay of a merge alone,
+# the comment job makes a second token, which can write the runs of this repository and nothing else. Each job makes its
+# tokens from the App's client id below and its private key, which it reads at run time from Secret Manager
 # (oss-verify-github-app-key), and runs no code of the pull request or the project.
 #
 # This repository stores no long-lived credential for any of that. dispatch://INFRA-3746 (a part of
@@ -268,13 +297,13 @@ name: "Review"
 # github-ossv for the accounts ossv-ci, ossv-app-comment and oss-verify-ci, the screen's Google pool review-screen and
 # its Anthropic rule oss-verify-screen, and a second tailnet identity, ossv-review-yml-github, for the review job. The
 # three applies of dispatch://INFRA-3746 (bootstrap/, anthropic-org/ and root/ in agent-infra) ran on 2026-11-17.
-# So each job that signs in (screen, review, hold, comment and triage) can sign in once this file is on main. A token
-# carries no job name, so what keeps each Google account to the job that needs it is the job's GitHub Environment,
+# So each job that signs in (screen, review, hold, comment and triage) can sign in once this file is on main. A
+# token carries no job name, so what keeps each Google account to the job that needs it is the job's GitHub Environment,
 # which the token carries a claim for: `ossv-ci`, which the review job uses only to store a held finding or an issue's
 # draft, can be acted as only from the environment `enroll-review`, which the review job declares; `ossv-app-comment`,
-# the account these jobs read the App's key as, only from `comment`, which the hold, comment and triage jobs declare;
-# the screen's account, only from `review-screen`, which the screen job declares. A job that declares no environment,
-# gather and triage-gather among them, reaches no account.
+# the account these jobs read the App's key as, only from `comment`, which the hold, comment and triage jobs
+# declare; the screen's account, only from `review-screen`, which the screen job declares. A job that declares no
+# environment, gather and triage-gather among them, reaches no account.
 # A pull request from a fork gets the same identity tokens in the review and comment jobs: workflow_run runs this file
 # from main, never the fork's copy, so the fork's code never holds them.
 #
@@ -287,9 +316,9 @@ name: "Review"
 # serves as its team oss-verify-ci with model calls only, and which the Review step gives Claude Code as its API key.
 # Google's identity token lives one hour, longer than the Review step's 45 minutes, and the sign-in runs just before it;
 # "Review again" signs in again before it runs.
-# The provider admits this file, on refs/heads/main, from its own events. The review, screen, hold, comment and triage
-# jobs of this file ask for an identity token; no other job of it does. The screen job's Anthropic token comes from its
-# own federation rule, oss-verify-screen, which admits the environment review-screen alone.
+# The provider admits this file, on refs/heads/main, from its own events. The review, screen, hold, comment and
+# triage jobs of this file ask for an identity token; no other job of it does. The screen job's Anthropic token comes
+# from its own federation rule, oss-verify-screen, which admits the environment review-screen alone.
 # A review runs only on main: Google's provider and the tailnet identity below admit refs/heads/main alone, so a run on
 # another branch gets no Google token and no tailnet node. So a change to
 # the review is tried for real only once it is on main: run `gh workflow run review.yml -f pr=<n>`, which reviews the
@@ -403,8 +432,9 @@ run-name: ${{ inputs.measure && 'Measure the screen' || (github.event_name == 'w
 
 on:
   workflow_run:
-    # By the workflows' names: route reads each run's file, and reviews a run of build.yaml or triage.yaml alone.
-    workflows: [Build, Triage]
+    # By the workflows' names: route reads each run's file, and reviews a run of build.yaml or triage.yaml, or
+    # refreshes the check run review after a run of review-approvals.yml, alone.
+    workflows: [Build, Triage, Review approvals]
     types: [completed]
   issues:
     types: [opened, edited, reopened]
@@ -438,10 +468,15 @@ cache-mode: none
 
 env:
   # The Apps whose runs the review's action admits (its allowed_bots): our automation's, which opens enrollments and
-  # starts this file by hand, the oss-verify App's, and Legion's implementer App, which opens the pull requests of
-  # Legion's workers. The one list: route reads it through .github/scripts/actor-kind, which decides as the action does,
-  # and the Review step gives it to the action. route's trust step counts these Apps as accounts with write access.
-  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot]
+  # starts this file by hand, the oss-verify App's, Legion's implementer App, which opens the pull requests of Legion's
+  # workers, and Dependabot's, whose pull requests bump the pinned actions and so need the check run review to merge.
+  # The one list: route reads it through .github/scripts/actor-kind, which decides as the action does, and the Review
+  # step gives it to the action.
+  ALLOWED_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot],dependabot[bot]
+  # The Apps of ALLOWED_BOTS that count as accounts with write access: route's and the gather job's trusted,
+  # .github/scripts/screened-review-cap and enroll-dispatch's trusted read this list. Dependabot is not one of them:
+  # the text of its pull requests is screened, and its runs are capped, as an account's without write access.
+  WRITER_BOTS: sjawhar-agent[bot],oss-verify[bot],legion-implementer[bot]
   # The daily cap on the screens and model reviews of accounts without write access: at most REVIEW_CAP runs in any 24
   # hours over all pull requests and issues, and at most REVIEW_CAP_AUTHOR of them charged to one account. route's
   # trust step counts them with .github/scripts/screened-review-cap for every item whose trust is screen, before the
@@ -508,6 +543,14 @@ jobs:
       build_run: ${{ steps.decide.outputs.build_run }}
       # true when the triage comment is written (the jobs triage-gather and triage).
       triage: ${{ steps.decide.outputs.triage }}
+      # true when the review's action refuses the run, because an App outside ALLOWED_BOTS started it: such a change
+      # is an enrollment, and the gather job gives it no kind when take-project takes no project, so nothing reviews
+      # or holds it.
+      refused: ${{ steps.decide.outputs.refused }}
+      # true after a run of .github/workflows/review-approvals.yml: a review of the pull request was submitted or
+      # dismissed, and the comment job posts its check run review again with the approvals read now. Such a run has
+      # no kind.
+      refresh: ${{ steps.decide.outputs.refresh }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with:
@@ -541,6 +584,10 @@ jobs:
           RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           RUN_HEAD_REPOSITORY: ${{ github.event.workflow_run.head_repository.full_name }}
           RUN_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          # The account whose action started that run, as GitHub gives it: for a Review approvals run, the one who
+          # submitted or dismissed the review.
+          RUN_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+          RUN_ACTOR_TYPE: ${{ github.event.workflow_run.triggering_actor.type }}
         run: |
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
@@ -580,13 +627,34 @@ jobs:
             say "issue reply: nothing is built; the review drafts the reply, which no job posts (review-issue.md)."
             exit 0
           fi
-          # A run after a Build or Triage run: only a run of one of the two files, on pull_request, that ended so that
-          # its pull request is reviewed or triaged. Its pull request is the open one into the default branch from the
-          # run's head repository and branch, at the run's head commit, as enroll-dispatch's pull_of_head finds it: a
-          # fork's pull request is not in the event.
+          # A run after a Build, Triage or Review approvals run: only a run of one of the three files, on its own event,
+          # that ended so that its pull request is reviewed, triaged or refreshed. Its pull request is the open one
+          # into the default branch from the run's head repository and branch, at the run's head commit, as
+          # enroll-dispatch's pull_of_head finds it: a fork's pull request is not in the event.
           if [ "${EVENT:-}" = workflow_run ]; then
             [[ ${RUN_ID:-} =~ ^[1-9][0-9]*$ ]] || { echo "::error::The event names no run that completed."; exit 1; }
-            [ "${RUN_EVENT:-}" = pull_request ] || stop "Run $RUN_ID ran on ${RUN_EVENT:-no event}, not on pull_request: nothing runs."
+            if [ "${RUN_PATH:-}" = .github/workflows/review-approvals.yml ]; then
+              [ "${RUN_EVENT:-}" = pull_request_review ] \
+                || stop "Run $RUN_ID ran on ${RUN_EVENT:-no event}, not on pull_request_review: nothing runs."
+              [ "${RUN_CONCLUSION:-}" = success ] \
+                || stop "Review approvals run $RUN_ID ended ${RUN_CONCLUSION:-with no conclusion}, not success: nothing runs."
+              # Only a review that can change a person's approval (.github/scripts/approval.py) refreshes, so that no
+              # other account's review starts a job that reads the App's key: one by a User with write access, or by
+              # an App (an account of type Bot, which can review or dismiss here only through its installation on this
+              # repository). Every dismissal is made by one of the two. The event does not say whether the review was
+              # a dismissal, and the run's own text would come from the pull request's copy of review-approvals.yml.
+              case ${RUN_ACTOR_TYPE:-} in
+                Bot) ;;
+                User)
+                  [[ ${RUN_ACTOR:-} =~ ^[A-Za-z0-9-]+$ ]] || stop "Review approvals run $RUN_ID names no account: nothing runs."
+                  permission=$(gh api "repos/$REPO/collaborators/$RUN_ACTOR/permission" --jq .permission) || permission=""
+                  [[ $permission == admin || $permission == write ]] \
+                    || stop "Review approvals run $RUN_ID: $RUN_ACTOR has ${permission:-no readable} access, not write, so their review changes no approval: nothing runs." ;;
+                *) stop "Review approvals run $RUN_ID was started by ${RUN_ACTOR_TYPE:-no} account type, neither a User nor an App: nothing runs." ;;
+              esac
+            else
+              [ "${RUN_EVENT:-}" = pull_request ] || stop "Run $RUN_ID ran on ${RUN_EVENT:-no event}, not on pull_request: nothing runs."
+            fi
             case ${RUN_PATH:-} in
               .github/workflows/build.yaml)
                 [[ ${RUN_CONCLUSION:-} == success || ${RUN_CONCLUSION:-} == failure ]] \
@@ -594,7 +662,8 @@ jobs:
               .github/workflows/triage.yaml)
                 [ "${RUN_CONCLUSION:-}" = success ] \
                   || stop "Triage run $RUN_ID ended ${RUN_CONCLUSION:-with no conclusion}, not success: nothing runs." ;;
-              *) stop "Run $RUN_ID is a run of neither .github/workflows/build.yaml nor .github/workflows/triage.yaml: nothing runs." ;;
+              .github/workflows/review-approvals.yml) ;;
+              *) stop "Run $RUN_ID is a run of neither .github/workflows/build.yaml, .github/workflows/triage.yaml nor .github/workflows/review-approvals.yml: nothing runs." ;;
             esac
             [[ ${DEFAULT_BRANCH:-} =~ ^[A-Za-z0-9._/-]+$ ]] || { echo "::error::The event names no default branch."; exit 1; }
             gone="No open pull request into $DEFAULT_BRANCH is at the head commit of run $RUN_ID, from its repository and branch: the head moved, or the pull request is closed: the run of the new head reviews it."
@@ -649,6 +718,11 @@ jobs:
             { echo "pr=$PR"; echo "sha=$sha"; echo "author=$opener"; echo "replay=true"; } >> "$GITHUB_OUTPUT"
             stop "merge replay: pull request $PR is merged, and $replay. The comment job replays the merge with the App's token, so that Enroll dispatch runs on its completion. Nothing is reviewed."
           fi
+          # After a review of it was submitted or dismissed: the comment job's refresh alone, at the run's head.
+          if [ "${EVENT:-}" = workflow_run ] && [ "$RUN_PATH" = .github/workflows/review-approvals.yml ]; then
+            { echo "pr=$PR"; echo "sha=$sha"; echo "author=$opener"; echo "refresh=true"; } >> "$GITHUB_OUTPUT"
+            stop "refresh: a review of pull request $PR was submitted or dismissed. The comment job posts the check run review of $sha again from its newest record, with the approvals read now. Nothing is reviewed."
+          fi
           # Every path, a renamed file under both names. Over the 3000 files the API lists, the list decides nothing.
           paths=$(gh api --paginate "repos/$REPO/pulls/$PR/files?per_page=100" \
             --jq '.[] | .filename, (.previous_filename // empty)')
@@ -658,19 +732,21 @@ jobs:
           decide() {
             kind=enrollment
             message="enrollment review: it takes the pull request's project, if it has one (.github/scripts/take-project)."
-            # A change only into the default branch: take-project refuses a pull request into any other.
+            # The action refuses a run that an App outside ALLOWED_BOTS started, whatever the pull request changes
+            # (route's refused, which the gather job reads when take-project takes no project). Its own assignment, so
+            # that a failed read fails route (set -e).
+            who=$(.github/scripts/actor-kind "$ACTOR")
+            [ "$who" != refused ] || refused=true
+            # A change only into the default branch: take-project refuses a pull request into any other. A refused
+            # App's change is an enrollment, as before.
             if [ -n "$paths" ] && [ "$projects" = false ] && (( $(jq .changed_files <<< "$pull") <= 3000 )) \
-                && [ "$(jq -r .base.ref <<< "$pull")" = "$(jq -r .base.repo.default_branch <<< "$pull")" ]; then
-              # The action refuses a run that an App outside ALLOWED_BOTS started: such a change is an enrollment, as
-              # before. Its own assignment, so that a failed read fails route (set -e).
-              who=$(.github/scripts/actor-kind "$ACTOR")
-              if [ "$who" != refused ]; then
-                kind=change
-                message="change review: the pull request changes no file under projects/ (review-change.md)."
-              fi
+                && [ "$(jq -r .base.ref <<< "$pull")" = "$(jq -r .base.repo.default_branch <<< "$pull")" ] \
+                && [ "$refused" != true ]; then
+              kind=change
+              message="change review: the pull request changes no file under projects/ (review-change.md)."
             fi
           }
-          kind="" build_run="" held=false triage=false
+          kind="" build_run="" held=false triage=false refused=false
           if [ "${EVENT:-}" = workflow_run ]; then
             if [ "$RUN_PATH" = .github/workflows/triage.yaml ]; then
               [ "$projects" = true ] || stop "Nothing runs: pull request $PR touches nothing under projects/, so it gets no triage comment."
@@ -742,6 +818,7 @@ jobs:
             if [ "$held" = true ]; then echo "held=true"; fi
             if [ -n "$build_run" ]; then echo "build_run=$build_run"; fi
             if [ "$triage" = true ]; then echo "triage=true"; fi
+            if [ "$refused" = true ]; then echo "refused=true"; fi
           } >> "$GITHUB_OUTPUT"
           say "$message"
           if [ "$triage" = true ] && [ "${EVENT:-}" != workflow_run ]; then
@@ -750,7 +827,7 @@ jobs:
 
       # Whether the review may run on its own, or the screen reads the pull request or the issue first (the top of
       # this file). Write access is what GitHub's collaborator permission API answers: admin or write (maintain is
-      # write). Membership of the organisation alone is not write access. The Apps in ALLOWED_BOTS count as having it.
+      # write). Membership of the organisation alone is not write access. The Apps in WRITER_BOTS count as having it.
       - name: Whether the author and the account that started the run have write access
         id: trust
         if: steps.decide.outputs.kind != '' || steps.decide.outputs.measure == 'true'
@@ -768,12 +845,12 @@ jobs:
           set -euo pipefail
           say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
           # trusted
-          # trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
+          # trusted <login>: 0 when <login> is one of the WRITER_BOTS, or an account that GitHub's collaborator
           # permission API gives admin or write; 1 when it is neither; 2 when the API could not say.
           trusted() {
             local permission
             [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
-            [[ ,$ALLOWED_BOTS, != *",$1,"* ]] || return 0
+            [[ ,$WRITER_BOTS, != *",$1,"* ]] || return 0
             [[ $1 != *'[bot]' ]] || return 1
             permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
             [[ $permission == admin || $permission == write ]]
@@ -875,6 +952,8 @@ jobs:
       TRUST: ${{ needs.route.outputs.trust }}
       # true when route found held runs at the head: a run by hand that only screens, and approves on a clean verdict.
       HELD_RUNS: ${{ needs.route.outputs.held }}
+      # true when the review's action refuses the App that started the run (route's refused).
+      REFUSED: ${{ needs.route.outputs.refused }}
       PR: ${{ needs.route.outputs.pr }}
       ISSUE: ${{ needs.route.outputs.issue }}
       HEAD_SHA: ${{ needs.route.outputs.sha }}
@@ -900,6 +979,13 @@ jobs:
       # The project that take-project took. Its step gives it at once, so that it is set when a later step fails. It is
       # empty for a change, an issue, and an enrollment whose project take-project did not take.
       name: ${{ steps.project.outputs.name }}
+      # For an enrollment whose project take-project took: how many files the pull request changes outside
+      # projects/<name>/ (take-project's outside), which the review judges by review-change.md too, and which the
+      # comment job's check run review reads. 0 for a fork's enrollment.
+      outside: ${{ steps.project.outputs.outside }}
+      # The kind this job gathered (its project step): route's, or change when take-project took no project. Every
+      # later job reads it in place of route's, when it is set.
+      kind: ${{ steps.project.outputs.kind }}
       # The report of the fuzz targets' checks from the Build run's results, for the review comment.
       checks: ${{ steps.build.outputs.checks }}
       # The binaries' sizes from the Build run's results (take-build-results), for the record of the review that the
@@ -928,11 +1014,15 @@ jobs:
       - if: steps.start.outputs.moved != 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
-      # The kind this job gathers, its output kind, which every later step reads: route's, or change on a held head
-      # whose project take-project did not take (the top of this file). For an enrollment it takes projects/<name>/
-      # as the build does. When take-project refuses the pull request on a head that is not held, this job fails, as
-      # the build does. When it takes no project there (nothing to build, or not an enrollment), the step gives no
-      # kind: the job keeps nothing, and no screen, review or comment runs.
+      # The kind this job gathers, its output kind, which every later job reads in place of route's: route's, or change
+      # when take-project took no project (the top of this file). For an enrollment it takes projects/<name>/ as the
+      # build does. When take-project refuses the pull request on a head that is not held, this job fails, as the build
+      # does. When it takes no project, a held head or not (a pull request that changes several projects or only removes
+      # one, a fork's too, say), the pull request is gathered and reviewed as a change: the screen reads each changed
+      # file, the review checks review-change.md, and the check run review is posted from that review, as for any
+      # change. A change that an App outside ALLOWED_BOTS opened (route's refused, Copilot's say) is the exception:
+      # the review's action refuses its run, so nothing is gathered, reviewed or held, as on main before the check run
+      # review.
       - name: Take projects/<name>/ from the pull request, as the build did
         id: project
         if: steps.start.outputs.moved != 'true'
@@ -953,11 +1043,17 @@ jobs:
             fi
           elif (( code != 0 )); then
             exit "$code"
+          elif [ -z "$name" ] && [ "${REFUSED:-}" = true ]; then
+            echo "take-project took no project, and the review's action refuses the App that started the run: nothing is gathered, and nothing reviews or holds the pull request."
+            exit 0
           elif [ -z "$name" ]; then
-            echo "take-project took no project (its log above): nothing is kept, so no screen, review or comment runs."
+            echo "take-project took no project (its log above): the pull request is gathered and reviewed as a change."
+            echo "kind=change" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          { echo "name=$name"; echo "kind=enrollment"; } >> "$GITHUB_OUTPUT"
+          outside=$(sed -n 's/^outside=//p' "$taken")
+          [[ $outside =~ ^[0-9]+$ ]] || { echo "::error::take-project gave no count of the files outside projects/$name/."; exit 1; }
+          { echo "name=$name"; echo "kind=enrollment"; echo "outside=$outside"; } >> "$GITHUB_OUTPUT"
       - name: Restore the last review's session and the head it reviewed
         if: steps.project.outputs.kind == 'enrollment'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 (sha-pinned)
@@ -997,6 +1093,7 @@ jobs:
           REPO: ${{ github.repository }}
           KIND: ${{ steps.project.outputs.kind }}
           NAME: ${{ steps.project.outputs.name }}
+          OUTSIDE: ${{ steps.project.outputs.outside }}
           COMMIT: ${{ steps.build.outputs.commit }}
           BUILD: ${{ steps.build.outputs.build }}
           BINARIES: ${{ steps.build.outputs.binaries }}
@@ -1053,26 +1150,26 @@ jobs:
         run: |
           set -uo pipefail
           # trusted
-          # trusted <login>: 0 when <login> is one of the ALLOWED_BOTS, or an account that GitHub's collaborator
+          # trusted <login>: 0 when <login> is one of the WRITER_BOTS, or an account that GitHub's collaborator
           # permission API gives admin or write; 1 when it is neither; 2 when the API could not say.
           trusted() {
             local permission
             [[ $1 =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || return 1
-            [[ ,$ALLOWED_BOTS, != *",$1,"* ]] || return 0
+            [[ ,$WRITER_BOTS, != *",$1,"* ]] || return 0
             [[ $1 != *'[bot]' ]] || return 1
             permission=$(gh api "repos/$REPO/collaborators/$1/permission" --jq .permission) || return 2
             [[ $permission == admin || $permission == write ]]
           }
           # end of trusted
           # writer <login> <url>: whether trusted says 0. gh's pull request and issue JSON names an App without its
-          # [bot]: such a name, of one of the ALLOWED_BOTS, is that App when the comment at <url> is, by the REST API,
+          # [bot]: such a name, of one of the WRITER_BOTS, is that App when the comment at <url> is, by the REST API,
           # a Bot's of that name with [bot]. An account's type never changes, so no user named so, or renamed so, is
           # taken for the App.
           writer() {
             local rc=0 id
             trusted "$1" || rc=$?
             (( rc != 0 )) || return 0
-            [[ ,$ALLOWED_BOTS, == *",$1[bot],"* && $2 =~ \#issuecomment-([0-9]+)$ ]] || return 1
+            [[ ,$WRITER_BOTS, == *",$1[bot],"* && $2 =~ \#issuecomment-([0-9]+)$ ]] || return 1
             id=${BASH_REMATCH[1]}
             [ "$(gh api "repos/$REPO/issues/comments/$id" --jq '"\(.user.login) \(.user.type)"' 2> /dev/null)" = "$1[bot] Bot" ]
           }
@@ -1320,7 +1417,7 @@ jobs:
     # it too: read-only, on the runs of a public repository.
     permissions: {contents: read, pull-requests: read, issues: read, checks: read, statuses: read, actions: read, id-token: write}
     env:
-      KIND: ${{ needs.route.outputs.kind }}
+      KIND: ${{ needs.gather.outputs.kind || needs.route.outputs.kind }}
       PR: ${{ needs.route.outputs.pr }}
       ISSUE: ${{ needs.route.outputs.issue }}
       NAME: ${{ needs.gather.outputs.name }}
@@ -1360,11 +1457,15 @@ jobs:
       # Enrollment review from them. No file and no artifact holds them.
       verdicts: ${{ steps.result.outputs.verdicts }}
       reasons: ${{ steps.result.outputs.reasons }}
+      # The verdicts and choices of review-change.md, as one line of JSON: of a change, and of the files of an
+      # enrollment outside its projects/<name>/ (the gather job's outside). The comment job posts the check run review
+      # from them (.github/scripts/review-check).
+      change: ${{ steps.result.outputs.change }}
       # The id of the artifact enroll-review-session, which the session job saves in the cache; empty when no session
       # is kept.
       session: ${{ steps.session.outputs.artifact-id }}
       # Its kind, which the session job reads to select the cache key; it does not read the event.
-      kind: ${{ needs.route.outputs.kind }}
+      kind: ${{ needs.gather.outputs.kind || needs.route.outputs.kind }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
         with: {persist-credentials: false, fetch-depth: 0}
@@ -1484,6 +1585,7 @@ jobs:
         env:
           SESSION: ${{ needs.gather.outputs.session }}
           LAST: ${{ needs.gather.outputs.last }}
+          OUTSIDE: ${{ needs.gather.outputs.outside }}
         run: .github/scripts/review-prompt
       # An empty or other value would send the gateway's token elsewhere: Claude Code's default is Anthropic's own API.
       - name: Check the model gateway's URL
@@ -1597,6 +1699,25 @@ jobs:
             done
             echo "reasons=$reasons" >> "$GITHUB_OUTPUT"
           fi
+          # The verdicts and choices of review-change.md, for the check run review (.github/scripts/review-check): a
+          # change's own, or an enrollment's `change`, of its files outside projects/<name>/; null when there are none.
+          # Only the five checks' verdicts of a word, and the four keys of each choice, are kept. Over 20 choices, the
+          # choices are kept as a text, which review-check cannot read, so that a cut list never drops a reserved one.
+          # The text of each choice and basis is cut to 1,000 characters, and to half of that as often as it takes.
+          for limit in 1000 500 250 125 62 0; do
+            change=$(jq -c --argjson n "$limit" '(if env.KIND == "change" then {verdicts, choices} else .change end)
+              | if type == "object" then
+                  {verdicts: (.verdicts | if type == "object" then with_entries(select((.key | test("\\A[1-5]\\z"))
+                     and (.value | type == "string" and length <= 8))) else {} end),
+                   choices: (.choices | if type == "array" and length <= 20 then
+                     map(if type == "object" then {check, reserved,
+                       choice: (.choice | if type == "string" then .[0:$n] else null end),
+                       basis: (.basis | if type == "string" then .[0:$n] else null end)} else null end)
+                     else "not read" end)}
+                else null end' <<< "$out")
+            (( $(printf '%s' "$change" | wc -c) > 100000 )) || break
+          done
+          echo "change=$change" >> "$GITHUB_OUTPUT"
           { echo '<!-- held finding -->'; jq -r '.held // ""' <<< "$out"; } > "$RUNNER_TEMP/held-finding.md"
           if jq -e '(.held // "") | test("\\S")' <<< "$out" > /dev/null; then echo "held=yes" >> "$GITHUB_OUTPUT"
           else mkdir -p ~/.claude && printf 'session=%s head=%s\n' "$SESSION" "$HEAD_SHA" > ~/.claude/ossv-last-review; fi
@@ -1671,9 +1792,9 @@ jobs:
     # can act as ossv-app-comment. It runs no code of the pull request. Only after an enrollment's review: a change's or
     # an issue's schema has no held finding, so their runs store none, and the next enrollment's run sends what any
     # earlier run left (so a flood of issues cannot fill this job's one queue below).
-    needs: [route, review]
+    needs: [route, gather, review]
     if: >-
-      ${{ !cancelled() && needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment'
+      ${{ !cancelled() && needs.review.result != 'skipped' && (needs.gather.outputs.kind || needs.route.outputs.kind) == 'enrollment'
       && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -1816,7 +1937,9 @@ jobs:
     # (.github/scripts/review-body); when the review held a finding back, only once the hold job sent it, because the
     # comment says that it was sent. Any other outcome posts no comment and leaves the comment of an earlier head as
     # it is: the review comment stays the App's only comment on an enrollment pull request.
-    # For a change pull request it posts the review's comment the same way, with no check run. For a change pull
+    # For a change pull request it posts the review's comment the same way, with no check run Enrollment review. For
+    # both kinds it posts the check run review of the reviewed head, and a hold of a pull request fails that check run
+    # (the top of this file, and .github/scripts/review-check). For a change pull
     # request or an issue that the screen held, that could not be gathered or screened, whose screened review failed,
     # or that route held at the daily cap: it puts the label review-held on it and posts one comment that says so, in
     # fixed words, which a later hold replaces. The comment says nothing of why, and this job could not: the screen
@@ -1840,13 +1963,14 @@ jobs:
     needs: [route, gather, screen, review, hold]
     if: >-
       ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-      && ((needs.route.outputs.kind == 'enrollment'
+      && (((needs.gather.outputs.kind || needs.route.outputs.kind) == 'enrollment'
            && (needs.gather.outputs.name != '' || needs.route.outputs.trust == 'cap'))
-      || (needs.route.outputs.kind == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
-      || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
+      || ((needs.gather.outputs.kind || needs.route.outputs.kind) == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
+      || ((needs.gather.outputs.kind || needs.route.outputs.kind) == 'issue' && needs.review.result == 'success')
       || (needs.route.outputs.held == 'true' && needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')
       || needs.route.outputs.replay == 'true'
-      || ((needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue' || needs.route.outputs.held == 'true')
+      || (needs.route.outputs.refresh == 'true' && github.event_name == 'workflow_run')
+      || (((needs.gather.outputs.kind || needs.route.outputs.kind) == 'change' || (needs.gather.outputs.kind || needs.route.outputs.kind) == 'issue' || needs.route.outputs.held == 'true')
           && (needs.route.outputs.trust == 'cap'
               || (needs.route.outputs.trust == 'screen' && needs.gather.result == 'failure')
               || (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false'
@@ -1877,7 +2001,7 @@ jobs:
       queue: max
     permissions:
       # contents: read only for the checkout of .github/scripts, main's (review-verdict, review-body, review-neutralize,
-      # approve-held).
+      # review-check, approval.py, artifact.py, approve-held).
       contents: read
       # Only for the GitHub identity token that Google's federation trades for an access token of
       # ossv-app-comment@theorem-agent-root, which reads the App's key. It writes with the oss-verify App's token, not
@@ -1888,7 +2012,7 @@ jobs:
       # (Theorem's infrastructure code).
       GCP_WORKLOAD_IDENTITY_PROVIDER: projects/844532188053/locations/global/workloadIdentityPools/github/providers/github-ossv
       GCP_SERVICE_ACCOUNT: ossv-app-comment@theorem-agent-root.iam.gserviceaccount.com
-      KIND: ${{ needs.route.outputs.kind }}
+      KIND: ${{ needs.gather.outputs.kind || needs.route.outputs.kind }}
       # true when route found held runs at the head: a run by hand that only screens, and approves on a clean verdict.
       # The step "Post the comment and record the verdict" reads it.
       HELD_RUNS: ${{ needs.route.outputs.held }}
@@ -1898,9 +2022,12 @@ jobs:
       # Whether this job replays the merge of a merged pull request: route's replay, true or empty. Then it does that
       # alone.
       REPLAY: ${{ needs.route.outputs.replay }}
+      # Whether this job posts the check run review again after a Review approvals run (route's refresh), and does
+      # that alone.
+      REFRESH: ${{ needs.route.outputs.refresh }}
       # Whether this job holds the item (above) rather than post a review: the review job ran only when the item was
       # not held, and this job runs for such a review only when it succeeded. An approval and a replay hold nothing.
-      HOLDING: ${{ needs.route.outputs.replay != 'true' && needs.review.result != 'success' && !(needs.route.outputs.held == 'true' && needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean') }}
+      HOLDING: ${{ needs.route.outputs.replay != 'true' && needs.route.outputs.refresh != 'true' && needs.review.result != 'success' && !(needs.route.outputs.held == 'true' && needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean') }}
       # Whether this job records the check run Enrollment review: an enrollment whose project the gather job took, or
       # one that route held at the daily cap, on every path, held or not.
       RECORD: ${{ needs.route.outputs.kind == 'enrollment' && (needs.gather.outputs.name != '' || needs.route.outputs.trust == 'cap') }}
@@ -1942,8 +2069,9 @@ jobs:
           delimiter="key-$(openssl rand -hex 16)"
           { echo "key<<$delimiter"; builtin printf '%s\n' "$key"; echo "$delimiter"; } >> "$GITHUB_OUTPUT"
 
-      # One token for every step below but the approval and the replay: checks for the check run Enrollment review,
-      # pull requests for the review comment, and issues for the label review-held and its comment, an issue's too. On
+      # One token for every step below but the approval and the replay: checks for the check runs Enrollment review
+      # and review, pull requests for the review comment and for the reviews that approve a head (review-check), and
+      # issues for the label review-held and its comment, an issue's too. On
       # the approval path (APPROVE) and on a replay (REPLAY) no step uses it: the label step needs HOLDING, the post
       # step does not run on those paths, and the step that takes the label off needs a posted comment, a recorded
       # check run or an issue. So the job makes it on the other paths alone.
@@ -2007,8 +2135,46 @@ jobs:
           echo "$said"
           echo "$said" >> "$GITHUB_STEP_SUMMARY"
 
+      # Only after a Review approvals run (REFRESH, route's refresh): the check run review of route's head again, from
+      # the record of the newest one, with the approvals read now (.github/scripts/review-check --refresh), so a choice
+      # reserved for a person passes once that person approves the head and fails again when the approval is
+      # dismissed or followed by a request for changes. No model runs, and no other step of this job does anything on
+      # this path. It posts only when the conclusion or the title changes.
+      - name: Post the check run review again, with the approvals read now
+        if: env.REFRESH == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ needs.route.outputs.pr }}
+          HEAD_SHA: ${{ needs.route.outputs.sha }}
+        run: |
+          set -euo pipefail
+          [[ ${PR:-} =~ ^[1-9][0-9]*$ && ${HEAD_SHA:-} =~ ^[0-9a-f]{40}$ ]] || { echo "::error::route gave no pull request and head."; exit 1; }
+          # The newest check run review of this pull request at this head that the oss-verify App posted.
+          id=$(gh api --paginate --slurp "repos/$REPO/commits/$HEAD_SHA/check-runs?check_name=review&filter=all&per_page=100" \
+            | jq -r --arg pr "$PR" '[.[].check_runs[] | select(.app.id == 5447700 and .external_id == $pr)] | max_by(.id) | .id // empty')
+          if [ -z "$id" ]; then
+            echo "No check run review of #$PR at $HEAD_SHA: the review of this head posts one."
+            exit 0
+          fi
+          newest=$(gh api "repos/$REPO/check-runs/$id")
+          check=$(RECORD=$(jq -r '.output.text // ""' <<< "$newest") .github/scripts/review-check --refresh)
+          if [ -z "$check" ]; then
+            echo "Check run $id holds no record that an approval changes: nothing is posted."
+            exit 0
+          fi
+          if [ "$(jq -c '[.conclusion, .output.title]' <<< "$check")" = "$(jq -c '[.conclusion, .output.title]' <<< "$newest")" ]; then
+            echo "Check run $id stands: the approvals read now give it the same conclusion and title."
+            exit 0
+          fi
+          jq --arg url "$(jq -r '.details_url // ""' <<< "$newest")" 'if $url == "" then . else . + {details_url: $url} end' <<< "$check" \
+            | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
+          echo "Posted the check run review of #$PR at $HEAD_SHA again: $(jq -r .conclusion <<< "$check")."
+
       # Fixed words: nothing of the pull request, the issue, its account or the screen's reason. Only an item that
-      # gets no check run: the check run Enrollment review records the hold of an enrollment that RECORD names.
+      # gets no check run Enrollment review: that check run records the hold of an enrollment that RECORD names. A
+      # pull request's hold also posts the check run review of its head, failure, with the hold's title
+      # (.github/scripts/review-check): no review of the head gave it a verdict.
       - name: Label it review-held and say so
         if: env.HOLDING == 'true' && env.RECORD != 'true'
         env:
@@ -2024,6 +2190,8 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           # For trust cap: the time the daily cap lets it run (route's output free).
           FREE: ${{ needs.route.outputs.free }}
+          # The check run review's link: this run.
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           [[ $NUMBER =~ ^[1-9][0-9]*$ ]] || { echo "::error::not a number: $NUMBER"; exit 1; }
@@ -2081,15 +2249,29 @@ jobs:
               | gh api --method POST "repos/$REPO/issues/$NUMBER/comments" --input - > /dev/null
           fi
           echo "Held: labelled $HELD_LABEL, and said so."
+          [ -n "${PR:-}" ] || exit 0
+          # The hold as the comment above tells it, from route's trust and the review's result alone: the daily cap, a
+          # review that did not finish, or else the screen, which did not pass it or could not read it.
+          job=""
+          if [ "$TRUST" = cap ]; then hold=cap
+          elif [ "$REVIEW" = failure ] || [ "$REVIEW" = cancelled ]; then hold=failed job=review
+          else hold=screen
+          fi
+          HOLD=$hold JOB=$job .github/scripts/review-check | jq --arg url "$RUN_URL" '. + {details_url: $url}' \
+            | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
+          echo "Posted the check run review of #$PR at $HEAD_SHA: failure ($hold${job:+, the $job job})."
 
       # The review comment of a change pull request; for an enrollment pull request that RECORD names, the check run
       # Enrollment review too, from the same parsed verdicts, on every run this job runs for. The check run also keeps
       # the record of the review in its output.text, which GitHub does not show (.github/scripts/review-verdict's
-      # docstring defines it). Its outputs: posted=true when it posted the review comment, and recorded=true when it
-      # recorded the check run (the step after it then takes a hold off). Nothing on an approval or a replay. On a run
-      # by hand for a held head, a hold records nothing and posts nothing when the newest check run Enrollment review
-      # of the oss-verify App for this pull request at this head is a verdict of the review: that verdict stands. A
-      # hold replaces an earlier hold (below).
+      # docstring defines it). For both, the check run review of the head this run reviewed, which main's ruleset
+      # requires (.github/scripts/review-check): from the hold, or from the review's verdicts and choices, and for an
+      # enrollment whose every file is directly inside projects/<name>/, from the review having run. A change's comment
+      # opens with its title. Its outputs: posted=true when it posted the review comment, and recorded=true when it
+      # recorded the check run Enrollment review (the step after it then takes a hold off). Nothing on an approval or a
+      # replay. On a run by hand for a held head, a hold records nothing and posts nothing when the newest check run
+      # Enrollment review of the oss-verify App for this pull request at this head is a verdict of the review: that
+      # verdict stands. A hold replaces an earlier hold (below).
       - name: Post the comment and record the verdict
         id: post
         if: env.APPROVE != 'true' && (env.RECORD == 'true' || (env.KIND == 'change' && env.HOLDING != 'true'))
@@ -2104,6 +2286,11 @@ jobs:
           REVIEW: ${{ needs.review.outputs.comment }}
           VERDICTS: ${{ needs.review.outputs.verdicts }}
           REASONS: ${{ needs.review.outputs.reasons }}
+          # The verdicts and choices of review-change.md, of a change or of an enrollment's files outside its project,
+          # and how many such files the enrollment changes, for the check run review.
+          CHANGE: ${{ needs.review.outputs.change }}
+          OUTSIDE: ${{ needs.gather.outputs.outside }}
+          NAME: ${{ needs.gather.outputs.name }}
           CHECKS: ${{ needs.gather.outputs.checks }}
           # The checks the screen ran, when it screened this pull request first.
           SCREENED: ${{ needs.gather.outputs.screen != 'false' && needs.screen.outputs.checks || '' }}
@@ -2173,6 +2360,10 @@ jobs:
             verdict=$(HOLD=$hold JOB=$job .github/scripts/review-verdict)
             conclusion=$(jq -r .conclusion <<< "$verdict")
           fi
+          # The check run review, before anything is posted: review-check reads CHANGE, OUTSIDE and NAME, and for a
+          # choice reserved for a person, the pull request's reviews.
+          check=$(HOLD=$hold JOB=$job .github/scripts/review-check)
+          url=""
           if [ -n "$hold" ]; then
             echo "No comment: the review gave no verdicts ($hold${job:+, the $job job}), and an earlier comment stays."
           elif [ "$current" != "$HEAD_SHA" ]; then
@@ -2180,31 +2371,44 @@ jobs:
           else
             rules=review-change.md
             [ "$RECORD" != true ] || rules=review.md
-            CONCLUSION=$conclusion RULES=$rules .github/scripts/review-body > "$RUNNER_TEMP/comment.md"
+            CONCLUSION=$conclusion RULES=$rules TITLE=$(jq -r .output.title <<< "$check") .github/scripts/review-body \
+              > "$RUNNER_TEMP/comment.md"
             # Ours is the oss-verify App's comment that starts with the marker.
             existing=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
               --jq '.[] | select(.user.login == "oss-verify[bot]" and (.body | startswith("<!-- oss-verify-review -->"))) | .id')
             existing=${existing%%$'\n'*}
             if [ -n "$existing" ]; then
-              jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
-                | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input - > /dev/null
+              answer=$(jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
+                | gh api --method PATCH "repos/$REPO/issues/comments/$existing" --input -)
             else
-              jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
-                | gh api --method POST "repos/$REPO/issues/$PR/comments" --input - > /dev/null
+              answer=$(jq -n --rawfile body "$RUNNER_TEMP/comment.md" '{body: $body}' \
+                | gh api --method POST "repos/$REPO/issues/$PR/comments" --input -)
             fi
+            # The comment's address, for the check run review; none when GitHub's answer gives none.
+            url=$(jq -r 'if type == "object" then .html_url // "" else "" end' <<< "$answer" 2> /dev/null) || url=""
+            [[ $url =~ ^https://github\.com/[A-Za-z0-9_./#-]+$ ]] || url=""
             echo "posted=true" >> "$GITHUB_OUTPUT"
           fi
-          [ "$RECORD" = true ] || exit 0
-          # The one record of the verdict, at the head this run reviewed. It names its pull request: external_id is
-          # the pull request's number, so that a second pull request at the same commit has a check run of its own.
-          # enroll-dispatch reads it. Its output.text is the record of the review that review-verdict made. jq reads
-          # the verdict on its standard input: as an argument it can be more than the 131,072 bytes Linux takes in one.
-          jq --arg head "$HEAD_SHA" --arg pr "$PR" --arg url "$RUN_URL" \
-            '{name: "Enrollment review", head_sha: $head, external_id: $pr, status: "completed", conclusion: .conclusion,
-              details_url: $url, output: {title: .title, summary: .summary, text: .text}}' <<< "$verdict" \
-            | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
-          echo "recorded=true" >> "$GITHUB_OUTPUT"
-          echo "Recorded the check run Enrollment review of #$PR at $HEAD_SHA: $conclusion."
+          if [ "$RECORD" = true ]; then
+            # The one record of the verdict, at the head this run reviewed. It names its pull request: external_id is
+            # the pull request's number, so that a second pull request at the same commit has a check run of its own.
+            # enroll-dispatch reads it. Its output.text is the record of the review that review-verdict made. jq reads
+            # the verdict on its standard input: as an argument it can be more than the 131,072 bytes Linux takes in
+            # one.
+            jq --arg head "$HEAD_SHA" --arg pr "$PR" --arg url "$RUN_URL" \
+              '{name: "Enrollment review", head_sha: $head, external_id: $pr, status: "completed", conclusion: .conclusion,
+                details_url: $url, output: {title: .title, summary: .summary, text: .text}}' <<< "$verdict" \
+              | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
+            echo "recorded=true" >> "$GITHUB_OUTPUT"
+            echo "Recorded the check run Enrollment review of #$PR at $HEAD_SHA: $conclusion."
+          fi
+          # The check run review of the head this run reviewed, whichever head the pull request has now: it links the
+          # review comment when this run posted it, else this run.
+          links="[This run]($RUN_URL)"
+          [ -z "$url" ] || links="[The review comment]($url) · $links"
+          jq --arg url "${url:-$RUN_URL}" --arg links "$links" '. + {details_url: $url} | .output.summary += "\n\n" + $links' \
+            <<< "$check" | gh api --method POST "repos/$REPO/check-runs" --input - > /dev/null
+          echo "Posted the check run review of #$PR at $HEAD_SHA: $(jq -r .conclusion <<< "$check")."
 
       # A review replaces a hold of a change pull request or an issue: one a maintainer started, or a later push that
       # the screen passed; for an issue, a review that made its draft. The label comes off, and the hold comment goes.
@@ -2255,7 +2459,9 @@ jobs:
     # Writes the triage comment of a pull request that touches projects/, after a Triage run that ended success, or on
     # a run by hand that a person starts (route's output triage). It reads the pull request through the GitHub API, as
     # data, with a read-only token. Its checkout is main, never the pull request, so no code from the pull request
-    # runs. It must never be given id-token: write, nor an environment.
+    # runs. Nor does code from src/, which has no code owner: the triage job posts this job's output, so triage.py
+    # takes the rules of oss-verify validate from .github/scripts/validate_rules/ (tests/test_token_jobs.py). It must
+    # never be given id-token: write, nor an environment.
     needs: route
     if: needs.route.outputs.triage == 'true'
     runs-on: ubuntu-latest
@@ -2275,8 +2481,6 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ needs.route.outputs.pr }}
-          # triage.py imports oss_verify.validate, from this repository's src/.
-          PYTHONPATH: ${{ github.workspace }}/src
         run: |
           dpkg -s python3-yaml > /dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq python3-yaml; }
           # A random delimiter, so that no text in the comment can end the output early.
@@ -2410,17 +2614,17 @@ jobs:
           # the item (its output digest) and its output screen is not false; the review when route did not hold it at
           # the daily cap either, the head is not held, and gather kept it and its output screen is false, or the
           # screen's verdict is clean; the session when the review kept one; hold when an enrollment's review ran;
-          # comment on every run of an enrollment whose gather job took the project or that route held at the daily
-          # cap (the check run Enrollment review), when the review wrote a change's comment, when the review of an
-          # issue made its draft (the comment job takes a hold off it), when the screen passed a held head (the
-          # approval), when a run by hand replays a merge (route's replay), or when a change, an issue or a held head
-          # is held (route's cap, a screen that held it or failed, a screened review that failed, or no gathered item
-          # to read). triage-gather is asked for when route asked for the triage comment, and triage when triage-gather
-          # wrote one. The jobs that sign in (screen, review, hold, comment and triage) are never asked for on a run by
-          # hand on another branch than main. So a held item passes this check when the comment job recorded the hold:
-          # a screen's hold or the daily cap. It also passes when, on a run by hand for a held head whose verdict of the
-          # review stands, the comment job recorded nothing. A gather, screen, review (after its second attempt), hold
-          # or comment job that failed fails it, held or not.
+          # comment on every run of an enrollment whose gather job took the project or that route held at the daily cap
+          # (the check run Enrollment review), when the review wrote a change's comment, when the review of an issue
+          # made its draft (the comment job takes a hold off it), when the screen passed a held head (the approval),
+          # when a run by hand replays a merge (route's replay), or when a change, an issue or a held head is held
+          # (route's cap, a screen that held it or failed, a screened review that failed, or no gathered item to read).
+          # triage-gather is asked for when route asked for the triage comment, and triage when triage-gather wrote one.
+          # The jobs that sign in (screen, review, hold, comment and triage) are never asked for on a run by
+          # hand on another branch than main; after a Review approvals run, comment alone is asked for. So a held item
+          # passes this check when the comment job recorded the hold: a screen's hold or the daily cap. It also passes
+          # when, on a run by hand for a held head whose verdict of the review stands, the comment job recorded nothing.
+          # A gather, screen, review (after its second attempt), hold or comment job that failed fails it, held or not.
           GATHER: ${{ needs.gather.result }}
           ASKED_GATHER: >-
             ${{ needs.route.result == 'success'
@@ -2447,18 +2651,19 @@ jobs:
           ASKED_SESSION: ${{ needs.review.outputs.session != '' }}
           HOLD: ${{ needs.hold.result }}
           ASKED_HOLD: >-
-            ${{ needs.review.result != 'skipped' && needs.route.outputs.kind == 'enrollment'
+            ${{ needs.review.result != 'skipped' && (needs.gather.outputs.kind || needs.route.outputs.kind) == 'enrollment'
             && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
           COMMENT: ${{ needs.comment.result }}
           ASKED_COMMENT: >-
             ${{ (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')
-            && ((needs.route.outputs.kind == 'enrollment'
+            && (((needs.gather.outputs.kind || needs.route.outputs.kind) == 'enrollment'
                  && (needs.gather.outputs.name != '' || needs.route.outputs.trust == 'cap'))
-            || (needs.route.outputs.kind == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
-            || (needs.route.outputs.kind == 'issue' && needs.review.result == 'success')
+            || ((needs.gather.outputs.kind || needs.route.outputs.kind) == 'change' && needs.review.result == 'success' && needs.review.outputs.comment != '')
+            || ((needs.gather.outputs.kind || needs.route.outputs.kind) == 'issue' && needs.review.result == 'success')
             || (needs.route.outputs.held == 'true' && needs.screen.result == 'success' && needs.screen.outputs.verdict == 'clean')
             || needs.route.outputs.replay == 'true'
-            || ((needs.route.outputs.kind == 'change' || needs.route.outputs.kind == 'issue' || needs.route.outputs.held == 'true')
+            || (needs.route.outputs.refresh == 'true' && github.event_name == 'workflow_run')
+            || (((needs.gather.outputs.kind || needs.route.outputs.kind) == 'change' || (needs.gather.outputs.kind || needs.route.outputs.kind) == 'issue' || needs.route.outputs.held == 'true')
                 && (needs.route.outputs.trust == 'cap'
                     || (needs.route.outputs.trust == 'screen' && needs.gather.result == 'failure')
                     || (needs.gather.result == 'success' && needs.gather.outputs.digest != '' && needs.gather.outputs.screen != 'false'

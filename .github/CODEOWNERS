@@ -1,42 +1,18 @@
-# Agent instructions and skills at any depth; a pattern further down decides the owner of a file it also matches.
+# The last pattern that matches a file decides its owners. The ruleset of main requires a code owner's approval of
+# each change to an owned file.
+# Files with no owner on purpose: the files that no pattern matches (most files of src/, tests/, docs/ and
+# projects/), and the files of the two lines with no owner, which only owned workflows read, in jobs that hold only
+# read permissions.
 **/AGENTS.md @theorem-labs/engineering @theorem-labs/research
 **/CLAUDE.md @theorem-labs/engineering @theorem-labs/research
 **/SKILL.md @theorem-labs/engineering @theorem-labs/research
 skills/ @theorem-labs/engineering @theorem-labs/research
-
-# review.md, review-change.md and review-issue.md say what the enrollment review and the change review check, and what
-# the draft reply to an issue says (.github/workflows/review.yml reads main's copies), and
-# .claude/skills/write-to-maintainer/ says how every message to a maintainer is written and checked.
-#
-# The other lines own each file that changes what a workflow runs or what a verdict is, whoever opens the pull request:
-#   /.github/                     the workflows and the scripts they run.
-#   /src/                         the oss_verify package: `oss-verify check` and `oss-verify validate`.
-#   /infra/                       the toolchains `oss-verify check` builds with (infra/toolchains.tsv,
-#                                 infra/base-builder/), and the code it runs in build containers (infra/checks/).
-#   /seeds/                       the seeded projects, which `oss-verify check` builds as it builds projects/.
-#   .claude/, CLAUDE*.md,         what Claude Code loads in the review job, which holds an identity token: settings
-#   AGENTS*.md (at any depth),    and hooks, skills, instructions and MCP servers.
-#   /.mcp.json
-#   /*.py, /pyproject.toml,       what python3 and pytest load from the top of the checkout, and the Python and
-#   /uv.lock, /.python-version    dependency versions that `uv run oss-verify` installs. Each python3 -c and -m of
-#   and pytest's configuration    the workflows runs with -P, or with PYTHONSAFEPATH=1, which does the same (the
-#   files                         pytest-xdist workers of tests.yaml), so no new directory at the top shadows a
-#                                 module, and tests.yaml runs pytest with -c pyproject.toml, so it reads no other
-#                                 configuration file.
-# A pull request from a fork that changes no file under projects/ passes the enrollment checks, and tests.yaml runs the
-# fork's own copy of itself, so these lines are what keeps such a change from merging on one person's reading.
-#
-# The ruleset of main requires a code owner's approval, so a change to any of these files, or to this file, which says
-# who owns them, needs the approval of a member of @theorem-labs/engineering or of @theorem-labs/research, each a team
-# of people: research holds the people who were on engineering, and engineering is kept beside it. No other file has an
-# owner but an AGENTS.md, CLAUDE.md or SKILL.md file or a file under a directory named skills, at any depth, which the
-# patterns at the top of the file give the same owners, so a change to tests/, docs/ or one projects/<name>/ needs no
-# code owner unless it adds or changes such a file.
-# These lines stay the last patterns of the file: the last pattern that matches a file decides its owner.
 /.github/ @theorem-labs/engineering @theorem-labs/research
-/src/ @theorem-labs/engineering @theorem-labs/research
+/.github/actionlint.yaml
+/.github/scripts/frame-pointers/
 /infra/ @theorem-labs/engineering @theorem-labs/research
 /seeds/ @theorem-labs/engineering @theorem-labs/research
+/docs/seeded-projects.tsv @theorem-labs/engineering @theorem-labs/research
 .claude/ @theorem-labs/engineering @theorem-labs/research
 CLAUDE*.md @theorem-labs/engineering @theorem-labs/research
 AGENTS*.md @theorem-labs/engineering @theorem-labs/research
@@ -50,6 +26,7 @@ AGENTS*.md @theorem-labs/engineering @theorem-labs/research
 /setup.cfg @theorem-labs/engineering @theorem-labs/research
 /tox.ini @theorem-labs/engineering @theorem-labs/research
 /review.md @theorem-labs/engineering @theorem-labs/research
+/app/sentences.yaml @theorem-labs/engineering @theorem-labs/research
 /review-change.md @theorem-labs/engineering @theorem-labs/research
 /review-issue.md @theorem-labs/engineering @theorem-labs/research
 /.claude/skills/write-to-maintainer/ @theorem-labs/engineering @theorem-labs/research

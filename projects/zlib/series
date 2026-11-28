@@ -6,3 +6,8 @@ zlib-gzio_fuzzer.0003-oss-fuzz-16316.patch
 zlib-gzio_fuzzer.0004-oss-fuzz-16411.patch
 zlib-minigzip_fuzzer.0002-oss-fuzz-16428.patch
 zlib-minigzip_fuzzer.0003-oss-fuzz-16429.patch
+zlib-minigzip_fuzzer.0004-uncompress-failure-skips-check.patch
+zlib-sysfail_fuzzer.0001-inflate-memerr-totals.patch
+zlib-sysfail_fuzzer.0002-gz_fetch-copy-partial-output-after-read-error.patch
+zlib-sysfail_fuzzer.0003-gzseek64-overflow-after-initial-pushback.patch
+zlib-sysfail_fuzzer.0004-gzwrite-finish-reset-on-failed-write.patch

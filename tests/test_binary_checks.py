@@ -11,9 +11,9 @@ import struct
 import subprocess
 import tempfile
 import time
-import unittest
-import unittest.mock
 import zipfile
+
+import pytest
 
 from oss_verify import check_binaries
 from oss_verify import check_links
@@ -28,8 +28,13 @@ ASAN = ["__asan_init", "__asan_version_mismatch_check_v8", "__asan_load4"]
 # The release's fixed UBSan flags (infra/base-builder/toolchain.sh), and a compile's arguments with and without them.
 UBSAN_FLAGS = ["-fsanitize=undefined", "-fno-sanitize-recover=all", "-fsanitize-trap=all", "-fno-sanitize=function"]
 BASE = ["-march=rv64g", "-mabi=lp64d", "-Os", "-g", "-ffunction-sections", "-fdata-sections"]
-# Each line end that str.splitlines() knows but "\n" (MapParsing.test_other_line_ends checks that the tuple is whole).
+# Each line end that str.splitlines() knows but "\n" (TestMapParsing.test_other_line_ends checks the tuple is whole).
 OTHER_LINE_ENDS = ("\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+
+
+def code_point(character):
+    """The test id of a character, such as a line end of OTHER_LINE_ENDS: its code point, as U+000D for "\\r"."""
+    return f"U+{ord(character):04X}"
 
 
 def compile_arguments(source, flags=UBSAN_FLAGS, after=()):
@@ -201,7 +206,7 @@ def good(name="f"):
     return elf_object(NOP, defined=[name], undefined=ASAN, files=["lib.c"], comment=True)
 
 
-class MapParsing(unittest.TestCase):
+class TestMapParsing:
     def test_input_sections_and_members(self):
         text = "\n".join([
             map_line(0x10000, 0x10, "/opt/musl-sysroot/usr/lib/crt1.o:(.text)"),
@@ -212,10 +217,10 @@ class MapParsing(unittest.TestCase):
             map_line(0, 0x2b, "/opt/rt/libclang_rt.asan_static.a(asan_rtl_static.cpp.o):(.debug_info)"),
             map_line(0x2b, 0x15, "/work/build/libfoo.a(bar.c.o):(.debug_info)"),
         ])
-        self.assertEqual(check_links.parse_map(text), ([
+        assert check_links.parse_map(text) == ([
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
             ("/work/build/libfoo.a", "foo.c.o", ".text.foo", 0x20),
-        ], 5))
+        ], 5)
 
     def test_a_tbss_overlap_does_not_end_the_loaded_part(self):
         """lld overlaps a .tbss input section with what follows it, so the address falls between two sections the
@@ -225,10 +230,10 @@ class MapParsing(unittest.TestCase):
             map_line(0x4551b0, 0x8, "/opt/musl-sysroot/usr/lib/libc++.a(iostream.cpp.o):(.init_array.100)"),
             map_line(0, 0x20, "/opt/musl-sysroot/usr/lib/libc++.a(iostream.cpp.o):(.debug_info)"),
         ])
-        self.assertEqual(check_links.parse_map(text), ([
+        assert check_links.parse_map(text) == ([
             ("/work/build/liboft.a", "shim.o", ".tbss.state", 0x10),
             ("/opt/musl-sysroot/usr/lib/libc++.a", "iostream.cpp.o", ".init_array.100", 0x8),
-        ], 3))
+        ], 3)
 
     def test_read_counts_the_shape_and_not_the_loading(self):
         """`read` counts the lines in the shape of an input section, loaded or not, and <internal> ones too. A line
@@ -243,33 +248,31 @@ class MapParsing(unittest.TestCase):
             map_line(0, 0x10, "/work/build/libfoo.a(bar.c.o)"),
             map_line(0x10, 0x10, "/work/build/libfoo.a(bar.c.o):(.debug_info)"),
         ])
-        self.assertEqual(check_links.parse_map(text), ([
+        assert check_links.parse_map(text) == ([
             ("/opt/musl-sysroot/usr/lib/crt1.o", None, ".text", 0x10),
-        ], 3))
+        ], 3)
 
     def test_other_line_ends(self):
         """OTHER_LINE_ENDS holds each character at which str.splitlines() splits, but "\\n", and each of them once."""
         every = "".join(map(chr, range(0x110000)))
-        self.assertEqual([line[-1] for line in every.splitlines(keepends=True)[:-1]],
-                         sorted(("\n",) + OTHER_LINE_ENDS))
+        assert [line[-1] for line in every.splitlines(keepends=True)[:-1]] == sorted(("\n",) + OTHER_LINE_ENDS)
 
-    def test_a_path_that_holds_another_line_end_is_kept(self):
+    @pytest.mark.parametrize("separator", OTHER_LINE_ENDS, ids=code_point)
+    def test_a_path_that_holds_another_line_end_is_kept(self, separator):
         """str.splitlines() splits at each line end that it knows but "\\n" (OTHER_LINE_ENDS), and nothing refuses these
         characters in a path of the map. The map is split at "\\n" only, so the input section of a path that holds one
         of them is kept and counted in `read`."""
-        for separator in OTHER_LINE_ENDS:
-            with self.subTest(separator=f"U+{ord(separator):04X}"):
-                text = "\n".join([
-                    map_line(0x10000, 0x10, f"/work/obj/a{separator}b.o:(.text.f)"),
-                    map_line(0x10010, 0x20, f"/work/obj/lib{separator}x.a(m{separator}.o):(.text.g)"),
-                ]) + "\n"
-                self.assertEqual(check_links.parse_map(text), ([
-                    (f"/work/obj/a{separator}b.o", None, ".text.f", 0x10),
-                    (f"/work/obj/lib{separator}x.a", f"m{separator}.o", ".text.g", 0x20),
-                ], 2))
+        text = "\n".join([
+            map_line(0x10000, 0x10, f"/work/obj/a{separator}b.o:(.text.f)"),
+            map_line(0x10010, 0x20, f"/work/obj/lib{separator}x.a(m{separator}.o):(.text.g)"),
+        ]) + "\n"
+        assert check_links.parse_map(text) == ([
+            (f"/work/obj/a{separator}b.o", None, ".text.f", 0x10),
+            (f"/work/obj/lib{separator}x.a", f"m{separator}.o", ".text.g", 0x20),
+        ], 2)
 
 
-class RealRecord(unittest.TestCase):
+class TestRealRecord:
     """The reading of a record that a build wrote, not one written here: tests/fixtures/link-record/.
 
     The record is the plain build's link of curl's fuzz_bufq, from the enrollment build of projects/curl at
@@ -287,7 +290,8 @@ class RealRecord(unittest.TestCase):
     EMPTIED = ["libbrotlicommon.a", "libbrotlidec.a", "libcrypto.a", "libnghttp2.a", "libssl.a", "libz.a",
                "libzstd.a"]
 
-    def setUp(self):
+    @pytest.fixture(autouse=True)
+    def set_up(self):
         self.map, self.inputs = self.fixture()
 
     @classmethod
@@ -336,36 +340,35 @@ class RealRecord(unittest.TestCase):
 
     def test_the_sections_that_reach_the_binary(self):
         taken, read = check_links.parse_map(self.map)
-        self.assertEqual(len(taken), 224)
-        self.assertEqual(self.names(taken), self.IN_BINARY)
-        self.assertEqual(read, 7865)
+        assert len(taken) == 224
+        assert self.names(taken) == self.IN_BINARY
+        assert read == 7865
 
     def test_the_sections_that_are_not_loaded_are_read_and_dropped(self):
         """The control: the part of the same record that the linker does not load, from the first line at the
         address 0, is 7,632 real lines naming the seven archives, and not one of them is taken."""
         lines = self.map.splitlines()
         tail = "\n".join(lines[self.unloaded(lines):])
-        self.assertEqual(len(tail.splitlines()), 7632)
-        self.assertTrue(all(any(f"/{name}(" in line for line in tail.splitlines()) for name in self.EMPTIED))
-        self.assertEqual(check_links.parse_map(tail), ([], 7632))
+        assert len(tail.splitlines()) == 7632
+        assert all(any(f"/{name}(" in line for line in tail.splitlines()) for name in self.EMPTIED)
+        assert check_links.parse_map(tail) == ([], 7632)
 
-    def test_the_list_of_the_toolchain_image_s_files(self):
+    def test_the_list_of_the_toolchain_image_s_files(self, tmp_path):
         """The uninstrumented list this record gives: the five files of the image whose code is in the binary,
         with the bytes the build recorded, and none of the seven archives it took and left no code of."""
         image, _other = self.split(self.inputs)
         took = {pathlib.PurePosixPath(row.split("\t")[0]).name for row in self.inputs}
-        self.assertTrue(set(self.EMPTIED) <= took, "the link took the archives the list must leave out")
-        with tempfile.TemporaryDirectory() as tmp:
-            record = self.written(pathlib.Path(tmp), self.map, self.inputs)
-            _code, provided, _problems = check_links.project_code(record, image)
-        self.assertEqual(sorted((pathlib.PurePosixPath(p).name, s) for p, s in provided),
-                         sorted((pathlib.PurePosixPath(p).name, s) for p, s in image.items()
-                                if pathlib.PurePosixPath(p).name in self.IN_BINARY))
-        self.assertEqual(sorted(pathlib.PurePosixPath(p).name for p, _s in provided), self.IN_BINARY)
-        self.assertTrue(all(check_links.runtime_kind(p) for p, _s in provided))
+        assert set(self.EMPTIED) <= took, "the link took the archives the list must leave out"
+        record = self.written(tmp_path, self.map, self.inputs)
+        _code, provided, _problems = check_links.project_code(record, image)
+        assert sorted((pathlib.PurePosixPath(p).name, s) for p, s in provided) == \
+            sorted((pathlib.PurePosixPath(p).name, s) for p, s in image.items()
+                   if pathlib.PurePosixPath(p).name in self.IN_BINARY)
+        assert sorted(pathlib.PurePosixPath(p).name for p, _s in provided) == self.IN_BINARY
+        assert all(check_links.runtime_kind(p) for p, _s in provided)
 
 
-class RealRecordWithLibc(unittest.TestCase):
+class TestRealRecordWithLibc:
     """The reading of a record whose build declares its own C library (OV_LIBC): tests/fixtures/link-record/.
 
     The record is the asan build's link of libc_fuzzer, a fuzz target of the test project
@@ -374,7 +377,7 @@ class RealRecordWithLibc(unittest.TestCase):
     map, inputs.tsv, driver and libc as the build wrote them, with the map gzipped (gzip -n -9). It leaves out the
     quiet twin, which no test here reads. The record's libc file declares a copy of the toolchain image's C library,
     whose libc.a has one more member, marker.o. A record written here says what its writer believes a link records,
-    so the reading of the libc file is held against a record a build wrote, for the reason that RealRecord gives.
+    so the reading of the libc file is held against a record a build wrote, for the reason that TestRealRecord gives.
     """
 
     RECORD = pathlib.Path(__file__).resolve().parent / "fixtures/link-record/fxs-libc_fuzzer.asan"
@@ -395,16 +398,15 @@ class RealRecordWithLibc(unittest.TestCase):
     # image's libc.a and crt1.o are not among them: the record has no row for them.
     IN_BINARY = ["clang_rt.crtbegin.o", "libclang_rt.asan.a", "libclang_rt.builtins.a", "libunwind.a"]
 
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = pathlib.Path(tmp.name)
-        self.image, self.other = RealRecord.split((self.RECORD / "inputs.tsv").read_text().splitlines())
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.tmp = tmp_path
+        self.image, self.other = TestRealRecord.split((self.RECORD / "inputs.tsv").read_text().splitlines())
 
     def written(self, skipped=()):
         """read_record on the fixture's record, written in its own $OUT: each file of the fixture, with the map
         decompressed and the paths `skipped` after the driver's paths."""
-        directory = self.tmp / ".records" / RealRecord.DIGEST
+        directory = self.tmp / ".records" / TestRealRecord.DIGEST
         directory.mkdir(parents=True)
         for path in self.RECORD.iterdir():
             if path.name == "map.gz":
@@ -413,11 +415,11 @@ class RealRecordWithLibc(unittest.TestCase):
                 (directory / path.name).write_bytes(path.read_bytes())
         with open(directory / "driver", "a") as stream:
             stream.write("".join(f"{path}\n" for path in skipped))
-        return check_links.read_record(self.tmp, RealRecord.DIGEST)
+        return check_links.read_record(self.tmp, TestRealRecord.DIGEST)
 
     def test_the_libc_file_is_read(self):
         """read_record reads the four rows of the libc file that the build wrote."""
-        self.assertEqual(self.written().libc, self.LIBC)
+        assert self.written().libc == self.LIBC
 
     def test_the_declared_libc_is_provided(self):
         """project_code, with the record's files under /opt as the image. The declared libc.a and crt1.o are among the
@@ -425,30 +427,30 @@ class RealRecordWithLibc(unittest.TestCase):
         problem names OV_LIBC. The other problems are about the project's files, whose bytes the fixture does not
         keep, and this test does not examine them."""
         names = {pathlib.PurePosixPath(real).name for real in self.image}
-        self.assertFalse(names & {"libc.a", "crt1.o"}, "the record has no row for the image's libc.a or crt1.o")
+        assert not names & {"libc.a", "crt1.o"}, "the record has no row for the image's libc.a or crt1.o"
         _code, provided, problems = check_links.project_code(self.written(), self.image)
-        self.assertEqual(sorted(provided),
-                         sorted([(real, sha256) for real, sha256 in self.image.items()
-                                 if pathlib.PurePosixPath(real).name in self.IN_BINARY]
-                                + [self.LIBC[name] for name in self.TOOK]))
-        self.assertEqual([problem for problem in problems if "OV_LIBC" in problem], [])
+        assert sorted(provided) == \
+            sorted([(real, sha256) for real, sha256 in self.image.items()
+                    if pathlib.PurePosixPath(real).name in self.IN_BINARY]
+                   + [self.LIBC[name] for name in self.TOOK])
+        assert [problem for problem in problems if "OV_LIBC" in problem] == []
 
     def test_the_list_names_the_declared_libc(self):
         """analyse with this record as the record of a plain build. The plain build examines none of the project's
         code. The driver file names the project's files that are not of the declared C library, so the reader skips
-        them, as in ReaderKeptNothing, and needs none of their bytes. The list names the image's files whose code is
+        them, as in TestReaderKeptNothing, and needs none of their bytes. The list names the image's files whose code is
         in the binary, and the declared crt1.o and libc.a, with the kind libc and the sha256 of the libc file."""
         declared = {real for real, _sha256 in self.LIBC.values()}
         record = self.written([real for real in self.other if real not in declared])
         result = check_links.analyse({"plain": record}, self.image)["plain"]
-        self.assertEqual(result["instrumented"]["result"], "plain", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "plain", result["instrumented"]["detail"]
         listing = result["uninstrumented"]
-        self.assertEqual([entry["name"] for entry in listing if entry["kind"] != "libc"], self.IN_BINARY)
-        self.assertEqual([entry for entry in listing if entry["kind"] == "libc"],
-                         [{"name": name, "kind": "libc", "sha256": self.LIBC[name][1]} for name in self.TOOK])
+        assert [entry["name"] for entry in listing if entry["kind"] != "libc"] == self.IN_BINARY
+        assert [entry for entry in listing if entry["kind"] == "libc"] == \
+            [{"name": name, "kind": "libc", "sha256": self.LIBC[name][1]} for name in self.TOOK]
 
 
-class ReaderKeptNothing(unittest.TestCase):
+class TestReaderKeptNothing:
     """A map with non-blank lines of which the reader keeps no input section: the record a build wrote, or its parts.
 
     read_record puts the problem on the Record, with the counts and the map's first line. analyse then gives that
@@ -457,29 +459,28 @@ class ReaderKeptNothing(unittest.TestCase):
     image is the record's files under /opt.
     """
 
-    RECORD = RealRecord.RECORD
+    RECORD = TestRealRecord.RECORD
     PLAIN = "the plain build instruments nothing, by design"
     FIRST = "10270            10270       24     4         <internal>:(.note.gnu.build-id)"  # the map's first line
     TAIL_FIRST = "0                0       30     1         <internal>:(.comment)"  # the unloaded part's first line
 
-    def setUp(self):
-        self.map, self.inputs = RealRecord.fixture()
-        self.image, self.other = RealRecord.split(self.inputs)
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.map, self.inputs = TestRealRecord.fixture()
+        self.image, self.other = TestRealRecord.split(self.inputs)
         # The part of the map that the linker does not load.
         lines = self.map.splitlines()
-        at = RealRecord.unloaded(lines)
+        at = TestRealRecord.unloaded(lines)
         self.tail = "\n".join(lines[at:])
         # The <internal> lines of the loaded part.
         self.internal = [line for line in lines[:at]
                          if line[check_links.MAP_COLUMNS.match(line).end():].lstrip(" ").startswith("<internal>")]
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.tmp = pathlib.Path(tmp.name)
+        self.tmp = tmp_path
 
     def read(self, mapping, name="plain", drop=None):
         """read_record on a record with this map and the fixture's inputs and driver, in its own $OUT `name`.
         `drop` is a file of the record to leave out."""
-        return RealRecord.written(self.tmp / name, mapping, self.inputs, self.other, drop)
+        return TestRealRecord.written(self.tmp / name, mapping, self.inputs, self.other, drop)
 
     def analyse(self, records):
         return check_links.analyse(records, self.image)
@@ -493,61 +494,56 @@ class ReaderKeptNothing(unittest.TestCase):
         detail = f"{self.PLAIN}; {problem}" if build == "plain" else problem
         return {"uninstrumented": None, "instrumented": {"result": "error", "detail": detail}}
 
-    def test_the_unloaded_part_alone(self):
-        self.assertEqual(self.tail.splitlines()[0].strip(" \t"), self.TAIL_FIRST)
-        for build in ("plain", "ubsan", "asan", "asan-ubsan"):
-            with self.subTest(build=build):
-                result = self.analyse({build: self.read(self.tail, build)})[build]
-                self.assertEqual(result, self.error(build, self.problem(7632, 7632, self.TAIL_FIRST)))
+    @pytest.mark.parametrize("build", ("plain", "ubsan", "asan", "asan-ubsan"))
+    def test_the_unloaded_part_alone(self, build):
+        assert self.tail.splitlines()[0].strip(" \t") == self.TAIL_FIRST
+        result = self.analyse({build: self.read(self.tail, build)})[build]
+        assert result == self.error(build, self.problem(7632, 7632, self.TAIL_FIRST))
 
-    def test_a_parse_map_that_keeps_nothing(self):
+    @pytest.mark.parametrize("build", ("plain", "ubsan", "asan", "asan-ubsan"))
+    def test_a_parse_map_that_keeps_nothing(self, build, monkeypatch):
         """The check is outside parse_map: a parse_map that keeps nothing, for any reason, is reported too."""
-        self.assertEqual(self.map.splitlines()[0].strip(" \t"), self.FIRST)
-        with unittest.mock.patch.object(check_links, "parse_map", return_value=([], 0)):
-            for build in ("plain", "ubsan", "asan", "asan-ubsan"):
-                with self.subTest(build=build):
-                    result = self.analyse({build: self.read(self.map, build)})[build]
-                    self.assertEqual(result, self.error(build, self.problem(7865, 0, self.FIRST)))
+        assert self.map.splitlines()[0].strip(" \t") == self.FIRST
+        monkeypatch.setattr(check_links, "parse_map", lambda *args, **kwargs: ([], 0))
+        result = self.analyse({build: self.read(self.map, build)})[build]
+        assert result == self.error(build, self.problem(7865, 0, self.FIRST))
 
-    def test_a_map_of_internal_lines_alone(self):
+    @pytest.mark.parametrize("build", ("plain", "ubsan", "asan", "asan-ubsan"))
+    def test_a_map_of_internal_lines_alone(self, build):
         """A map whose loaded lines are all of <internal>: the reader keeps none of them."""
-        self.assertEqual(len(self.internal), 9)
-        self.assertEqual(self.internal[0].strip(" \t"), self.FIRST)
-        for build in ("plain", "ubsan", "asan", "asan-ubsan"):
-            with self.subTest(build=build):
-                result = self.analyse({build: self.read("\n".join(self.internal) + "\n", build)})[build]
-                self.assertEqual(result, self.error(build, self.problem(9, 9, self.FIRST)))
+        assert len(self.internal) == 9
+        assert self.internal[0].strip(" \t") == self.FIRST
+        result = self.analyse({build: self.read("\n".join(self.internal) + "\n", build)})[build]
+        assert result == self.error(build, self.problem(9, 9, self.FIRST))
 
     def test_a_ubsan_build_beside_a_plain_build_with_the_problem(self):
         """A plain build with the problem is no baseline: the ubsan build reads as it does with no plain build."""
         plain, ubsan = self.read(self.tail, "plain"), self.read(self.map, "ubsan")
         beside = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]
-        self.assertEqual(beside, self.analyse({"ubsan": ubsan})["ubsan"])
-        self.assertIn("no plain build to compare the UndefinedBehaviorSanitizer's checks with",
-                      beside["instrumented"]["detail"])
+        assert beside == self.analyse({"ubsan": ubsan})["ubsan"]
+        assert "no plain build to compare the UndefinedBehaviorSanitizer's checks with" in \
+            beside["instrumented"]["detail"]
 
     def test_the_first_line_is_the_first_non_blank_line(self):
         """A map that starts with blank lines: the problem names its first non-blank line, not its first line, without
         its leading and trailing blanks. With those blanks after it, that line does not read as an input section."""
         record = self.read("\n  \n\t\n" + self.tail.replace("\n", " \t\n", 1))
-        self.assertEqual(record.problem, self.problem(7632, 7631, self.TAIL_FIRST))
+        assert record.problem == self.problem(7632, 7631, self.TAIL_FIRST)
 
-    def test_an_empty_map_and_a_blank_map(self):
+    @pytest.mark.parametrize("mapping", ("", "\n  \n\t\n"), ids=("empty", "blank"))
+    def test_an_empty_map_and_a_blank_map(self, mapping):
         """A map with no non-blank line has no problem: the detail is the one it had before."""
-        for mapping in ("", "\n  \n\t\n"):
-            with self.subTest(mapping=mapping):
-                record = self.read(mapping, name=f"map{len(mapping)}")
-                self.assertIsNone(record.problem)
-                self.assertEqual(self.analyse({"plain": record})["plain"]["instrumented"], {
-                    "result": "error", "detail": f"{self.PLAIN}; the link took no file of the toolchain image, and "
-                                                 "every static link takes its C library"})
+        record = self.read(mapping, name=f"map{len(mapping)}")
+        assert record.problem is None
+        assert self.analyse({"plain": record})["plain"]["instrumented"] == {
+            "result": "error", "detail": f"{self.PLAIN}; the link took no file of the toolchain image, and "
+                                         "every static link takes its C library"}
 
-    def test_an_incomplete_record(self):
-        for drop in ("driver", "inputs.tsv"):
-            with self.subTest(drop=drop):
-                with self.assertRaises(check_links.RecordError) as caught:
-                    self.read(self.map, name=drop, drop=drop)
-                self.assertEqual(str(caught.exception), f"the link record is incomplete: {drop} is not there")
+    @pytest.mark.parametrize("drop", ("driver", "inputs.tsv"))
+    def test_an_incomplete_record(self, drop):
+        with pytest.raises(check_links.RecordError) as caught:
+            self.read(self.map, name=drop, drop=drop)
+        assert str(caught.value) == f"the link record is incomplete: {drop} is not there"
 
     def test_a_link_with_no_map_file(self):
         """A record with no map, as check_binaries.record_of reads it: no link record, as before."""
@@ -561,26 +557,26 @@ class ReaderKeptNothing(unittest.TestCase):
         (directory / "driver").write_text((self.RECORD / "driver").read_text())
         reason, _quiet = check_binaries.record_of(raw, "t")
         result = self.analyse({"plain": reason})["plain"]["instrumented"]
-        self.assertEqual(result["result"], "error")
-        self.assertTrue(result["detail"].startswith("no link record: its link has no map, and it is not a Go program"),
-                        result["detail"])
+        assert result["result"] == "error"
+        assert result["detail"].startswith("no link record: its link has no map, and it is not a Go program"), \
+            result["detail"]
 
     def test_the_real_record_is_plain(self):
         record = self.read(self.map)
-        self.assertIsNone(record.problem)
+        assert record.problem is None
         result = self.analyse({"plain": record})["plain"]
-        self.assertEqual(sorted(entry["name"] for entry in result["uninstrumented"]), RealRecord.IN_BINARY)
-        self.assertEqual(result["instrumented"], {"result": "plain", "detail": self.PLAIN})
+        assert sorted(entry["name"] for entry in result["uninstrumented"]) == TestRealRecord.IN_BINARY
+        assert result["instrumented"] == {"result": "plain", "detail": self.PLAIN}
 
 
-class Archives(unittest.TestCase):
+class TestArchives:
     def test_members_with_long_names(self):
         a, b = elf_object(NOP), elf_object(NOP * 2)
         members = check_links.ar_members(archive({"a.o": a, "a_very_long_member_name.c.o": b}))
-        self.assertEqual(members, [("a.o", a), ("a_very_long_member_name.c.o", b)])
+        assert members == [("a.o", a), ("a_very_long_member_name.c.o", b)]
 
     def test_not_an_archive(self):
-        self.assertEqual(check_links.ar_members(b"\x7fELF"), [])
+        assert check_links.ar_members(b"\x7fELF") == []
 
     def test_a_long_name_offset_that_is_not_ascii_digits_is_kept_as_written(self):
         """A GNU member name `/<digits>` is an offset into the long-name table. The pull request's build writes the
@@ -592,21 +588,21 @@ class Archives(unittest.TestCase):
 
         a = elf_object(NOP)
         data = b"!<arch>\n" + member(b"//", b"long_name.o/\n") + member(b"/\xb2", a) + member(b"/0", a)
-        self.assertEqual(check_links.ar_members(data), [("/\xb2", a), ("long_name.o", a)])
+        assert check_links.ar_members(data) == [("/\xb2", a), ("long_name.o", a)]
 
 
-class Objects(unittest.TestCase):
+class TestObjects:
     def test_facts(self):
         facts = check_links.object_facts(elf_object(NOP + UNIMP + UNIMP, defined=["f"], undefined=ASAN,
                                                     files=["lib.c"], local=["core::ub_checks::precondition_check"],
                                                     comment=True))
-        self.assertEqual((facts.code, facts.traps, facts.asan, facts.ub_checks), (12, 2, True, 1))
-        self.assertEqual((facts.defined, facts.files, facts.compiled), (["f"], ["lib.c"], True))
+        assert (facts.code, facts.traps, facts.asan, facts.ub_checks) == (12, 2, True, 1)
+        assert (facts.defined, facts.files, facts.compiled) == (["f"], ["lib.c"], True)
 
     def test_only_the_constructor_symbols_mark_asan(self):
         # An uninstrumented object may still declare a public AddressSanitizer function.
         facts = check_links.object_facts(elf_object(NOP, defined=["f"], undefined=["__asan_poison_memory_region"]))
-        self.assertFalse(facts.asan)
+        assert not facts.asan
 
     def test_extended_section_numbering(self):
         data = bytearray(elf_object(NOP, defined=["f"], undefined=ASAN, comment=True))
@@ -615,11 +611,11 @@ class Objects(unittest.TestCase):
         struct.pack_into("<Q", data, shoff + 32, shnum)  # section 0's sh_size holds the count
         struct.pack_into("<H", data, 60, 0)
         facts = check_links.object_facts(bytes(data))
-        self.assertEqual((facts.code, facts.asan), (4, True))
+        assert (facts.code, facts.asan) == (4, True)
 
     def test_not_elf(self):
-        self.assertIsNone(check_links.object_facts(b"not an object"))
-        self.assertTrue(check_links.object_facts(b"BC\xc0\xde....").bitcode)
+        assert check_links.object_facts(b"not an object") is None
+        assert check_links.object_facts(b"BC\xc0\xde....").bitcode
 
     def test_touches_memory_reads_each_instruction(self):
         """The exemption of rustc's allocator shim rests on its code making no memory access, so the check reads
@@ -639,7 +635,7 @@ class Objects(unittest.TestCase):
                            ("c.nop", half(0x0001)),
                            ("c.addi4spn", half(0x0040)),
                            ("a compressed and a full instruction", half(0x0001) + NOP)):
-            self.assertFalse(check_links.touches_memory(body), name)
+            assert not check_links.touches_memory(body), name
         # One of each kind of access, by its major opcode, and the compressed loads and stores of quadrants 0 and 2.
         for name, body in (("load", word(0x00000003)),
                            ("floating-point load", word(0x00000007)),
@@ -653,50 +649,66 @@ class Objects(unittest.TestCase):
                            ("c.sdsp", half(0xE002)),
                            ("c.lbu (Zcb), and the reserved funct3 beside it", half(0x8000)),
                            ("an access after a compressed instruction", half(0x0001) + LW)):
-            self.assertTrue(check_links.touches_memory(body), name)
+            assert check_links.touches_memory(body), name
         # Bytes this cannot read as instructions do not pass: an instruction of 48 bits or more, a 32-bit
         # instruction cut short, and a byte left over.
         for name, body in (("a 48-bit instruction", word(0x0000001F)),
                            ("a 32-bit instruction cut short", NOP + half(0x0013)),
                            ("one byte left over", NOP + b"\x13")):
-            self.assertTrue(check_links.touches_memory(body), name)
+            assert check_links.touches_memory(body), name
 
 
-class Kinds(unittest.TestCase):
+class TestKinds:
     def test_runtime_kinds(self):
         lib = "/opt/musl-sysroot/usr/lib/"
         rt = "/opt/asan-static-rt/lib/clang/20/lib/riscv64-unknown-linux-musl/"
-        self.assertEqual(check_links.runtime_kind(lib + "crt1.o"), "libc")
-        self.assertEqual(check_links.runtime_kind(lib + "libc.a"), "libc")
-        self.assertEqual(check_links.runtime_kind(lib + "libm.a"), "libc")
-        self.assertEqual(check_links.runtime_kind(lib + "libc++.a"), "cxx-runtime")
-        self.assertEqual(check_links.runtime_kind(lib + "libunwind.a"), "cxx-runtime")
-        self.assertEqual(check_links.runtime_kind(rt + "libclang_rt.builtins.a"), "compiler-rt")
-        self.assertEqual(check_links.runtime_kind(rt + "clang_rt.crtbegin.o"), "compiler-rt")
-        self.assertEqual(check_links.runtime_kind(rt + "libclang_rt.asan.a"), "sanitizer-runtime")
-        self.assertEqual(check_links.runtime_kind(lib + "libz.a"), "image-library")
-        self.assertIsNone(check_links.runtime_kind("/opt/other/thing.o"))
+        assert check_links.runtime_kind(lib + "crt1.o") == "libc"
+        assert check_links.runtime_kind(lib + "libc.a") == "libc"
+        assert check_links.runtime_kind(lib + "libm.a") == "libc"
+        assert check_links.runtime_kind(lib + "libc++.a") == "cxx-runtime"
+        assert check_links.runtime_kind(lib + "libunwind.a") == "cxx-runtime"
+        assert check_links.runtime_kind(rt + "libclang_rt.builtins.a") == "compiler-rt"
+        assert check_links.runtime_kind(rt + "clang_rt.crtbegin.o") == "compiler-rt"
+        assert check_links.runtime_kind(rt + "libclang_rt.asan.a") == "sanitizer-runtime"
+        assert check_links.runtime_kind(lib + "libz.a") == "image-library"
+        assert check_links.runtime_kind("/opt/other/thing.o") is None
 
 
-class Records(unittest.TestCase):
+def bad_libc_files(good):
+    """Libc files made from the four rows `good` that do not name each of the four files once, with an absolute path
+    and a sha256 in three fields, each by what is wrong with it."""
+    rows, last = good[:3], good[3]
+    return {
+        "a missing name": rows,
+        "a repeated name": rows + [last, rows[0]],
+        "a name in place of another": rows + [("crti.o",) + last[1:]],
+        "an unknown name": rows + [("libm.a",) + last[1:]],
+        "a relative path": rows + [(last[0], "musl/lib/crtn.o", last[2])],
+        "an empty path": rows + [(last[0], "", last[2])],
+        "a sha256 that is not hex": rows + [last[:2] + ("g" * 64,)],
+        "a short sha256": rows + [last[:2] + ("4" * 63,)],
+        "a row with two fields": rows + [last[:2]],
+        "a row with four fields": rows + [last + ("1",)],
+        "an empty file": [],
+    }
+
+
+class TestRecords:
     """Reading a record that a build wrote: never through a symbolic link, and the kept bytes checked."""
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.raw = pathlib.Path(self.tmp.name)
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.raw = tmp_path
         self.directory = self.raw / ".records" / ("a" * 64)
         self.directory.mkdir(parents=True)
         (self.raw / ".records" / "store").mkdir()
         for name, text in (("map", ""), ("inputs.tsv", ""), ("driver", "/tmp/ov/cli.o\n")):
             (self.directory / name).write_text(text)
 
-    def tearDown(self):
-        self.tmp.cleanup()
-
     def test_a_complete_record(self):
         record = check_links.read_record(self.raw, "a" * 64)
-        self.assertEqual(record.driver, {"/tmp/ov/cli.o"})
-        self.assertIsNone(record.quiet)
+        assert record.driver == {"/tmp/ov/cli.o"}
+        assert record.quiet is None
 
     def test_a_size_that_is_not_ascii_digits_leaves_its_row_out(self):
         """inputs.tsv is the build's, so its size field may be anything: "²" passes str.isdigit() and 5,000 digits
@@ -705,28 +717,28 @@ class Records(unittest.TestCase):
         rows = ["/work/a.o\t/work/a.o\t" + "b" * 64 + "\t12", "/work/b.o\t/work/b.o\t" + "c" * 64 + "\t²",
                 "/work/c.o\t/work/c.o\t" + "d" * 64 + "\t" + "1" * 5000]
         (self.directory / "inputs.tsv").write_text("\n".join(rows) + "\n")
-        self.assertEqual(check_links.read_record(self.raw, "a" * 64).inputs, {"/work/a.o": ("/work/a.o", "b" * 64, 12)})
+        assert check_links.read_record(self.raw, "a" * 64).inputs == {"/work/a.o": ("/work/a.o", "b" * 64, 12)}
 
     def test_links_are_refused(self):
         secret = self.raw / "secret"
         secret.write_text("x")
         (self.directory / "map").unlink()
         (self.directory / "map").symlink_to(secret)
-        with self.assertRaises(check_links.RecordError):
+        with pytest.raises(check_links.RecordError):
             check_links.read_record(self.raw, "a" * 64)
         (self.directory / "map").unlink()
         (self.directory / "map").write_text("")
         (self.directory / "quiet").symlink_to(secret)
-        self.assertIsNone(check_links.read_record(self.raw, "a" * 64).quiet)
+        assert check_links.read_record(self.raw, "a" * 64).quiet is None
         os.rename(self.raw / ".records", self.raw / "elsewhere")
         (self.raw / ".records").symlink_to(self.raw / "elsewhere")
-        with self.assertRaises(check_links.RecordError):
+        with pytest.raises(check_links.RecordError):
             check_links.read_record(self.raw, "a" * 64)
 
     def test_a_fifo_is_not_read(self):
         (self.directory / "map").unlink()
         os.mkfifo(self.directory / "map")
-        with self.assertRaises(check_links.RecordError):
+        with pytest.raises(check_links.RecordError):
             check_links.read_record(self.raw, "a" * 64)
 
     def test_the_kept_bytes_are_checked(self):
@@ -734,14 +746,15 @@ class Records(unittest.TestCase):
         body = b"object"
         digest = hashlib.sha256(body).hexdigest()
         (self.raw / ".records" / "store" / digest).write_bytes(body)
-        self.assertEqual(record.store(digest), body)
+        assert record.store(digest) == body
         (self.raw / ".records" / "store" / digest).write_bytes(b"other")
-        with self.assertRaises(check_links.RecordError):
+        with pytest.raises(check_links.RecordError):
             record.store(digest)
 
     # The libc file of a link whose build declares its C library (link-fuzz-target, OV_LIBC).
     LIBC_ROWS = [("libc.a", "/work/b/musl/lib/libc.a", "1" * 64), ("crt1.o", "/work/b/musl/lib/crt1.o", "2" * 64),
                  ("crti.o", "/work/b/musl/lib/crti.o", "3" * 64), ("crtn.o", "/work/b/musl/lib/crtn.o", "4" * 64)]
+    BAD_LIBC_FILES = bad_libc_files(LIBC_ROWS)
 
     def write_libc(self, rows):
         (self.directory / "libc").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
@@ -749,41 +762,39 @@ class Records(unittest.TestCase):
     def test_a_libc_file_is_read(self):
         self.write_libc(self.LIBC_ROWS)
         record = check_links.read_record(self.raw, "a" * 64)
-        self.assertEqual(record.libc, {name: (path, sha256) for name, path, sha256 in self.LIBC_ROWS})
+        assert record.libc == {name: (path, sha256) for name, path, sha256 in self.LIBC_ROWS}
         # The rows in another order say the same.
         self.write_libc(self.LIBC_ROWS[::-1])
-        self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, record.libc)
+        assert check_links.read_record(self.raw, "a" * 64).libc == record.libc
 
-    def test_a_libc_path_that_holds_another_line_end_is_read(self):
+    @pytest.mark.parametrize("separator", OTHER_LINE_ENDS, ids=code_point)
+    def test_a_libc_path_that_holds_another_line_end_is_read(self, separator):
         """A libc file whose four real paths each hold a line end that str.splitlines() knows but "\\n"
         (OTHER_LINE_ENDS) is read whole, because the libc file is split at "\\n" only. link-fuzz-target refuses
         [[:cntrl:]] in these real paths, so in the C locale only \\x85, U+2028 and U+2029 get to the libc file. The
         test uses each line end all the same."""
-        for separator in OTHER_LINE_ENDS:
-            with self.subTest(separator=f"U+{ord(separator):04X}"):
-                rows = [(name, path + separator + "x", sha256) for name, path, sha256 in self.LIBC_ROWS]
-                self.write_libc(rows)
-                self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc,
-                                 {name: (path, sha256) for name, path, sha256 in rows})
+        rows = [(name, path + separator + "x", sha256) for name, path, sha256 in self.LIBC_ROWS]
+        self.write_libc(rows)
+        assert check_links.read_record(self.raw, "a" * 64).libc == \
+            {name: (path, sha256) for name, path, sha256 in rows}
 
-    def test_an_object_whose_path_holds_another_line_end_is_examined(self):
+    @pytest.mark.parametrize("separator", OTHER_LINE_ENDS, ids=code_point)
+    def test_an_object_whose_path_holds_another_line_end_is_examined(self, separator):
         """A map line and an inputs.tsv row that name an object whose real path holds a line end that str.splitlines()
         knows but "\\n" (OTHER_LINE_ENDS) are read whole, so the record has the object, and project_code examines it
         and does not leave it out."""
         body = elf_object(NOP, defined=["f"], comment=True)
         digest = hashlib.sha256(body).hexdigest()
         (self.raw / ".records" / "store" / digest).write_bytes(body)
-        for separator in OTHER_LINE_ENDS:
-            with self.subTest(separator=f"U+{ord(separator):04X}"):
-                path = f"/work/obj/a{separator}b.o"
-                (self.directory / "map").write_text(map_line(0x10000, 4, f"{path}:(.text.f)") + "\n", encoding="utf-8")
-                (self.directory / "inputs.tsv").write_text(f"{path}\t{path}\t{digest}\t{len(body)}\n", encoding="utf-8")
-                record = check_links.read_record(self.raw, "a" * 64)
-                self.assertEqual(record.taken, [(path, None, ".text.f", 4)])
-                self.assertEqual(record.inputs, {path: (path, digest, len(body))})
-                self.assertIsNone(record.problem)
-                code, provided, problems = check_links.project_code(record, {})
-                self.assertEqual(([c.label for c in code], provided, problems), ([f"a{separator}b.o"], [], []))
+        path = f"/work/obj/a{separator}b.o"
+        (self.directory / "map").write_text(map_line(0x10000, 4, f"{path}:(.text.f)") + "\n", encoding="utf-8")
+        (self.directory / "inputs.tsv").write_text(f"{path}\t{path}\t{digest}\t{len(body)}\n", encoding="utf-8")
+        record = check_links.read_record(self.raw, "a" * 64)
+        assert record.taken == [(path, None, ".text.f", 4)]
+        assert record.inputs == {path: (path, digest, len(body))}
+        assert record.problem is None
+        code, provided, problems = check_links.project_code(record, {})
+        assert ([c.label for c in code], provided, problems) == ([f"a{separator}b.o"], [], [])
 
     def test_a_renamed_path_that_holds_another_line_end_is_read(self):
         """A row of the renamed file whose real paths hold a line end that str.splitlines() knows but "\\n"
@@ -791,43 +802,29 @@ class Records(unittest.TestCase):
         rows = [(f"/tmp/copies/{n}-a{separator}b.o", f"/work/obj/a{separator}b.o", str(n) * 64)
                 for n, separator in enumerate(OTHER_LINE_ENDS, 1)]
         (self.directory / "renamed").write_text("".join("\t".join(row) + "\n" for row in rows), encoding="utf-8")
-        self.assertEqual(check_links.read_record(self.raw, "a" * 64).renamed,
-                         {copy: (original, sha256) for copy, original, sha256 in rows})
+        assert check_links.read_record(self.raw, "a" * 64).renamed == \
+            {copy: (original, sha256) for copy, original, sha256 in rows}
 
     def test_a_record_with_no_libc_file_declares_no_libc(self):
-        self.assertEqual(check_links.read_record(self.raw, "a" * 64).libc, {})
+        assert check_links.read_record(self.raw, "a" * 64).libc == {}
 
-    def test_a_bad_libc_file_makes_the_record_incomplete(self):
+    @pytest.mark.parametrize("rows", BAD_LIBC_FILES.values(), ids=list(BAD_LIBC_FILES))
+    def test_a_bad_libc_file_makes_the_record_incomplete(self, rows):
         """A libc file that does not name each of the four files once, with an absolute path and a sha256 in three
         fields, does not say which C library the link declared."""
-        rows, last = self.LIBC_ROWS[:3], self.LIBC_ROWS[3]
-        cases = {
-            "a missing name": rows,
-            "a repeated name": rows + [last, rows[0]],
-            "a name in place of another": rows + [("crti.o",) + last[1:]],
-            "an unknown name": rows + [("libm.a",) + last[1:]],
-            "a relative path": rows + [(last[0], "musl/lib/crtn.o", last[2])],
-            "an empty path": rows + [(last[0], "", last[2])],
-            "a sha256 that is not hex": rows + [last[:2] + ("g" * 64,)],
-            "a short sha256": rows + [last[:2] + ("4" * 63,)],
-            "a row with two fields": rows + [last[:2]],
-            "a row with four fields": rows + [last + ("1",)],
-            "an empty file": [],
-        }
-        for case, case_rows in cases.items():
-            self.write_libc(case_rows)
-            with self.assertRaises(check_links.RecordError, msg=case):
-                check_links.read_record(self.raw, "a" * 64)
+        self.write_libc(rows)
+        with pytest.raises(check_links.RecordError):
+            check_links.read_record(self.raw, "a" * 64)
 
     def test_a_libc_link_is_refused(self):
         secret = self.raw / "secret"
         secret.write_text("".join("\t".join(row) + "\n" for row in self.LIBC_ROWS))
         (self.directory / "libc").symlink_to(secret)
-        with self.assertRaises(check_links.RecordError):
+        with pytest.raises(check_links.RecordError):
             check_links.read_record(self.raw, "a" * 64)
 
 
-class Analyse(unittest.TestCase):
+class TestAnalyse:
     """check_links.analyse on records made by hand: the uninstrumented lists and the instrumentation verdicts."""
 
     LIBC = "/opt/musl-sysroot/usr/lib/libc.a"
@@ -836,13 +833,10 @@ class Analyse(unittest.TestCase):
     ZLIB = "/opt/musl-sysroot/usr/lib/libz.a"
     IMAGE = {LIBC: "c" * 64, CRT1: "1" * 64, ASAN_RT: "a" * 64, ZLIB: "f" * 64}
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.raw = pathlib.Path(self.tmp.name)
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.raw = tmp_path
         (self.raw / ".records" / "store").mkdir(parents=True)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def keep(self, body):
         digest = hashlib.sha256(body).hexdigest()
@@ -894,7 +888,7 @@ class Analyse(unittest.TestCase):
                 lines.append(json.dumps(line) + "\n")
             (raw / ".records" / "compiles.jsonl").write_text("".join(lines))
             compiles = check_links.read_compiles(raw)
-            self.assertIsNotNone(compiles)
+            assert compiles is not None
         return check_links.Record(taken, inputs, set(driver), renamed or {}, self.raw, None, compiles)
 
     def analyse(self, records, **options):
@@ -903,11 +897,11 @@ class Analyse(unittest.TestCase):
     def test_lists_the_image_files_in_path_order_and_not_the_driver(self):
         plain = self.record({"/work/libproject.a": {"lib.c.o": elf_object(NOP, defined=["f"], comment=True)}})
         result = self.analyse({"plain": plain})["plain"]
-        self.assertEqual(result["uninstrumented"], [
+        assert result["uninstrumented"] == [
             {"name": "crt1.o", "kind": "libc", "sha256": "1" * 64},
             {"name": "libc.a", "kind": "libc", "sha256": "c" * 64},
-        ])
-        self.assertEqual(result["instrumented"]["result"], "plain")
+        ]
+        assert result["instrumented"]["result"] == "plain"
 
     def test_an_archive_that_gc_sections_removed_is_not_listed(self):
         """Two image archives that the link took members of: --gc-sections kept code of libz's and removed all of
@@ -934,15 +928,15 @@ class Analyse(unittest.TestCase):
         (directory / "driver").write_text("/tmp/ov/cli.o\n")
         record = check_links.read_record(self.raw, digest)
         result = check_links.analyse({"plain": record}, image)["plain"]
-        self.assertEqual(result["uninstrumented"], [
+        assert result["uninstrumented"] == [
             {"name": "crt1.o", "kind": "libc", "sha256": "1" * 64},
             {"name": "libc.a", "kind": "libc", "sha256": "c" * 64},
             {"name": "libz.a", "kind": "image-library", "sha256": "f" * 64},
-        ])
-        self.assertEqual(result["instrumented"]["result"], "plain")
+        ]
+        assert result["instrumented"]["result"] == "plain"
         # With no map, the step fails: no list at all, never the files the link took.
         (directory / "map").unlink()
-        with self.assertRaises(check_links.RecordError):
+        with pytest.raises(check_links.RecordError):
             check_links.read_record(self.raw, digest)
         executable = elf_object(NOP)
         (self.raw / "fuzzer").write_bytes(executable)
@@ -951,57 +945,56 @@ class Analyse(unittest.TestCase):
         (kept / "inputs.tsv").write_text((directory / "inputs.tsv").read_text())
         (kept / "driver").write_text("/tmp/ov/cli.o\n")
         reason, _ = check_binaries.record_of(self.raw, "fuzzer")
-        self.assertIsInstance(reason, str)
+        assert isinstance(reason, str)
         result = check_links.analyse({"plain": reason}, image)["plain"]
-        self.assertIsNone(result["uninstrumented"])
-        self.assertEqual(result["instrumented"]["result"], "error")
+        assert result["uninstrumented"] is None
+        assert result["instrumented"]["result"] == "error"
 
     def test_asan_wants_every_object_instrumented(self):
         bad = elf_object(NOP, defined=["g"], files=["other.c"], comment=True)
         result = self.analyse({"asan": self.record({"/work/libproject.a": {"lib.c.o": good()}},
                                                    runtimes=(self.LIBC, self.ASAN_RT))})["asan"]
-        self.assertEqual(result["instrumented"]["result"], "pass")
-        self.assertIn({"name": "libclang_rt.asan.a", "kind": "sanitizer-runtime", "sha256": "a" * 64},
-                      result["uninstrumented"])
+        assert result["instrumented"]["result"] == "pass"
+        assert {"name": "libclang_rt.asan.a", "kind": "sanitizer-runtime", "sha256": "a" * 64} in \
+            result["uninstrumented"]
         result = self.analyse({"asan": self.record({"/work/libproject.a": {"lib.c.o": good(), "other.c.o": bad}})})
-        self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
-        self.assertIn("libproject.a(other.c.o)", result["asan"]["instrumented"]["detail"])
+        assert result["asan"]["instrumented"]["result"] == "fail"
+        assert "libproject.a(other.c.o)" in result["asan"]["instrumented"]["detail"]
 
     def test_a_member_the_archive_does_not_hold(self):
         record = self.record({"/work/libproject.a": {"lib.c.o": good()}})
         record.taken.append(("/work/libproject.a", "gone.o", ".text", 4))
         result = self.analyse({"asan": record})["asan"]
         # The record names a member that is not there: the list may leave code out, so no list and an error.
-        self.assertEqual(result["instrumented"]["result"], "error")
-        self.assertIsNone(result["uninstrumented"])
-        self.assertIn("libproject.a(gone.o)", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "error"
+        assert result["uninstrumented"] is None
+        assert "libproject.a(gone.o)" in result["instrumented"]["detail"]
 
     def test_a_file_the_record_does_not_describe_leaves_no_list_in_the_plain_build(self):
         record = self.record({"/work/libproject.a": {"lib.c.o": good()}})
         record.taken.append(("/opt/musl-sysroot/usr/lib/libmissing.a", "m.o", ".text", 4))
         result = self.analyse({"plain": record})["plain"]
-        self.assertIsNone(result["uninstrumented"])
-        self.assertEqual(result["instrumented"]["result"], "error", result)
-        self.assertIn("which its record does not describe", result["instrumented"]["detail"])
+        assert result["uninstrumented"] is None
+        assert result["instrumented"]["result"] == "error", result
+        assert "which its record does not describe" in result["instrumented"]["detail"]
 
     def test_asan_lists_hand_written_assembly_from_its_dwarf(self):
         asm = elf_object(NOP, defined=["memcpy_fast"])  # no STT_FILE, no compiler mark: clang's output for a .S
         record = self.record({"/work/libproject.a": {"lib.c.o": good(), "memcpy.S.o": asm}})
         units = lambda objects: [("DW_LANG_Mips_Assembler", "src/arch/memcpy.S", "/src/lib")] * len(objects)
         result = self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"])["asan"]
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
-        self.assertIn({"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"},
-                      result["uninstrumented"])
+        assert result["instrumented"]["result"] == "pass", result
+        assert {"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"} in result["uninstrumented"]
         # C with its marks stripped: its DWARF says C, so it is the project's code, uninstrumented.
         units = lambda objects: [("DW_LANG_C11", "src/arch/memcpy.c", "/src/lib")] * len(objects)
         result = self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"])["asan"]
-        self.assertEqual(result["instrumented"]["result"], "fail")
+        assert result["instrumented"]["result"] == "fail"
         # No DWARF at all, or a source outside every checkout of the image.
-        self.assertEqual(self.analyse({"asan": record}, dwarf_units=lambda objects: [None])["asan"]
-                         ["instrumented"]["result"], "fail")
+        assert self.analyse({"asan": record}, dwarf_units=lambda objects: [None])["asan"] \
+            ["instrumented"]["result"] == "fail"
         units = lambda objects: [("DW_LANG_Mips_Assembler", "/tmp/x.S", "/")] * len(objects)
-        self.assertEqual(self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"])["asan"]
-                         ["instrumented"]["result"], "fail")
+        assert self.analyse({"asan": record}, dwarf_units=units, checkouts=["/src/lib"])["asan"] \
+            ["instrumented"]["result"] == "fail"
 
     # libunwind's ported build: the release recipe copies the checkout into a build directory and assembles the copy,
     # so each object's DWARF names the copy, outside every checkout. Its C member has a UBSan trap, as libunwind's do.
@@ -1052,13 +1045,12 @@ class Analyse(unittest.TestCase):
     def test_a_build_directory_copy_of_an_assembly_source_is_listed_by_its_checkout_path(self):
         for build in ("asan", "asan-ubsan"):
             result = self.copied(build)
-            self.assertEqual(result["instrumented"]["result"], "pass", (build, result))
+            assert result["instrumented"]["result"] == "pass", (build, result)
             for name, (stem, _) in self.ASM.items():
-                self.assertIn({"name": name, "kind": "assembly", "source": f"src/riscv/{stem}.S"},
-                              result["uninstrumented"])
+                assert {"name": name, "kind": "assembly", "source": f"src/riscv/{stem}.S"} in result["uninstrumented"]
             # One read of the project image for all three, of paths in the checkout only.
-            self.assertEqual(len(self.asked), 1)
-            self.assertTrue(all(path.startswith(self.CHECKOUT + "/") for path in self.asked[0]))
+            assert len(self.asked) == 1
+            assert all(path.startswith(self.CHECKOUT + "/") for path in self.asked[0])
 
     def test_a_copy_with_no_record_or_other_bytes_fails_as_before(self):
         cases = {"no record": {"members": ()}, "other bytes": {"sources": {"getcontext.o": b"planted\n"}},
@@ -1067,22 +1059,22 @@ class Analyse(unittest.TestCase):
                                                       "src/riscv/siglongjmp.S": b"siglongjmp source\n"}}}
         for case, options in cases.items():
             result = self.copied("asan", **options)["instrumented"]
-            self.assertEqual(result["result"], "fail", (case, result))
-            self.assertIn("liboft.a(getcontext.o): its assembly source riscv/getcontext.S is in no checkout of the "
-                          "project image", result["detail"])
+            assert result["result"] == "fail", (case, result)
+            assert "liboft.a(getcontext.o): its assembly source riscv/getcontext.S is in no checkout of the " \
+                "project image" in result["detail"]
             if case != "no record":
-                self.assertNotIn("setcontext.o", result["detail"], case)
+                assert "setcontext.o" not in result["detail"], case
 
     def test_a_copy_assembled_without_the_builds_sanitizer_flags_fails(self):
         """A planted assembly file built without -fsanitize: it fails, named, with the flags it lacks."""
         result = self.copied("asan", flags=[])["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("liboft.a(getcontext.o): assembled without the build's sanitizer flags (riscv/getcontext.S: "
-                      "without -fsanitize=address)", result["detail"])
+        assert result["result"] == "fail", result
+        assert "liboft.a(getcontext.o): assembled without the build's sanitizer flags (riscv/getcontext.S: " \
+            "without -fsanitize=address)" in result["detail"]
         result = self.copied("asan-ubsan", flags=["-fsanitize=address"])["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("(riscv/getcontext.S: without -fsanitize=undefined -fno-sanitize-recover=all "
-                      "-fsanitize-trap=all)", result["detail"])
+        assert result["result"] == "fail", result
+        assert "(riscv/getcontext.S: without -fsanitize=undefined -fno-sanitize-recover=all " \
+            "-fsanitize-trap=all)" in result["detail"]
 
     def test_an_assembly_object_in_a_checkout_needs_the_flags_when_it_has_a_record(self):
         """An object whose DWARF names a checkout's file: recorded without the build's sanitizer flags it fails, named;
@@ -1099,16 +1091,16 @@ class Analyse(unittest.TestCase):
                     compiled=[(asm, "src/arch/memcpy.S", "assembler-with-cpp", BASE + list(flags) + ["-c", "x.S"],
                                "/src/lib", None)] if compiled else [])
                 result = self.analyse({"plain": plain, build: record}, dwarf_units=units, checkouts=["/src/lib"],
-                                      checkout_files=lambda paths: self.fail("no checkout file is read"))[build]
+                                      checkout_files=lambda paths: pytest.fail("no checkout file is read"))[build]
                 case = (build, flags, compiled, result)
-                self.assertEqual(result["instrumented"]["result"], verdict, case)
+                assert result["instrumented"]["result"] == verdict, case
                 if verdict == "fail":
-                    self.assertIn("libproject.a(memcpy.S.o): assembled without the build's sanitizer flags "
-                                  "(src/arch/memcpy.S: without -fsanitize=address", result["instrumented"]["detail"])
-                    self.assertIsNone(result["uninstrumented"], case)
+                    assert "libproject.a(memcpy.S.o): assembled without the build's sanitizer flags " \
+                        "(src/arch/memcpy.S: without -fsanitize=address" in result["instrumented"]["detail"]
+                    assert result["uninstrumented"] is None, case
                 else:
-                    self.assertIn({"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"},
-                                  result["uninstrumented"])
+                    assert {"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"} in \
+                        result["uninstrumented"]
 
     def test_a_file_of_the_image_with_no_kind_leaves_no_list(self):
         """A list that leaves a file out would say that the build links less uninstrumented code than it does."""
@@ -1118,17 +1110,17 @@ class Analyse(unittest.TestCase):
             for build in ("plain", "asan"):
                 record = self.record({"/work/l.a": {"a.o": good()}}, runtimes=(self.LIBC, self.CRT1, unknown))
                 result = self.analyse({build: record})[build]
-                self.assertIsNone(result["uninstrumented"], build)
-                self.assertEqual(result["instrumented"]["result"], "error", build)
-                self.assertIn("libmystery.a", result["instrumented"]["detail"])
+                assert result["uninstrumented"] is None, build
+                assert result["instrumented"]["result"] == "error", build
+                assert "libmystery.a" in result["instrumented"]["detail"]
                 # The report shows an error, so nobody reads the missing list as a clean one.
                 block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
                          "targets": {"t": {build: {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                                    "quiet_loud": {"result": "pass"},
                                                    "instrumented": result["instrumented"]}}}}
                 text = check_binaries.report(block, {"t": {build: None}}, [build], {"t": {build: None}})
-                self.assertIn("**not decided**", text)
-                self.assertIn("not recorded", text)
+                assert "**not decided**" in text
+                assert "not recorded" in text
         finally:
             del self.IMAGE[unknown]
 
@@ -1136,45 +1128,44 @@ class Analyse(unittest.TestCase):
         """Every static link takes the C library, and the facts hold a list of at least one entry."""
         record = self.record({"/work/l.a": {"a.o": good()}}, runtimes=())
         result = self.analyse({"asan": record})["asan"]
-        self.assertIsNone(result["uninstrumented"])
-        self.assertEqual(result["instrumented"]["result"], "error")
-        self.assertIn("C library", result["instrumented"]["detail"])
+        assert result["uninstrumented"] is None
+        assert result["instrumented"]["result"] == "error"
+        assert "C library" in result["instrumented"]["detail"]
 
     def test_the_fortran_runtime_has_a_kind(self):
         for name in ("libFortranRuntime.a", "libgfortran.a", "libflang_rt.runtime.a"):
-            self.assertEqual(check_links.runtime_kind("/opt/fortran/lib/" + name), "fortran-runtime", name)
+            assert check_links.runtime_kind("/opt/fortran/lib/" + name) == "fortran-runtime", name
 
-    def test_one_rust_allocator_shim_is_exempt(self):
-        # The v0 names are from the allocator shim of tessera-sort's enrollment
-        # with the pinned Rust toolchain (nightly-2025-07-16).
-        for names in (
-            ["__rust_alloc", "__rust_dealloc"],
-            ["_RNvC7___rustc12___rust_alloc", "_RNvC7___rustc14___rust_dealloc"],
-            ["_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc",
-             "_RNvCs6UdHf40Qw6p_7___rustc14___rust_dealloc",
-             "_RNvCs6UdHf40Qw6p_7___rustc14___rust_realloc",
-             "_RNvCs6UdHf40Qw6p_7___rustc19___rust_alloc_zeroed",
-             "_RNvCs6UdHf40Qw6p_7___rustc26___rust_alloc_error_handler",
-             "_RNvCs6UdHf40Qw6p_7___rustc35___rust_no_alloc_shim_is_unstable_v2",
-             "_RNvCs6UdHf40Qw6p_7___rustc42___rust_alloc_error_handler_should_panic_v2"],
-        ):
-            with self.subTest(names=names):
-                shim = elf_object(NOP, defined=names, comment=True)
-                result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})["asan"]
-                self.assertEqual(result["instrumented"]["result"], "pass")
-                result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim,
-                                                                        "s2.o": shim}})})
-                self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
+    # The v0 names are from the allocator shim of tessera-sort's enrollment
+    # with the pinned Rust toolchain (nightly-2025-07-16).
+    @pytest.mark.parametrize("names", (
+        ["__rust_alloc", "__rust_dealloc"],
+        ["_RNvC7___rustc12___rust_alloc", "_RNvC7___rustc14___rust_dealloc"],
+        ["_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc",
+         "_RNvCs6UdHf40Qw6p_7___rustc14___rust_dealloc",
+         "_RNvCs6UdHf40Qw6p_7___rustc14___rust_realloc",
+         "_RNvCs6UdHf40Qw6p_7___rustc19___rust_alloc_zeroed",
+         "_RNvCs6UdHf40Qw6p_7___rustc26___rust_alloc_error_handler",
+         "_RNvCs6UdHf40Qw6p_7___rustc35___rust_no_alloc_shim_is_unstable_v2",
+         "_RNvCs6UdHf40Qw6p_7___rustc42___rust_alloc_error_handler_should_panic_v2"],
+    ), ids=lambda names: names[0])
+    def test_one_rust_allocator_shim_is_exempt(self, names):
+        shim = elf_object(NOP, defined=names, comment=True)
+        result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})["asan"]
+        assert result["instrumented"]["result"] == "pass"
+        result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim,
+                                                                  "s2.o": shim}})})
+        assert result["asan"]["instrumented"]["result"] == "fail"
 
-    def test_allocator_names_do_not_exempt_other_functions(self):
-        allocator = "_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc"
-        for other in ("helper", allocator.replace("7___rustc", "7___other"),
-                      allocator.replace("12___rust_alloc", "13___rust_alloc"),
-                      allocator + "extra", "_RNvCs6UdHf40Qw6p_7___rustc18___rust_alloc_extra"):
-            with self.subTest(other=other):
-                shim = elf_object(NOP, defined=[allocator, other], comment=True)
-                result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})
-                self.assertEqual(result["asan"]["instrumented"]["result"], "fail")
+    ALLOCATOR = "_RNvCs6UdHf40Qw6p_7___rustc12___rust_alloc"
+
+    @pytest.mark.parametrize("other", (
+        "helper", ALLOCATOR.replace("7___rustc", "7___other"), ALLOCATOR.replace("12___rust_alloc", "13___rust_alloc"),
+        ALLOCATOR + "extra", "_RNvCs6UdHf40Qw6p_7___rustc18___rust_alloc_extra"))
+    def test_allocator_names_do_not_exempt_other_functions(self, other):
+        shim = elf_object(NOP, defined=[self.ALLOCATOR, other], comment=True)
+        result = self.analyse({"asan": self.record({"/work/l.a": {"a.o": good(), "shim.o": shim}})})
+        assert result["asan"]["instrumented"]["result"] == "fail", other
 
     SHIMS = pathlib.Path(__file__).resolve().parent / "fixtures" / "allocator-shim"
 
@@ -1190,46 +1181,46 @@ class Analyse(unittest.TestCase):
         """A real shim object whose six functions are tail forwards: exempt, named in the uninstrumented list, and
         counted out of "all instrumented", because it is an object with code that nothing instruments."""
         result, body = self.shim_link("shim-forwards.o")
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
-        self.assertIn({"name": "shim.o", "kind": "rust-allocator-shim",
-                       "sha256": hashlib.sha256(body).hexdigest()}, result["uninstrumented"])
-        self.assertIn("all instrumented but the one named below", result["instrumented"]["detail"])
-        self.assertIn("l.a(shim.o)", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "pass", result
+        assert {"name": "shim.o", "kind": "rust-allocator-shim",
+                "sha256": hashlib.sha256(body).hexdigest()} in result["uninstrumented"]
+        assert "all instrumented but the one named below" in result["instrumented"]["detail"]
+        assert "l.a(shim.o)" in result["instrumented"]["detail"]
 
     def test_a_shim_whose_own_code_stores_is_not_exempt(self):
         """The same names, and each function stores a byte. Before this check read the code, it was exempt."""
         result, body = self.shim_link("shim-stores.o")
-        self.assertEqual(result["instrumented"]["result"], "fail", result)
-        self.assertIn("l.a(shim.o)", result["instrumented"]["detail"])
-        self.assertTrue(check_links.object_facts(body).memory)
+        assert result["instrumented"]["result"] == "fail", result
+        assert "l.a(shim.o)" in result["instrumented"]["detail"]
+        assert check_links.object_facts(body).memory
 
     def test_a_shim_whose_local_function_makes_an_access_is_not_exempt(self):
         """One global, __rust_alloc; the loads and stores are in two local functions, which the symbol table of an
         object shows and which the rule about global functions alone did not reach."""
         result, body = self.shim_link("shim-local-access.o")
-        self.assertEqual(result["instrumented"]["result"], "fail", result)
+        assert result["instrumented"]["result"] == "fail", result
         facts = check_links.object_facts(body)
-        self.assertEqual(facts.defined, ["__rust_alloc"])
-        self.assertEqual(len(facts.functions), 3)
+        assert facts.defined == ["__rust_alloc"]
+        assert len(facts.functions) == 3
 
     def test_a_local_function_of_another_name_is_not_exempt_either(self):
         """No memory access at all: the rule that every function it defines, of any binding, is the shim's is what
         refuses this one. An object may not carry a function into the exemption by making it local."""
         result, body = self.shim_link("shim-local-call.o")
-        self.assertEqual(result["instrumented"]["result"], "fail", result)
-        self.assertFalse(check_links.object_facts(body).memory)
+        assert result["instrumented"]["result"] == "fail", result
+        assert not check_links.object_facts(body).memory
 
     def test_the_shim_of_the_pinned_rust_toolchain_is_exempt_and_listed(self):
         """The member of a real asan link (fixtures/allocator-shim/README.md): the names this change adds, and a
         code of 13 words with no load, store or atomic. It is the object the exemption is for, so it is exempt,
         and the list names it."""
         result, body = self.shim_link("shim-rustc-v0.o")
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
-        self.assertIn({"name": "shim.o", "kind": "rust-allocator-shim",
-                       "sha256": hashlib.sha256(body).hexdigest()}, result["uninstrumented"])
+        assert result["instrumented"]["result"] == "pass", result
+        assert {"name": "shim.o", "kind": "rust-allocator-shim",
+                "sha256": hashlib.sha256(body).hexdigest()} in result["uninstrumented"]
         facts = check_links.object_facts(body)
-        self.assertFalse(facts.memory)
-        self.assertEqual(len(facts.functions), 7)
+        assert not facts.memory
+        assert len(facts.functions) == 7
 
     def test_the_allocator_names_do_not_exempt_a_c_object_that_makes_an_access(self):
         """analyse reads no project.yaml: the exemption is not for Rust projects, it is for objects shaped like the
@@ -1238,17 +1229,17 @@ class Analyse(unittest.TestCase):
         record = self.record({"/work/l.a": {"a.o": good(), "lib.c.o": body}},
                              runtimes=(self.LIBC, self.ASAN_RT), build="asan")
         result = self.analyse({"asan": record})["asan"]
-        self.assertEqual(result["instrumented"]["result"], "fail", result)
-        self.assertIn("l.a(lib.c.o)", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "fail", result
+        assert "l.a(lib.c.o)" in result["instrumented"]["detail"]
 
     def test_a_seal_compiled_from_the_driver_sources_is_the_drivers(self):
         seal = elf_object(NOP, defined=["__wrap_getenv"], comment=True, files=["wrap_getenv.c"])
         record = self.record({"/work/l.a": {"a.o": good()}}, loose={"/work/b/wrap_getenv.o": seal})
-        self.assertEqual(self.analyse({"asan": record})["asan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"asan": record})["asan"]["instrumented"]["result"] == "pass"
         # The same name, with a function that is not a __wrap_ interposer: the project's code, uninstrumented.
         other = elf_object(NOP, defined=["__wrap_getenv", "helper"], comment=True, files=["wrap_getenv.c"])
         record = self.record({"/work/l.a": {"a.o": good()}}, loose={"/work/b/wrap_getenv.o": other})
-        self.assertEqual(self.analyse({"asan": record})["asan"]["instrumented"]["result"], "fail")
+        assert self.analyse({"asan": record})["asan"]["instrumented"]["result"] == "fail"
 
     def test_ubsan_wants_more_traps_than_plain_in_each_archive(self):
         def build(lib, dep):
@@ -1256,12 +1247,12 @@ class Analyse(unittest.TestCase):
                                 "/work/b/libdep.a": {"dep.o": elf_object(dep, defined=["g"], comment=True)}})
         plain = build(NOP * 4, NOP * 4)
         ubsan = build(NOP + UNIMP * 3, NOP + UNIMP)
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]["result"] == "pass"
         # The dependency's flags lost the sanitizer: the library's traps must not hide it.
         partly = build(NOP + UNIMP * 3, NOP * 4)
         result = self.analyse({"plain": plain, "ubsan": partly})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail")
-        self.assertIn("libdep.a: 0", result["detail"])
+        assert result["result"] == "fail"
+        assert "libdep.a: 0" in result["detail"]
 
     def test_ubsan_compares_each_loose_object_too(self):
         def build(fuzzer, other):
@@ -1272,14 +1263,14 @@ class Analyse(unittest.TestCase):
         # Only the fuzz target's own object got the sanitizer: its traps must not stand for the other object's.
         partly = build(NOP + UNIMP * 3, NOP * 4)
         result = self.analyse({"plain": plain, "ubsan": partly})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail")
-        self.assertIn("other.o: 0", result["detail"])
+        assert result["result"] == "fail"
+        assert "other.o: 0" in result["detail"]
 
     def test_ubsan_without_a_plain_build_decides_nothing(self):
         ubsan = self.record({"/work/l.a": {"a.o": elf_object(NOP + UNIMP, defined=["f"], comment=True)}})
         result = self.analyse({"ubsan": ubsan})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "error")
-        self.assertIn("no plain build", result["detail"])
+        assert result["result"] == "error"
+        assert "no plain build" in result["detail"]
 
     def test_assembly_without_dwarf_is_named_by_its_source(self):
         """The toolchain assembles a .S without -g, so the object carries no DWARF and no other mark."""
@@ -1292,15 +1283,14 @@ class Analyse(unittest.TestCase):
             return ["src/arch/memcpy.S"] * len(wanted)
 
         result = self.analyse({"asan": record}, dwarf_units=lambda objects: [None], assembly_sources=sources)["asan"]
-        self.assertEqual(asked, [("memcpy.S.o", ["memcpy_fast"])])
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
-        self.assertIn({"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"},
-                      result["uninstrumented"])
+        assert asked == [("memcpy.S.o", ["memcpy_fast"])]
+        assert result["instrumented"]["result"] == "pass", result
+        assert {"name": "memcpy.S.o", "kind": "assembly", "source": "src/arch/memcpy.S"} in result["uninstrumented"]
         # No source of the project carries its name and its functions: the object is not shown to be assembly.
         result = self.analyse({"asan": record}, dwarf_units=lambda objects: [None],
                               assembly_sources=lambda wanted: [None] * len(wanted))["asan"]
-        self.assertEqual(result["instrumented"]["result"], "fail")
-        self.assertIn("no DWARF", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "fail"
+        assert "no DWARF" in result["instrumented"]["detail"]
 
     def test_an_allocation_failure_copy_stands_for_its_original(self):
         copy = "/tmp/ov/af.abc/3-libz.a"
@@ -1309,8 +1299,8 @@ class Analyse(unittest.TestCase):
                              renamed={copy: (self.ZLIB, self.IMAGE[self.ZLIB])})
         record.taken = [entry for entry in record.taken if entry[0] != copy] + [(copy, "adler32.o", ".text", 4)]
         result = self.analyse({"asan": record})["asan"]
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
-        self.assertIn({"name": "libz.a", "kind": "image-library", "sha256": "f" * 64}, result["uninstrumented"])
+        assert result["instrumented"]["result"] == "pass", result
+        assert {"name": "libz.a", "kind": "image-library", "sha256": "f" * 64} in result["uninstrumented"]
 
     # The UBSan builds judge an object by the compile that wrote its bytes, when the build recorded one.
 
@@ -1326,12 +1316,12 @@ class Analyse(unittest.TestCase):
         for build in ("ubsan", "asan-ubsan"):
             result = self.ubsan(build, archives, archives,
                                 [(sink, "absl/log/log_sink.cc", "c++", compile_arguments("absl/log/log_sink.cc"))])
-            self.assertEqual(result["result"], "pass", (build, result))
-            self.assertIn("1 of them by the compile that wrote them", result["detail"])
+            assert result["result"] == "pass", (build, result)
+            assert "1 of them by the compile that wrote them" in result["detail"]
             # With no compile record, the traps decide, and there are none.
             result = self.ubsan(build, archives, archives, None)
-            self.assertEqual(result["result"], "fail", (build, result))
-            self.assertIn("libabsl_log_sink.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            assert result["result"] == "fail", (build, result)
+            assert "libabsl_log_sink.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
 
     def test_a_planted_member_compiled_without_the_flags_fails(self):
         """A load UBSan would check, no trap, and a compile without -fsanitize: the archive's other member has traps,
@@ -1344,10 +1334,10 @@ class Analyse(unittest.TestCase):
         result = self.ubsan("ubsan", plain, archives, [
             (checked, "src/checked.c", "c", compile_arguments("src/checked.c")),
             (planted, "src/planted.c", "c", compile_arguments("src/planted.c", flags=()))])
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("1 objects were compiled without the build's UndefinedBehaviorSanitizer flags: "
-                      "libplanted.a(planted.c.o) (src/planted.c: without -fsanitize=undefined "
-                      "-fno-sanitize-recover=all -fsanitize-trap=all)", result["detail"])
+        assert result["result"] == "fail", result
+        assert "1 objects were compiled without the build's UndefinedBehaviorSanitizer flags: " \
+            "libplanted.a(planted.c.o) (src/planted.c: without -fsanitize=undefined " \
+            "-fno-sanitize-recover=all -fsanitize-trap=all)" in result["detail"]
 
     def test_a_planted_member_whose_source_turns_ubsan_off_fails(self):
         """A load UBSan would check, compiled with the build's flags, no trap, and a source whose no_sanitize attribute
@@ -1366,11 +1356,11 @@ class Analyse(unittest.TestCase):
                     (checked, "src/checked.c", "c", compile_arguments("src/checked.c")),
                     (planted, "src/planted.c", "c", compile_arguments("src/planted.c"), "/work/b", None,
                      [attribute], without)])
-                self.assertEqual(result["result"], "fail", (build, attribute, result))
-                self.assertIn("1 objects have no UndefinedBehaviorSanitizer check because the no_sanitize attributes "
-                              "of their source took the checks out: libplanted.a(planted.c.o) (src/planted.c: no UBSan "
-                              "check, and its source's no_sanitize attributes took UBSan checks out of it (1 without "
-                              f"{attribute}))", result["detail"])
+                assert result["result"] == "fail", (build, attribute, result)
+                assert "1 objects have no UndefinedBehaviorSanitizer check because the no_sanitize attributes " \
+                    "of their source took the checks out: libplanted.a(planted.c.o) (src/planted.c: no UBSan " \
+                    "check, and its source's no_sanitize attributes took UBSan checks out of it (1 without " \
+                    f"{attribute}))" in result["detail"]
 
     def test_a_member_with_nothing_to_check_still_passes_with_an_attribute(self):
         """Case 1 with attributes: a source whose attributes took nothing out of the object (compiled again without
@@ -1384,14 +1374,14 @@ class Analyse(unittest.TestCase):
                          [['no_sanitize("address")', "no_sanitize"]], [[]]):
                 result = self.ubsan(build, archives, archives,
                                     [(sink, "absl/log/log_sink.cc", "c++", arguments, "/work/b", None, *more)])
-                self.assertEqual(result["result"], "pass", (build, more, result))
-                self.assertIn("1 of them by the compile that wrote them", result["detail"])
+                assert result["result"] == "pass", (build, more, result)
+                assert "1 of them by the compile that wrote them" in result["detail"]
             trapped = elf_object(LW + UNIMP + RET, defined=["f"], undefined=ASAN, comment=True)
             result = self.ubsan(build, {"/work/b/libf.a": {"f.c.o": elf_object(LW + RET, defined=["f"], comment=True)}},
                                 {"/work/b/libf.a": {"f.c.o": trapped}},
                                 [(trapped, "f.c", "c", compile_arguments("f.c"), "/work/b", None,
                                   ['no_sanitize("shift")'], None)])
-            self.assertEqual(result["result"], "pass", (build, result))
+            assert result["result"] == "pass", (build, result)
 
     def test_a_member_with_no_trap_whose_record_cannot_say_is_judged_by_traps(self):
         """A record that cannot say what the source's attributes took out (no_sanitize null: standard input, a response
@@ -1404,8 +1394,8 @@ class Analyse(unittest.TestCase):
             result = self.ubsan("ubsan", archives, archives, [
                 (sink, "absl/log/log_sink.cc", "c++", compile_arguments("absl/log/log_sink.cc"), "/work/b", None,
                  *more)])
-            self.assertEqual(result["result"], "fail", (more, result))
-            self.assertIn("libabsl_log_sink.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+            assert result["result"] == "fail", (more, result)
+            assert "libabsl_log_sink.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
 
     def test_a_planted_member_with_no_compile_record_fails_by_its_traps(self):
         planted = elf_object(LW + RET, defined=["planted"], comment=True)
@@ -1413,25 +1403,25 @@ class Analyse(unittest.TestCase):
         # A build with records that has none for these bytes (a compile that ran no shim), and one with no records.
         for compiled in ([], None):
             result = self.ubsan("ubsan", archives, archives, compiled)
-            self.assertEqual(result["result"], "fail", (compiled, result))
-            self.assertIn("libplanted.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
-            self.assertNotIn("compiled without", result["detail"])
+            assert result["result"] == "fail", (compiled, result)
+            assert "libplanted.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
+            assert "compiled without" not in result["detail"]
 
     def test_a_member_with_traps_compiled_without_the_flags_fails(self):
         trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
         plain = {"/work/b/libx.a": {"x.c.o": elf_object(LW + RET, defined=["f"], comment=True)}}
         result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
                             [(trapped, "x.c", "c", compile_arguments("x.c", flags=()))])
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libx.a(x.c.o) (x.c: without", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libx.a(x.c.o) (x.c: without" in result["detail"]
 
     def test_a_compile_that_turns_the_sanitizer_off_after_its_flags_fails(self):
         sink = elf_object(RET, defined=["f"], comment=True)
         archives = {"/work/b/libx.a": {"x.c.o": sink}}
         result = self.ubsan("ubsan", archives, archives,
                             [(sink, "x.c", "c", compile_arguments("x.c", after=["-fno-sanitize=undefined"]))])
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libx.a(x.c.o) (x.c: with -fno-sanitize=undefined)", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libx.a(x.c.o) (x.c: with -fno-sanitize=undefined)" in result["detail"]
 
     UNDOING = ["-fsanitize-ignorelist=/src/ignore.txt", "-fsanitize-blacklist=/src/ignore.txt",
                "-fsanitize-system-ignorelist=/src/sys.txt", "-fsanitize-system-blacklist=/src/sys.txt",
@@ -1449,9 +1439,9 @@ class Analyse(unittest.TestCase):
             for build in ("ubsan", "asan-ubsan"):
                 compiled = [(sink, "x.c", "c", compile_arguments("x.c", after=[word]))]
                 result = self.ubsan(build, plain, archives, compiled)
-                self.assertEqual(result["result"], "fail", (word, build, result))
-                self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
-                self.assertNotIn("AddressSanitizer constructor", result["detail"])
+                assert result["result"] == "fail", (word, build, result)
+                assert f"libx.a(x.c.o) (x.c: with {word})" in result["detail"]
+                assert "AddressSanitizer constructor" not in result["detail"]
 
     def test_a_word_given_through_xclang_counts_as_the_bare_word(self):
         sink = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
@@ -1465,8 +1455,8 @@ class Analyse(unittest.TestCase):
                             (["-Xclang=-ftrap-function=nothing"], "-ftrap-function=nothing"),
                             (["-Wp,-ftrap-function=nothing"], "-ftrap-function=nothing")):
             result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
-            self.assertEqual(result["result"], "fail", (after, result))
-            self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+            assert result["result"] == "fail", (after, result)
+            assert f"libx.a(x.c.o) (x.c: with {word})" in result["detail"]
 
     def test_a_compile_with_an_llvm_option_decides_nothing(self):
         """LLVM's own options can take every check away (-ubsan-guard-checks with -lower-allow-check-random-rate=0):
@@ -1479,13 +1469,13 @@ class Analyse(unittest.TestCase):
                       ["-Xclang=-mllvm", "-Xclang=-ubsan-guard-checks"], ["-mllvm=-ubsan-guard-checks"]):
             result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": sink}},
                                 [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
-            self.assertEqual(result["result"], "fail", (after, result))
-            self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
-            self.assertNotIn("1 of them by the compile", result["detail"])
+            assert result["result"] == "fail", (after, result)
+            assert "libx.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
+            assert "1 of them by the compile" not in result["detail"]
             result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
                                 [(trapped, "x.c", "c", compile_arguments("x.c", after=after))])
-            self.assertEqual(result["result"], "pass", (after, result))
-            self.assertNotIn("by the compile that wrote them", result["detail"])
+            assert result["result"] == "pass", (after, result)
+            assert "by the compile that wrote them" not in result["detail"]
 
     FROM_FILES = (["--config=/w/ign.cfg"], ["--config", "/w/ign.cfg"], ["--config-user-dir=/w/cfg"],
                   ["--config-user-dir", "/w/cfg"], ["--config-system-dir=/w/cfg"], ["--config-system-dir", "/w/cfg"],
@@ -1502,14 +1492,14 @@ class Analyse(unittest.TestCase):
         for after in self.FROM_FILES:
             result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": sink}},
                                 [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
-            self.assertEqual(result["result"], "fail", (after, result))
-            self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
-            self.assertNotIn("by the compile", result["detail"])
-            self.assertNotIn("compiled without", result["detail"])
+            assert result["result"] == "fail", (after, result)
+            assert "libx.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
+            assert "by the compile" not in result["detail"]
+            assert "compiled without" not in result["detail"]
             result = self.ubsan("ubsan", plain, {"/work/b/libx.a": {"x.c.o": trapped}},
                                 [(trapped, "x.c", "c", compile_arguments("x.c", after=after))])
-            self.assertEqual(result["result"], "pass", (after, result))
-            self.assertNotIn("by the compile that wrote them", result["detail"])
+            assert result["result"] == "pass", (after, result)
+            assert "by the compile that wrote them" not in result["detail"]
 
     def test_a_file_option_the_build_gives_itself_decides(self):
         """The same option with the same value in the build's own flags is the build's: the compile decides. Another
@@ -1520,11 +1510,11 @@ class Analyse(unittest.TestCase):
         record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments(
             "x.c", after=["--config", "/opt/build.cfg", "-mllvm", "-some-option"]))])
         record.compiles.sanitizer["c"] += ["--config=/opt/build.cfg", "-mllvm", "-some-option"]
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "pass"
         record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments.append("--config=/w/other.cfg")
         result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libx.a: 0 UBSan traps" in result["detail"]
 
     def test_a_word_given_through_the_preprocessor_options_counts_as_the_bare_word(self):
         """-Wp, and -Xpreprocessor hand their words to clang's front end as -Xclang does."""
@@ -1535,14 +1525,14 @@ class Analyse(unittest.TestCase):
                             (["-Xpreprocessor", "-fsanitize-ignorelist=ign.txt"], "-fsanitize-ignorelist=ign.txt"),
                             (["-Wp,-MD,x.d,-fno-sanitize=null"], "-fno-sanitize=null")):
             result = self.ubsan("ubsan", plain, archives, [(sink, "x.c", "c", compile_arguments("x.c", after=after))])
-            self.assertEqual(result["result"], "fail", (after, result))
-            self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+            assert result["result"] == "fail", (after, result)
+            assert f"libx.a(x.c.o) (x.c: with {word})" in result["detail"]
         sink = elf_object(RET, defined=["f"], comment=True)
         result = self.ubsan("ubsan", {"/work/b/libx.a": {"x.c.o": sink}}, {"/work/b/libx.a": {"x.c.o": sink}},
                             [(sink, "x.c", "c", compile_arguments(
                                 "x.c", after=["-Wp,-mllvm,-ubsan-guard-checks"]))])
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libx.a: 0 UBSan traps", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libx.a: 0 UBSan traps" in result["detail"]
 
     def test_the_builds_own_trap_and_recover_words_and_coverage_words_are_not_taken_for_them(self):
         """The build's own -fsanitize-trap=all and -fno-sanitize-recover=all, -fsanitize-coverage=0 (which curl's seed
@@ -1551,16 +1541,16 @@ class Analyse(unittest.TestCase):
         archives = {"/work/b/libx.a": {"x.c.o": sink}}
         result = self.ubsan("ubsan", archives, archives,
                             [(sink, "x.c", "c", compile_arguments("x.c", after=["-fsanitize-coverage=0"]))])
-        self.assertEqual(result["result"], "pass", result)
+        assert result["result"] == "pass", result
         plain = self.record(archives, build="plain")
         record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments(
             "x.c", after=["-fsanitize-ignorelist=/src/ignore.txt"]))])
         record.compiles.sanitizer["c"].append("-fsanitize-ignorelist=/src/ignore.txt")
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "pass"
         record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments[-1] = "-fsanitize-ignorelist=/src/b.txt"
         result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("with -fsanitize-ignorelist=/src/b.txt", result["detail"])
+        assert result["result"] == "fail", result
+        assert "with -fsanitize-ignorelist=/src/b.txt" in result["detail"]
 
     def test_any_compile_of_the_same_bytes_with_the_flags_decides(self):
         """Two compiles that wrote the same bytes, one without the flags (a host tool's copy, say): the bytes are the
@@ -1569,7 +1559,7 @@ class Analyse(unittest.TestCase):
         archives = {"/work/b/libx.a": {"x.c.o": sink}}
         result = self.ubsan("ubsan", archives, archives, [(sink, "x.c", "c", compile_arguments("x.c", flags=())),
                                                           (sink, "x.c", "c", compile_arguments("x.c"))])
-        self.assertEqual(result["result"], "pass", result)
+        assert result["result"] == "pass", result
 
     def test_a_compile_the_records_cannot_judge_falls_back_to_the_traps(self):
         """Assembly, which UBSan does not instrument, and arguments in a response file decide nothing."""
@@ -1578,9 +1568,9 @@ class Analyse(unittest.TestCase):
         for language, arguments in (("assembler-with-cpp", compile_arguments("x.S", flags=())),
                                     ("c", ["@x.rsp", "-c", "x.c"])):
             result = self.ubsan("ubsan", archives, archives, [(code, "x", language, arguments)])
-            self.assertEqual(result["result"], "fail", (language, result))
-            self.assertIn("libx.a: 0 UBSan traps", result["detail"])
-            self.assertNotIn("compiled without", result["detail"])
+            assert result["result"] == "fail", (language, result)
+            assert "libx.a: 0 UBSan traps" in result["detail"]
+            assert "compiled without" not in result["detail"]
 
     def test_an_exclusion_counts_only_where_the_build_has_it(self):
         """compile leaves OV_UBSAN_C_EXCLUDE out of the C compiles only: a C++ compile with it adds an exclusion."""
@@ -1590,15 +1580,15 @@ class Analyse(unittest.TestCase):
                              compiled=[(sink, "x", "c", compile_arguments("x", after=["-fno-sanitize=vptr"]))])
         record.compiles.sanitizer["c"].append("-fno-sanitize=vptr")
         record.compiles.ubsan["c"].append("-fno-sanitize=vptr")
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "pass"
         record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].language = "c++"
         result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("with -fno-sanitize=vptr", result["detail"])
+        assert result["result"] == "fail", result
+        assert "with -fno-sanitize=vptr" in result["detail"]
         # A C compile need not repeat the exclusion: with it off, the compile has more checks, not fewer.
         record.compiles.objects[hashlib.sha256(sink).hexdigest()][0] = check_links.Compile(
             "x.c", "c", compile_arguments("x.c"), no_sanitize=[])
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "pass"
 
     def test_a_later_lower_strict_flex_arrays_level_takes_the_check_away(self):
         """clang keeps only the last -fstrict-flex-arrays= it is given: when the build's UBSan flags give level 1, a
@@ -1625,14 +1615,14 @@ class Analyse(unittest.TestCase):
                     record.compiles.sanitizer[language].append("-fstrict-flex-arrays=1")
                 result = self.analyse({"plain": plain, build: record})[build]["instrumented"]
                 if word is None:
-                    self.assertEqual(result["result"], "pass", (after, build, result))
+                    assert result["result"] == "pass", (after, build, result)
                 else:
-                    self.assertEqual(result["result"], "fail", (after, build, result))
-                    self.assertIn(f"libx.a(x.c.o) (x.c: with {word})", result["detail"])
+                    assert result["result"] == "fail", (after, build, result)
+                    assert f"libx.a(x.c.o) (x.c: with {word})" in result["detail"]
         # Without the flag in the build's own UBSan flags, a level in the compile is the project's choice.
         record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
             (sink, "x.c", "c", compile_arguments("x.c", after=["-fstrict-flex-arrays=0"]))])
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "pass"
         # A build level that is not decimal digits cannot be compared: a compile that then gives a decimal level fails,
         # and no traceback stops the check.
         record = self.record({"/work/b/libx.a": {"x.c.o": sink}}, compiled=[
@@ -1642,8 +1632,8 @@ class Analyse(unittest.TestCase):
             record.compiles.ubsan[language].append("-fstrict-flex-arrays=²")
             record.compiles.sanitizer[language].append("-fstrict-flex-arrays=²")
         result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libx.a(x.c.o) (x.c: with -fstrict-flex-arrays=²)", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libx.a(x.c.o) (x.c: with -fstrict-flex-arrays=²)" in result["detail"]
 
     def test_flags_that_turn_on_no_check_decide_nothing(self):
         """A build whose recorded UBSan flags hold no -fsanitize= word (none at all, or only words every compile
@@ -1660,11 +1650,11 @@ class Analyse(unittest.TestCase):
                 record.compiles.ubsan = {"c": list(wanted), "c++": list(wanted)}
                 record.compiles.sanitizer = {"c": own, "c++": own}
                 result = self.analyse({"plain": plain, build: record})[build]["instrumented"]
-                self.assertEqual(result["result"], "fail", (build, wanted, result))
-                self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
-                self.assertNotIn("by the compile that wrote them", result["detail"])
-                self.assertIn("the build's recorded UndefinedBehaviorSanitizer flags for C and C++ turn on no check",
-                              result["detail"])
+                assert result["result"] == "fail", (build, wanted, result)
+                assert "libx.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
+                assert "by the compile that wrote them" not in result["detail"]
+                assert "the build's recorded UndefinedBehaviorSanitizer flags for C and C++ turn on no check" in \
+                    result["detail"]
 
     def test_flags_that_turn_on_no_check_for_one_language_decide_nothing_there(self):
         """C++'s flags name checks, C's do not: the C++ member is decided by its record, the C member by its traps."""
@@ -1676,18 +1666,18 @@ class Analyse(unittest.TestCase):
                                                  (cxx_sink, "x.cc", "c++", compile_arguments("x.cc"))])
         record.compiles.ubsan["c"] = ["-fno-sanitize-recover=all"]
         result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libc.a: 0 UBSan traps", result["detail"])
-        self.assertNotIn("libcxx.a", result["detail"])
-        self.assertIn("flags for C turn on no check", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libc.a: 0 UBSan traps" in result["detail"]
+        assert "libcxx.a" not in result["detail"]
+        assert "flags for C turn on no check" in result["detail"]
 
     def test_a_build_with_no_compile_records_says_so(self):
         trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
         plain = self.record({"/work/b/libx.a": {"x.o": elf_object(LW + RET, defined=["f"], comment=True)}})
         ubsan = self.record({"/work/b/libx.a": {"x.o": trapped}})
         result = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "pass", result)
-        self.assertIn("the build has no compile records that this reads", result["detail"])
+        assert result["result"] == "pass", result
+        assert "the build has no compile records that this reads" in result["detail"]
 
     def test_another_builds_compile_records_decide_nothing(self):
         sink = elf_object(RET, defined=["f"], comment=True)
@@ -1695,7 +1685,7 @@ class Analyse(unittest.TestCase):
         plain = self.record(archives, build="plain")
         record = self.record(archives, compiled=[(sink, "x.c", "c", compile_arguments("x.c"))], build="ubsan")
         record.compiles.build = "asan-ubsan"
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "fail")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "fail"
 
     def test_a_loose_object_compiled_without_the_flags_fails(self):
         """With no record, a loose object with no check is only named; recorded without the flags, it fails."""
@@ -1708,8 +1698,8 @@ class Analyse(unittest.TestCase):
                                                    "fail")):
             ubsan = self.record({"/work/b/l.a": {"a.o": lib}}, loose={"/work/b/fuzzer.o": fuzzer}, compiled=compiled)
             result = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]
-            self.assertEqual(result["result"], verdict, result)
-            self.assertIn("fuzzer.o", result["detail"])
+            assert result["result"] == verdict, result
+            assert "fuzzer.o" in result["detail"]
 
     def test_an_archive_with_code_no_record_decides_is_judged_by_its_checks(self):
         """A member that no record decides (here, assembly) leaves its archive to the trap count, as before."""
@@ -1719,26 +1709,26 @@ class Analyse(unittest.TestCase):
         compiled = [(sink, "x.c", "c", compile_arguments("x.c")),
                     (asm, "g.S", "assembler-with-cpp", compile_arguments("g.S", ()))]
         result = self.ubsan("ubsan", archives, archives, compiled)
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libx.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libx.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
         trapped = elf_object(LW + UNIMP + RET, defined=["f"], comment=True)
         result = self.ubsan("ubsan", {"/work/b/libx.a": {"x.o": elf_object(LW + RET, defined=["f"], comment=True),
                                                          "g.o": asm}},
                             {"/work/b/libx.a": {"x.o": trapped, "g.o": asm}},
                             [(trapped, "x.c", "c", compile_arguments("x.c")),
                              (asm, "g.S", "assembler-with-cpp", compile_arguments("g.S", ()))])
-        self.assertEqual(result["result"], "pass", result)
+        assert result["result"] == "pass", result
 
     def test_the_plain_build_is_needed_only_for_code_no_record_decides(self):
         sink = elf_object(RET, defined=["f"], comment=True)
         archives = {"/work/b/libx.a": {"x.o": sink}}
         result = self.analyse({"ubsan": self.record(archives, compiled=[(sink, "x.c", "c",
                                                                          compile_arguments("x.c"))])})["ubsan"]
-        self.assertEqual(result["instrumented"]["result"], "pass", result)
+        assert result["instrumented"]["result"] == "pass", result
         # With no records, as before: no plain build, no decision.
         result = self.analyse({"ubsan": self.record(archives)})["ubsan"]
-        self.assertEqual(result["instrumented"]["result"], "error", result)
-        self.assertIn("no plain build", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "error", result
+        assert "no plain build" in result["instrumented"]["detail"]
 
     def test_an_exclusion_the_build_makes_is_allowed_by_check_name(self):
         sink = elf_object(RET, defined=["f"], comment=True)
@@ -1746,11 +1736,11 @@ class Analyse(unittest.TestCase):
         record = self.record({"/work/b/libx.a": {"x.o": sink}},
                              compiled=[(sink, "x.cc", "c++", compile_arguments("x.cc", after=["-fno-sanitize=vptr"]))])
         record.compiles.sanitizer["c++"][-1] = "-fno-sanitize=function,vptr"
-        self.assertEqual(self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"], "pass")
+        assert self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]["result"] == "pass"
         record.compiles.objects[hashlib.sha256(sink).hexdigest()][0].arguments.append("-fno-sanitize=vptr,null")
         result = self.analyse({"plain": plain, "ubsan": record})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("with -fno-sanitize=vptr,null", result["detail"])
+        assert result["result"] == "fail", result
+        assert "with -fno-sanitize=vptr,null" in result["detail"]
 
     def test_compile_records_are_read_safely(self):
         good_line = json.dumps({"sha256": "a" * 64, "output": "x.o", "directory": "/w", "file": "x.c",
@@ -1763,17 +1753,17 @@ class Analyse(unittest.TestCase):
                                                    b'"arguments": []}\n' + b'{"sha256": "' + b"b" * 64
                                                  + b'", "file": "\xff.c", "language": "c", "arguments": ["\xfe"]}\n')
         compiles = check_links.read_compiles(self.raw)
-        self.assertEqual(sorted(compiles.objects), ["a" * 64, "b" * 64])
-        self.assertEqual(compiles.objects["a" * 64][0].arguments, ["-c", "x.c"])
+        assert sorted(compiles.objects) == ["a" * 64, "b" * 64]
+        assert compiles.objects["a" * 64][0].arguments == ["-c", "x.c"]
         # No records, flags that are not the build's, or a link planted in their place: no records.
         (records / "compiles.jsonl").unlink()
-        self.assertIsNone(check_links.read_compiles(self.raw))
+        assert check_links.read_compiles(self.raw) is None
         (records / "compiles.jsonl").symlink_to(records / "flags.json")
-        self.assertIsNone(check_links.read_compiles(self.raw))
+        assert check_links.read_compiles(self.raw) is None
         (records / "compiles.jsonl").unlink()
         (records / "compiles.jsonl").write_text(good_line + "\n")
         (records / "flags.json").write_text('{"build": "ubsan", "sanitizer": {"c": []}}')
-        self.assertIsNone(check_links.read_compiles(self.raw))
+        assert check_links.read_compiles(self.raw) is None
 
     def test_a_changed_image_file_is_examined_as_the_projects_code(self):
         changed = archive({"x.o": elf_object(NOP, defined=["x"], comment=True)})
@@ -1783,8 +1773,8 @@ class Analyse(unittest.TestCase):
                                                               len(changed))
         record.taken.append(("/opt/musl-sysroot/usr/lib/libnew.a", "x.o", ".text", 4))
         result = self.analyse({"asan": record})["asan"]
-        self.assertEqual(result["instrumented"]["result"], "fail")
-        self.assertIn("libnew.a(x.o)", result["instrumented"]["detail"])
+        assert result["instrumented"]["result"] == "fail"
+        assert "libnew.a(x.o)" in result["instrumented"]["detail"]
 
     # A C library that the build declares (link-fuzz-target, OV_LIBC), as musl's make install lays out its lib
     # directory, here in the build directory. No sanitizer instruments it: its code refers to no AddressSanitizer
@@ -1833,18 +1823,18 @@ class Analyse(unittest.TestCase):
         libc_sha256 = hashlib.sha256(archive(self.MUSL_LIBC)).hexdigest()
         crt1_sha256 = hashlib.sha256(self.MUSL_CRT1).hexdigest()
         for build, result in self.declared_builds().items():
-            self.assertEqual(result["uninstrumented"], [
+            assert result["uninstrumented"] == [
                 {"name": "libz.a", "kind": "image-library", "sha256": "f" * 64},
                 {"name": "crt1.o", "kind": "libc", "sha256": crt1_sha256},
                 {"name": "libc.a", "kind": "libc", "sha256": libc_sha256},
-            ], build)
-            self.assertEqual(result["instrumented"]["result"], "plain" if build == "plain" else "pass", (build, result))
+            ], build
+            assert result["instrumented"]["result"] == ("plain" if build == "plain" else "pass"), (build, result)
             detail = result["instrumented"]["detail"]
             if build == "plain":
-                self.assertTrue(detail.startswith(check_links.PLAIN_DETAIL), detail)
+                assert detail.startswith(check_links.PLAIN_DETAIL), detail
             for name, sha256 in (("libc.a", libc_sha256), ("crt1.o", crt1_sha256), ("crti.o", "3" * 64),
                                  ("crtn.o", "4" * 64)):
-                self.assertIn(f"{name} ({self.MUSL}{name}, sha256 {sha256})", detail, build)
+                assert f"{name} ({self.MUSL}{name}, sha256 {sha256})" in detail, build
 
     def test_the_report_names_a_declared_libc(self):
         """The report of the four builds of test_a_declared_libc_is_listed_and_exempt_in_each_build, whose results
@@ -1888,22 +1878,22 @@ class Analyse(unittest.TestCase):
                 "| `t.asan-ubsan` | pass | pass | pass | pass | 3 files{} |\n")
         declared = {build: results[build]["instrumented"] for build in builds}
         for build in builds:
-            self.assertIn("; " + note, declared[build]["detail"], build)
+            assert "; " + note in declared[build]["detail"], build
         # With no declared C library, and so no note, the report is the one that the same results got before.
         undeclared = {build: {**declared[build], "detail": declared[build]["detail"].replace("; " + note, "")}
                       for build in builds}
-        self.assertEqual(report(undeclared, None), head + rows.format(*[""] * 4))
-        self.assertEqual(report(declared, None), head + rows.format(*[""] * 4))
+        assert report(undeclared, None) == head + rows.format(*[""] * 4)
+        assert report(declared, None) == head + rows.format(*[""] * 4)
         noted = rows.format(*[", a declared C library"] * 4)
         listing = ("These builds declare their own C library (OV_LIBC). Check C5 of review.md says what the review "
                    "checks:\n\n" + "".join(self.declared_line(f"t.{build}") + "\n" for build in builds))
-        self.assertEqual(report(declared, libc), head + noted + "\n" + listing)
+        assert report(declared, libc) == head + noted + "\n" + listing
         failed = {**declared, "asan": {**declared["asan"], "result": "fail"}}
-        self.assertEqual(report(failed, libc),
-                         head + noted.replace("| `t.asan` | pass | pass | pass | pass |",
-                                              "| `t.asan` | pass | pass | pass | **fail** |")
-                         + f"\nWhat each failure is:\n\n- `t.asan`, instrumented: `{declared['asan']['detail']}`\n\n"
-                         + listing)
+        assert report(failed, libc) == \
+            head + noted.replace("| `t.asan` | pass | pass | pass | pass |",
+                                 "| `t.asan` | pass | pass | pass | **fail** |") \
+            + f"\nWhat each failure is:\n\n- `t.asan`, instrumented: `{declared['asan']['detail']}`\n\n" \
+            + listing
 
     def test_the_report_names_a_declared_libc_of_a_record_with_a_problem(self):
         """A record of which the reader kept no input section of the map (Record.problem), in builds that declare a C
@@ -1917,9 +1907,8 @@ class Analyse(unittest.TestCase):
             records[build] = self.declared_record({"/work/b/libproject.a": {"lib.c.o": good()}})
             records[build].problem = problem
         results = self.analyse(records)
-        self.assertEqual(results["asan"], {"uninstrumented": None,
-                                           "instrumented": {"result": "error", "detail": problem}})
-        self.assertEqual(results["plain"]["instrumented"]["detail"], f"{check_links.PLAIN_DETAIL}; {problem}")
+        assert results["asan"] == {"uninstrumented": None, "instrumented": {"result": "error", "detail": problem}}
+        assert results["plain"]["instrumented"]["detail"] == f"{check_links.PLAIN_DETAIL}; {problem}"
         block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
                  "targets": {"t": {build: {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                            "quiet_loud": {"result": "pass"}, "instrumented": result["instrumented"]}
@@ -1927,12 +1916,12 @@ class Analyse(unittest.TestCase):
         text = check_binaries.report(block, {"t": {"plain": None, "asan": None}}, ["plain", "asan"],
                                      {"t": {build: record.libc for build, record in records.items()}})
         for build in ("plain", "asan"):
-            self.assertIn(f"| `t.{build}` | pass | pass | pass | **not decided** | not recorded, a declared C "
-                          "library |\n", text)
-            self.assertIn(f"- `t.{build}`, instrumented: ", text)
-        self.assertTrue(text.endswith("These builds declare their own C library (OV_LIBC). Check C5 of review.md says "
-                                      f"what the review checks:\n\n{self.declared_line('t.plain')}\n"
-                                      f"{self.declared_line('t.asan')}\n"), text)
+            assert f"| `t.{build}` | pass | pass | pass | **not decided** | not recorded, a declared C " \
+                "library |\n" in text
+            assert f"- `t.{build}`, instrumented: " in text
+        assert text.endswith("These builds declare their own C library (OV_LIBC). Check C5 of review.md says "
+                             f"what the review checks:\n\n{self.declared_line('t.plain')}\n"
+                             f"{self.declared_line('t.asan')}\n"), text
 
     def test_the_report_gives_each_declared_file_whole(self):
         """The paths of the test project's asan-ubsan build of libc_fuzzer: tests/fixtures/target-settings/ makes its C
@@ -1947,10 +1936,10 @@ class Analyse(unittest.TestCase):
                            (long, "/work/" + "d" * 293 + "…")):
             libc = {name: (lib + name, str(n) * 64) for n, name in enumerate(check_links.DECLARED_LIBC, 1)}
             text = check_binaries.report(block, {"t": {"asan-ubsan": []}}, ["asan-ubsan"], {"t": {"asan-ubsan": libc}})
-            self.assertIn("| `t.asan-ubsan` | pass | pass | pass | pass | 0 files, a declared C library |\n", text)
+            assert "| `t.asan-ubsan` | pass | pass | pass | pass | 0 files, a declared C library |\n" in text
             line = ", ".join(f"`{name}` `{shown or lib + name}` sha256 `{str(n) * 64}`"
                              for n, name in enumerate(check_links.DECLARED_LIBC, 1))
-            self.assertTrue(text.endswith(f"\n\n- `t.asan-ubsan`: {line}\n"), text)
+            assert text.endswith(f"\n\n- `t.asan-ubsan`: {line}\n"), text
 
     def test_a_declared_path_cannot_change_the_list(self):
         """link-fuzz-target takes any absolute path that ends in /libc.a. So a declared path can hold "; ", which also
@@ -1967,21 +1956,20 @@ class Analyse(unittest.TestCase):
                      "elf": {"result": "pass"}, "system_calls": {"result": "pass"}, "quiet_loud": {"result": "pass"},
                      "instrumented": {"result": "error", "detail": f"{check_links.PLAIN_DETAIL}; {note}; {problem}"}}}}}
         text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"], {"t": {"plain": libc}})
-        self.assertIn("| **not decided** | not recorded, a declared C library |\n", text)
-        self.assertTrue(text.endswith(
+        assert "| **not decided** | not recorded, a declared C library |\n" in text
+        assert text.endswith(
             f"\n\n- `t.plain`: `libc.a` `{lib}libc.a` sha256 `{'1' * 64}`, `crt1.o` `{lib}crt1.o` sha256 `{'2' * 64}`, "
-            f"`crti.o` `{lib}crti.o` sha256 `{'3' * 64}`, `crtn.o` `{lib}crtn.o` sha256 `{'4' * 64}`\n"), text)
+            f"`crti.o` `{lib}crti.o` sha256 `{'3' * 64}`, `crtn.o` `{lib}crtn.o` sha256 `{'4' * 64}`\n"), text
 
     def test_the_same_libc_undeclared_fails_the_asan_builds(self):
         """The control: the same C library with no declaration is the project's code, uninstrumented, as before."""
         results = self.declared_builds(declare=False)
         for build in ("asan", "asan-ubsan"):
             result = results[build]["instrumented"]
-            self.assertEqual(result["result"], "fail", (build, result))
-            self.assertIn("2 of 3 objects with code refer to no AddressSanitizer constructor", result["detail"])
-            self.assertIn("libc.a(memcpy.lo)", result["detail"])
-        self.assertEqual(results["plain"]["uninstrumented"],
-                         [{"name": "libz.a", "kind": "image-library", "sha256": "f" * 64}])
+            assert result["result"] == "fail", (build, result)
+            assert "2 of 3 objects with code refer to no AddressSanitizer constructor" in result["detail"]
+            assert "libc.a(memcpy.lo)" in result["detail"]
+        assert results["plain"]["uninstrumented"] == [{"name": "libz.a", "kind": "image-library", "sha256": "f" * 64}]
 
     def test_an_undeclared_archive_beside_a_declared_libc_is_judged_as_before(self):
         """An uninstrumented archive that the build does not declare fails AddressSanitizer's check. The plain
@@ -1989,41 +1977,41 @@ class Analyse(unittest.TestCase):
         other = {"o.c.o": elf_object(LW + RET, defined=["g"], files=["o.c"], comment=True)}
         asan = self.declared_record({"/work/b/libproject.a": {"lib.c.o": good()}, "/work/b/libother.a": other})
         result = self.analyse({"asan": asan})["asan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("1 of 2 objects with code refer to no AddressSanitizer constructor: libother.a(o.c.o)",
-                      result["detail"])
+        assert result["result"] == "fail", result
+        assert "1 of 2 objects with code refer to no AddressSanitizer constructor: libother.a(o.c.o)" in \
+            result["detail"]
         plain = self.declared_record({"/work/b/libproject.a": {"lib.c.o": elf_object(LW + RET, defined=["f"],
                                                                                       comment=True)},
                                       "/work/b/libother.a": other})
         code, _provided, problems = check_links.project_code(plain, self.IMAGE)
-        self.assertEqual(problems, [])
-        self.assertEqual(check_links.ub_count(code), {"libproject.a": 0, "libother.a": 0})
+        assert problems == []
+        assert check_links.ub_count(code) == {"libproject.a": 0, "libother.a": 0}
         ubsan = self.declared_record({"/work/b/libproject.a": {"lib.c.o": elf_object(LW + UNIMP + RET, defined=["f"],
                                                                                       comment=True)},
                                       "/work/b/libother.a": other})
         result = self.analyse({"plain": plain, "ubsan": ubsan})["ubsan"]["instrumented"]
-        self.assertEqual(result["result"], "fail", result)
-        self.assertIn("libother.a: 0 UBSan traps and UB checks, the plain build's 0", result["detail"])
-        self.assertNotIn("libc.a: ", result["detail"])
+        assert result["result"] == "fail", result
+        assert "libother.a: 0 UBSan traps and UB checks, the plain build's 0" in result["detail"]
+        assert "libc.a: " not in result["detail"]
 
     def test_a_declared_libc_the_link_did_not_take_is_an_error(self):
         """A declaration that the link ignored: the list would name a C library that the binary does not hold, so
         each build has no list and the result error."""
         for build, result in self.declared_builds(take=False).items():
-            self.assertIsNone(result["uninstrumented"], build)
-            self.assertEqual(result["instrumented"]["result"], "error", (build, result))
-            self.assertIn(f"the link did not take the C library that the build declares (OV_LIBC): {self.MUSL}libc.a",
-                          result["instrumented"]["detail"])
+            assert result["uninstrumented"] is None, build
+            assert result["instrumented"]["result"] == "error", (build, result)
+            assert f"the link did not take the C library that the build declares (OV_LIBC): {self.MUSL}libc.a" in \
+                result["instrumented"]["detail"]
 
     def test_an_image_libc_file_beside_a_declared_libc_is_an_error(self):
         """The image's libc.a, or the image's crt1.o, beside a declared C library: the link took two C libraries, so
         each build has no list and the result error."""
         for path in (self.LIBC, self.CRT1):
             for build, result in self.declared_builds(runtimes=(path, self.ZLIB)).items():
-                self.assertIsNone(result["uninstrumented"], (path, build))
-                self.assertEqual(result["instrumented"]["result"], "error", (path, build, result))
-                self.assertIn(f"the link took {path}, the toolchain image's {path.rsplit('/', 1)[-1]}, beside the C "
-                              "library that the build declares (OV_LIBC)", result["instrumented"]["detail"])
+                assert result["uninstrumented"] is None, (path, build)
+                assert result["instrumented"]["result"] == "error", (path, build, result)
+                assert f"the link took {path}, the toolchain image's {path.rsplit('/', 1)[-1]}, beside the C " \
+                    "library that the build declares (OV_LIBC)" in result["instrumented"]["detail"]
 
     def test_other_bytes_at_the_declared_path_are_the_projects_code(self):
         """A libc.a at the declared path whose bytes are not the declared ones is the project's code, judged as any
@@ -2031,49 +2019,48 @@ class Analyse(unittest.TestCase):
         record = self.declared_record({"/work/b/libproject.a": {"lib.c.o": good()}})
         record.libc["libc.a"] = (self.MUSL + "libc.a", "9" * 64)
         result = self.analyse({"asan": record})["asan"]
-        self.assertIsNone(result["uninstrumented"])
-        self.assertEqual(result["instrumented"]["result"], "error", result)
+        assert result["uninstrumented"] is None
+        assert result["instrumented"]["result"] == "error", result
         detail = result["instrumented"]["detail"]
-        self.assertIn("1 of 2 objects with code refer to no AddressSanitizer constructor: libc.a(memcpy.lo)", detail)
-        self.assertIn(f"the link did not take the C library that the build declares (OV_LIBC): {self.MUSL}libc.a",
-                      detail)
+        assert "1 of 2 objects with code refer to no AddressSanitizer constructor: libc.a(memcpy.lo)" in detail
+        assert f"the link did not take the C library that the build declares (OV_LIBC): {self.MUSL}libc.a" in detail
 
     def test_no_record(self):
         result = self.analyse({"asan": "compile recorded no link of it"})["asan"]
-        self.assertIsNone(result["uninstrumented"])
-        self.assertEqual(result["instrumented"]["result"], "error")
+        assert result["uninstrumented"] is None
+        assert result["instrumented"]["result"] == "error"
         # The plain build with no record is not decided either, whatever the cause, and the report says why.
         for why in ("compile recorded no link of it", "its link has no map, and it is not a Go program linked from "
                                                       "Go code only (0 .go.buildinfo sections, not one)"):
             result = self.analyse({"plain": why})["plain"]
-            self.assertIsNone(result["uninstrumented"])
-            self.assertEqual(result["instrumented"], {"result": "error", "detail": f"no link record: {why}"})
+            assert result["uninstrumented"] is None
+            assert result["instrumented"] == {"result": "error", "detail": f"no link record: {why}"}
             block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
                      "targets": {"t": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                                  "quiet_loud": {"result": "pass"},
                                                  "instrumented": result["instrumented"]}}}}
             text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"], {"t": {"plain": None}})
-            self.assertIn("| `t.plain` | pass | pass | pass | **not decided** | not recorded |", text)
-            self.assertIn(f"What each failure is:\n\n- `t.plain`, instrumented: `no link record: {why}`", text)
+            assert "| `t.plain` | pass | pass | pass | **not decided** | not recorded |" in text
+            assert f"What each failure is:\n\n- `t.plain`, instrumented: `no link record: {why}`" in text
 
     def test_a_go_program_is_plain_from_its_build_information(self):
         """Go's linker writes no map; the program's own build information stands in for the record."""
         program = check_links.go_program(go_executable())
-        self.assertIsInstance(program, check_links.GoProgram, program)
-        self.assertEqual(program.version, "go1.27.1")
+        assert isinstance(program, check_links.GoProgram), program
+        assert program.version == "go1.27.1"
         result = self.analyse({"plain": program})["plain"]
-        self.assertIsNone(result["uninstrumented"])
-        self.assertEqual(result["instrumented"]["result"], "plain")
-        self.assertIn("a Go program (go1.27.1)", result["instrumented"]["detail"])
-        self.assertIn("CGO_ENABLED=0", result["instrumented"]["detail"])
+        assert result["uninstrumented"] is None
+        assert result["instrumented"]["result"] == "plain"
+        assert "a Go program (go1.27.1)" in result["instrumented"]["detail"]
+        assert "CGO_ENABLED=0" in result["instrumented"]["detail"]
         block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
                  "targets": {"t": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
                                              "quiet_loud": {"result": "pass"},
                                              "instrumented": result["instrumented"]}}}}
         text = check_binaries.report(block, {"t": {"plain": None}}, ["plain"], {"t": {"plain": None}})
-        self.assertIn("| `t.plain` | pass | pass | pass | not instrumented (plain) | no list (Go code only) |", text)
+        assert "| `t.plain` | pass | pass | pass | not instrumented (plain) | no list (Go code only) |" in text
         # No sanitizer instruments Go code, so a sanitizer build of a Go program decides nothing.
-        self.assertEqual(self.analyse({"asan": program})["asan"]["instrumented"]["result"], "error")
+        assert self.analyse({"asan": program})["asan"]["instrumented"]["result"] == "error"
 
     def test_a_go_program_that_may_link_c_is_not_plain(self):
         cases = {
@@ -2104,15 +2091,15 @@ class Analyse(unittest.TestCase):
         }
         for expected, data in cases.items():
             why = check_links.go_program(data)
-            self.assertIsInstance(why, str, expected)
-            self.assertIn(expected, why)
+            assert isinstance(why, str), expected
+            assert expected in why
         # Zero bytes after the last function are padding; any other byte there is code the table does not name.
         end = len(GO_FUNCTIONS) * 16
         padded = go_executable(text_size=end + 16)
-        self.assertIsInstance(check_links.go_program(padded), check_links.GoProgram)
+        assert isinstance(check_links.go_program(padded), check_links.GoProgram)
         code = bytearray(padded)
         code[64 + end] = 0x13
-        self.assertIn("not zero padding", check_links.go_program(bytes(code)))
+        assert "not zero padding" in check_links.go_program(bytes(code))
         # Go's own unqualified assembly (crypto/internal/fips140/bigmod's addMulVVWx) has a line table like any Go
         # code; the linker's trampolines and FIPS markers have none, and are recognised by their bytes.
         # Laid out after GO_FUNCTIONS (5 x 16 bytes): addMulVVWx at 80, its trampoline at 96, a 24-byte trampoline to
@@ -2123,35 +2110,35 @@ class Analyse(unittest.TestCase):
             ("go:textfipsstart", bytes(0), False), ("go:textfipsend", bytes(8), False),
             # A trampoline to a generic function: its name is longer than the bytes of a name that are read.
             ("crypto/internal/fips140/hmac.New[go.shape." + "x" * 300 + "]-tramp2", trampoline(-144), False)))
-        self.assertIsInstance(check_links.go_program(stdlib), check_links.GoProgram)
+        assert isinstance(check_links.go_program(stdlib), check_links.GoProgram)
         # A stub of the trampoline's shape that jumps anywhere but a function's entry is not the linker's: entered at
         # +2, the other stub's auipc word decodes as a compressed instruction of the author's choice. Two stubs at 80
         # and 96, each jumping 2 bytes into the other; and one that jumps past every function.
         for stubs in ((18, -14), (0x1000,)):
             gadget = go_executable(functions=GO_FUNCTIONS + tuple(
                 (f"q_tramp{n}", trampoline(jump), False) for n, jump in enumerate(stubs)))
-            self.assertIn("no line table, so code that Go did not compile", check_links.go_program(gadget), stubs)
+            assert "no line table, so code that Go did not compile" in check_links.go_program(gadget), stubs
 
     def test_code_outside_the_function_table_is_not_go_code(self):
         # Go's linker lists no .L label or section container of a .syso file on riscv64, and lays host code out first:
         # code before the table's first function is code that no Go function owns.
-        self.assertIn("does not start at .text's start", check_links.go_program(go_executable(skip=16)))
+        assert "does not start at .text's start" in check_links.go_program(go_executable(skip=16))
         # A .syso symbol that an empty Go assembly TEXT also defines takes that TEXT's line table, and is listed a
         # second time, out of address order: function 2 here starts before function 1.
         why = check_links.go_program(go_executable(entries={2: 8}))
-        self.assertIn("not in address order", why)
-        self.assertNotIn("runs past the end", why)
+        assert "not in address order" in why
+        assert "runs past the end" not in why
         # The last entry is the end of the code: one below the last function names no function past it.
-        self.assertIn("the code ends before function 4", check_links.go_program(go_executable(entries={5: 0})))
+        assert "the code ends before function 4" in check_links.go_program(go_executable(entries={5: 0}))
         # A function's name must lie in funcnametab, also for a function with a line table, whose name is not read.
-        self.assertIn("function 0 has no name", check_links.go_program(go_executable(name_offset=1 << 20)))
+        assert "function 0 has no name" in check_links.go_program(go_executable(name_offset=1 << 20))
         # The machine's target is the jump's sum with bit 0 cleared (jalr): a jump of 17 from 80 lands at 96.
-        self.assertTrue(check_links.linker_function(trampoline(17), 80, {96}))
-        self.assertFalse(check_links.linker_function(trampoline(17), 80, {97}))
+        assert check_links.linker_function(trampoline(17), 80, {96})
+        assert not check_links.linker_function(trampoline(17), 80, {97})
         # A function at an odd offset: Go starts every function at an even one, and a jump cannot land on it.
-        self.assertIn("starts at the odd offset 0x51",
-                      check_links.go_program(go_executable(functions=GO_FUNCTIONS + (
-                          ("p", b"\0", False), ("s", trampoline(47), False)))))
+        assert "starts at the odd offset 0x51" in \
+            check_links.go_program(go_executable(functions=GO_FUNCTIONS + (
+                ("p", b"\0", False), ("s", trampoline(47), False))))
 
     def test_a_crafted_function_table_is_read_in_linear_time(self):
         # Thousands of functions with no line table, all named by one long run of bytes: each name is read for at
@@ -2161,52 +2148,52 @@ class Analyse(unittest.TestCase):
         data = go_executable(functions=functions, shared_name=True)
         start = time.monotonic()
         why = check_links.go_program(data)
-        self.assertLess(time.monotonic() - start, 10)
-        self.assertIn("x" * check_links.NAME_MAX_GO, why)
-        self.assertNotIn("x" * (check_links.NAME_MAX_GO + 1), why)
+        assert time.monotonic() - start < 10
+        assert "x" * check_links.NAME_MAX_GO in why
+        assert "x" * (check_links.NAME_MAX_GO + 1) not in why
         # Functions with a line table are not named at all: their names are never read.
         plain = go_executable()
         _, sections, _ = check_links.binary_isa.parse_elf(plain)
-        self.assertEqual({f[2] for f in check_links.go_functions(plain, sections)}, {None})
+        assert {f[2] for f in check_links.go_functions(plain, sections)} == {None}
 
-    def test_a_go_program_that_cannot_be_read_fails_that_binary_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            raw = pathlib.Path(tmp)
-            (raw / "t").write_bytes(go_executable())
-            saved = check_links.go_program
+    def test_a_go_program_that_cannot_be_read_fails_that_binary_only(self, tmp_path):
+        raw = tmp_path / "out"
+        raw.mkdir()
+        (raw / "t").write_bytes(go_executable())
+        saved = check_links.go_program
 
-            def raises(data):
-                raise MemoryError("a crafted table")
+        def raises(data):
+            raise MemoryError("a crafted table")
 
-            check_links.go_program = raises
-            try:
-                record, _ = check_binaries.record_of(raw, "t")
-            finally:
-                check_links.go_program = saved
-            self.assertIsInstance(record, str)
-            self.assertIn("MemoryError: a crafted table", record)
+        check_links.go_program = raises
+        try:
+            record, _ = check_binaries.record_of(raw, "t")
+        finally:
+            check_links.go_program = saved
+        assert isinstance(record, str)
+        assert "MemoryError: a crafted table" in record
 
-    def test_record_of_reads_a_go_program_and_refuses_any_other_binary_without_a_map(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            raw = pathlib.Path(tmp)
-            go, other = go_executable(), go_executable(CGO_ENABLED="1")
-            (raw / "go").write_bytes(go)
-            (raw / "c").write_bytes(other)
-            record, quiet = check_binaries.record_of(raw, "go")
-            self.assertIsInstance(record, check_links.GoProgram)
-            self.assertIsNone(quiet)
-            # compile-go keeps the quiet program in a record with no map.
-            kept = raw / ".records" / hashlib.sha256(go).hexdigest()
-            kept.mkdir(parents=True)
-            (kept / "quiet").write_bytes(b"quiet")
-            record, quiet = check_binaries.record_of(raw, "go")
-            self.assertIsInstance(record, check_links.GoProgram)
-            self.assertEqual(quiet, b"quiet")
-            record, quiet = check_binaries.record_of(raw, "c")
-            self.assertIsInstance(record, str)
-            self.assertIn("compile recorded no link of it", record)
-            self.assertIn("CGO_ENABLED=1", record)
-            self.assertEqual(check_links.analyse({"plain": record}, {})["plain"]["instrumented"]["result"], "error")
+    def test_record_of_reads_a_go_program_and_refuses_any_other_binary_without_a_map(self, tmp_path):
+        raw = tmp_path / "out"
+        raw.mkdir()
+        go, other = go_executable(), go_executable(CGO_ENABLED="1")
+        (raw / "go").write_bytes(go)
+        (raw / "c").write_bytes(other)
+        record, quiet = check_binaries.record_of(raw, "go")
+        assert isinstance(record, check_links.GoProgram)
+        assert quiet is None
+        # compile-go keeps the quiet program in a record with no map.
+        kept = raw / ".records" / hashlib.sha256(go).hexdigest()
+        kept.mkdir(parents=True)
+        (kept / "quiet").write_bytes(b"quiet")
+        record, quiet = check_binaries.record_of(raw, "go")
+        assert isinstance(record, check_links.GoProgram)
+        assert quiet == b"quiet"
+        record, quiet = check_binaries.record_of(raw, "c")
+        assert isinstance(record, str)
+        assert "compile recorded no link of it" in record
+        assert "CGO_ENABLED=1" in record
+        assert check_links.analyse({"plain": record}, {})["plain"]["instrumented"]["result"] == "error"
 
     def test_dwarfdump_output(self):
         text = "\n".join([
@@ -2219,15 +2206,15 @@ class Analyse(unittest.TestCase):
             '                DW_AT_name\t("loop")',
             "== /objects/1.o",
         ])
-        self.assertEqual(check_links.parse_dwarfdump(text),
-                         {"/objects/0.o": ("DW_LANG_Mips_Assembler", "src/arch/memcpy.S", "/src/lib")})
+        assert check_links.parse_dwarfdump(text) == \
+            {"/objects/0.o": ("DW_LANG_Mips_Assembler", "src/arch/memcpy.S", "/src/lib")}
 
 
 BUILDER = pathlib.Path(__file__).resolve().parents[1] / "infra" / "base-builder"
 RECORD_COMPILE = BUILDER / "record-compile"
 
 
-class CompileRecords(unittest.TestCase):
+class TestCompileRecords:
     """infra/base-builder/record-compile, with a stand-in for a compiler shim; the wrapper compile writes; and the
     record code of compile and release-target.sh."""
 
@@ -2251,16 +2238,13 @@ printf 'out: %s [%s] %s\n' "$#" "$PWD" "$*"; printf 'err: [%s]\n' "$@" >&2
 exit "${SHIM_STATUS:-0}"
 """
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.dir = pathlib.Path(os.path.realpath(self.tmp.name))
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.dir = pathlib.Path(os.path.realpath(tmp_path))
         self.records = self.dir / "records"
         self.shim = self.dir / "riscv64-linux-musl-clang-plain"
         self.shim.write_text(self.SHIM)
         self.shim.chmod(0o755)
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def run_shim(self, *arguments, through=True, shim=None, status=0, fd3=None, **env):
         """The stand-in, through record-compile or not; with `fd3`, a file that the step gets open as fd 3."""
@@ -2283,13 +2267,13 @@ exit "${SHIM_STATUS:-0}"
         made = (self.dir / "x.o").read_bytes()
         (self.dir / "x.o").unlink()
         done = self.run_shim(*arguments)
-        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
-        self.assertEqual((self.dir / "x.o").read_bytes(), made)
-        self.assertEqual(self.lines(), [{"sha256": hashlib.sha256(made).hexdigest(), "output": "x.o",
-                                         "directory": str(self.dir), "file": "src/x.c",
-                                         "source_sha256": hashlib.sha256(b"int x;\n").hexdigest(), "language": "c",
-                                         "no_sanitize": [], "no_sanitize_object": None, "shim": str(self.shim),
-                                         "arguments": arguments}])
+        assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
+        assert (self.dir / "x.o").read_bytes() == made
+        assert self.lines() == [{"sha256": hashlib.sha256(made).hexdigest(), "output": "x.o",
+                                 "directory": str(self.dir), "file": "src/x.c",
+                                 "source_sha256": hashlib.sha256(b"int x;\n").hexdigest(), "language": "c",
+                                 "no_sanitize": [], "no_sanitize_object": None, "shim": str(self.shim),
+                                 "arguments": arguments}]
         records = self.dir / "out" / ".records"
         records.mkdir(parents=True)
         (records / "flags.json").write_text('{"build": "ubsan", "sanitizer": {"c": [], "c++": []}, '
@@ -2297,12 +2281,11 @@ exit "${SHIM_STATUS:-0}"
         (records / "compiles.jsonl").write_text(next((self.records / "compiles").iterdir()).read_text())
         compiles = check_links.read_compiles(self.dir / "out")
         compile, = compiles.objects[hashlib.sha256(made).hexdigest()]
-        self.assertEqual((compile.directory, compile.source_sha256),
-                         (str(self.dir), hashlib.sha256(b"int x;\n").hexdigest()))
+        assert (compile.directory, compile.source_sha256) == (str(self.dir), hashlib.sha256(b"int x;\n").hexdigest())
 
     def test_a_source_from_standard_input_has_no_source_sha256(self):
-        self.assertEqual(self.run_shim("-x", "c", "-c", "-", "-o", "x.o").returncode, 0)
-        self.assertEqual([(line["file"], line["source_sha256"]) for line in self.lines()], [("-", None)])
+        assert self.run_shim("-x", "c", "-c", "-", "-o", "x.o").returncode == 0
+        assert [(line["file"], line["source_sha256"]) for line in self.lines()] == [("-", None)]
 
     def test_a_compile_records_the_no_sanitize_attributes_of_its_preprocessed_source(self):
         """record-compile preprocesses the source again, with no output or dependency file of the step's, and records
@@ -2323,28 +2306,27 @@ exit "${SHIM_STATUS:-0}"
             "esac\n"
             'if [ "${SHIM_WRITE:-1}" = 1 ]; then'))
         shim.chmod(0o755)
-        self.assertEqual(self.run_shim("-include", "h.h", "-MD", "-MF", "x.d", "-c", "x.c", "-o", "x.o",
-                                       shim=shim).returncode, 0)
-        self.assertFalse((self.dir / "x.d").exists())
+        assert self.run_shim("-include", "h.h", "-MD", "-MF", "x.d", "-c", "x.c", "-o", "x.o",
+                             shim=shim).returncode == 0
+        assert not (self.dir / "x.d").exists()
         [line] = self.lines()
         # The attribute of c runs onto the next line, as a source's own line break stays in the preprocessed text.
-        self.assertEqual(line["no_sanitize"], ["no_sanitize", 'no_sanitize( "undefined")',
-                                               'no_sanitize("shift", "address")', 'no_sanitize("undefined")',
-                                               "no_sanitize_address"])
-        self.assertEqual([check_links.turns_ubsan_off(a) for a in line["no_sanitize"]],
-                         [False, True, True, True, False])
+        assert line["no_sanitize"] == ["no_sanitize", 'no_sanitize( "undefined")',
+                                       'no_sanitize("shift", "address")', 'no_sanitize("undefined")',
+                                       "no_sanitize_address"]
+        assert [check_links.turns_ubsan_off(a) for a in line["no_sanitize"]] == [False, True, True, True, False]
         stripped = (self.records / "nosan" / line["no_sanitize_object"]).read_bytes()
-        self.assertEqual(hashlib.sha256(stripped).hexdigest(), line["no_sanitize_object"])
-        self.assertEqual(stripped.decode(), "int a __attribute__(());\nint b __attribute__(()); "
-                                            "int c __attribute__(()); int no_sanitize_count;\n"
-                                            "int no_sanitize; int d [[]];\n")
-        self.assertEqual(sorted(p.name for p in self.records.iterdir() if p.name.startswith("pre.")), [])
+        assert hashlib.sha256(stripped).hexdigest() == line["no_sanitize_object"]
+        assert stripped.decode() == "int a __attribute__(());\nint b __attribute__(()); " \
+            "int c __attribute__(()); int no_sanitize_count;\n" \
+            "int no_sanitize; int d [[]];\n"
+        assert sorted(p.name for p in self.records.iterdir() if p.name.startswith("pre.")) == []
         (self.records / "compiles").rename(self.dir / "earlier")
-        self.assertEqual(self.run_shim("-c", "x.c", "y.c", shim=shim).returncode, 0)
+        assert self.run_shim("-c", "x.c", "y.c", shim=shim).returncode == 0
         # Each source is preprocessed and compiled again without the other (the stand-in exits 9 if it sees both).
-        self.assertEqual([(other["file"], other["no_sanitize"], other["no_sanitize_object"]) for other in self.lines()],
-                         [("x.c", line["no_sanitize"], line["no_sanitize_object"]),
-                          ("y.c", line["no_sanitize"], line["no_sanitize_object"])])
+        assert [(other["file"], other["no_sanitize"], other["no_sanitize_object"]) for other in self.lines()] == \
+            [("x.c", line["no_sanitize"], line["no_sanitize_object"]),
+             ("y.c", line["no_sanitize"], line["no_sanitize_object"])]
         # A preprocessed text of one line (a step with -P, a source of one line): its attribute goes too.
         one = self.dir / "riscv64-linux-musl-clang-one"
         one.write_text(self.SHIM.replace(
@@ -2357,14 +2339,14 @@ exit "${SHIM_STATUS:-0}"
             'if [ "${SHIM_WRITE:-1}" = 1 ]; then'))
         one.chmod(0o755)
         (self.records / "compiles").rename(self.dir / "earlier2")
-        self.assertEqual(self.run_shim("-P", "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
+        assert self.run_shim("-P", "-c", "x.c", "-o", "x.o", shim=one).returncode == 0
         [line] = self.lines()
-        self.assertEqual(line["no_sanitize"], ['no_sanitize("undefined")'])
-        self.assertEqual((self.records / "nosan" / line["no_sanitize_object"]).read_text(), "int a __attribute__(());")
+        assert line["no_sanitize"] == ['no_sanitize("undefined")']
+        assert (self.records / "nosan" / line["no_sanitize_object"]).read_text() == "int a __attribute__(());"
         # A step with arguments in a response file: the second runs could not filter them, and nothing is read.
         (self.records / "compiles").rename(self.dir / "earlier3")
-        self.assertEqual(self.run_shim("@args", "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
-        self.assertEqual([(line["no_sanitize"], line["no_sanitize_object"]) for line in self.lines()], [(None, None)])
+        assert self.run_shim("@args", "-c", "x.c", "-o", "x.o", shim=one).returncode == 0
+        assert [(line["no_sanitize"], line["no_sanitize_object"]) for line in self.lines()] == [(None, None)]
         # A step that takes a precompiled header or clang modules: -E does not print their text, and nothing is read.
         # That holds for the precompiled header that clang finds by itself beside a header given with -include.
         (self.dir / "p.h.gch").mkdir()
@@ -2373,13 +2355,13 @@ exit "${SHIM_STATUS:-0}"
                                        ["-fmodules"], ["-fprebuilt-module-path=m"], ["-include", "p.h"],
                                        ["-includeq.h"], ["--include=q.h"])):
             (self.records / "compiles").rename(self.dir / f"earlier-pch-{n}")
-            self.assertEqual(self.run_shim(*arguments, "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
-            self.assertEqual([(line["no_sanitize"], line["no_sanitize_object"]) for line in self.lines()],
-                             [(None, None)], arguments)
+            assert self.run_shim(*arguments, "-c", "x.c", "-o", "x.o", shim=one).returncode == 0
+            assert [(line["no_sanitize"], line["no_sanitize_object"]) for line in self.lines()] == \
+                [(None, None)], arguments
         # A header with no precompiled one beside it is read as before.
         (self.records / "compiles").rename(self.dir / "earlier-h")
-        self.assertEqual(self.run_shim("-include", "h.h", "-c", "x.c", "-o", "x.o", shim=one).returncode, 0)
-        self.assertEqual([line["no_sanitize"] for line in self.lines()], [['no_sanitize("undefined")']])
+        assert self.run_shim("-include", "h.h", "-c", "x.c", "-o", "x.o", shim=one).returncode == 0
+        assert [line["no_sanitize"] for line in self.lines()] == [['no_sanitize("undefined")']]
         # A source preprocessed already (.i) is read as it is, as clang's -E skips it; a -E that writes nothing says
         # nothing.
         silent = self.dir / "riscv64-linux-musl-clang-silent"
@@ -2391,20 +2373,20 @@ exit "${SHIM_STATUS:-0}"
         silent.chmod(0o755)
         (self.dir / "z.i").write_text('int z __attribute__((no_sanitize("undefined")));\n')
         (self.records / "compiles").rename(self.dir / "earlier-i")
-        self.assertEqual(self.run_shim("-c", "z.i", "-o", "z.o", shim=silent).returncode, 0)
-        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", shim=silent).returncode, 0)
-        self.assertEqual([(line["file"], line["no_sanitize"]) for line in self.lines()],
-                         [("x.c", None), ("z.i", ['no_sanitize("undefined")'])])
+        assert self.run_shim("-c", "z.i", "-o", "z.o", shim=silent).returncode == 0
+        assert self.run_shim("-c", "x.c", "-o", "x.o", shim=silent).returncode == 0
+        assert [(line["file"], line["no_sanitize"]) for line in self.lines()] == \
+            [("x.c", None), ("z.i", ['no_sanitize("undefined")'])]
 
     def test_only_a_compile_that_succeeds_is_recorded(self):
-        self.assertEqual(self.run_shim("-E", "-c", "x.c", "-o", "x.i").returncode, 0)
-        self.assertEqual(self.run_shim("x.c", "-o", "x").returncode, 0)  # a link
-        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", status=3).returncode, 3)
+        assert self.run_shim("-E", "-c", "x.c", "-o", "x.i").returncode == 0
+        assert self.run_shim("x.c", "-o", "x").returncode == 0  # a link
+        assert self.run_shim("-c", "x.c", "-o", "x.o", status=3).returncode == 3
         # An object older than the step is not one it wrote.
         (self.dir / "y.o").write_text("stale")
         os.utime(self.dir / "y.o", (1, 1))
-        self.assertEqual(self.run_shim("-c", "y.c", SHIM_WRITE="0").returncode, 0)
-        self.assertEqual(self.lines(), [])
+        assert self.run_shim("-c", "y.c", SHIM_WRITE="0").returncode == 0
+        assert self.lines() == []
 
     def test_a_step_ends_as_the_shim_ends(self):
         """Killed by a signal, the step is killed by it too, with nothing more on standard error; and a BASH_ENV or
@@ -2412,15 +2394,15 @@ exit "${SHIM_STATUS:-0}"
         for arguments in (["-c", "x.c", "-o", "x.o"], ["x.c", "-o", "x"]):
             bare = self.run_shim(*arguments, through=False, status="segv")
             done = self.run_shim(*arguments, status="segv")
-            self.assertEqual(bare.returncode, -11)
-            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+            assert bare.returncode == -11
+            assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
         startup = self.dir / "startup.sh"
         startup.write_text("echo from BASH_ENV >&2\n")
         env = {"BASH_ENV": str(startup), "SHELLOPTS": "braceexpand:hashall:interactive-comments:xtrace"}
         for arguments in (["-c", "x.c", "-o", "x.o"], ["--version"]):
             bare = self.run_shim(*arguments, through=False, **env)
             done = self.run_shim(*arguments, **env)
-            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
+            assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
 
     def test_a_shim_exit_status_that_names_a_stop_signal_is_the_steps(self):
         """A shim that exits with 147-150 (128 + SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU) or 145 (128 + SIGCHLD): the step
@@ -2428,8 +2410,8 @@ exit "${SHIM_STATUS:-0}"
         for status in (145, 147, 148, 149, 150):
             bare = self.run_shim("-c", "x.c", "-o", "x.o", through=False, status=status)
             done = self.run_shim("-c", "x.c", "-o", "x.o", status=status)
-            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
-            self.assertEqual(done.returncode, status)
+            assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
+            assert done.returncode == status
 
     def test_every_open_file_reaches_the_shim(self):
         """A build that gives the compiler fd 3 open: the shim writes to it as it does without the front."""
@@ -2437,9 +2419,9 @@ exit "${SHIM_STATUS:-0}"
             bare_file, done_file = self.dir / "bare3", self.dir / "done3"
             bare = self.run_shim(*arguments, through=False, fd3=bare_file, SHIM_FD3="1")
             done = self.run_shim(*arguments, fd3=done_file, SHIM_FD3="1")
-            self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
-            self.assertEqual(done.returncode, 0)
-            self.assertEqual(done_file.read_text(), bare_file.read_text())
+            assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
+            assert done.returncode == 0
+            assert done_file.read_text() == bare_file.read_text()
             bare_file.unlink()
             done_file.unlink()
 
@@ -2448,43 +2430,43 @@ exit "${SHIM_STATUS:-0}"
         env = {"CCC_OVERRIDE_OPTIONS": "+-fno-sanitize=undefined"}
         bare = self.run_shim("-fsanitize=undefined", "-c", "x.c", "-o", "x.o", through=False, **env)
         done = self.run_shim("-fsanitize=undefined", "-c", "x.c", "-o", "x.o", **env)
-        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
-        self.assertEqual(self.lines(), [])
-        self.assertEqual(self.run_shim("-c", "x.c", "-o", "x.o", CCC_OVERRIDE_OPTIONS="").returncode, 0)
-        self.assertEqual(len(self.lines()), 1)
+        assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
+        assert self.lines() == []
+        assert self.run_shim("-c", "x.c", "-o", "x.o", CCC_OVERRIDE_OPTIONS="").returncode == 0
+        assert len(self.lines()) == 1
 
     def test_the_output_named_in_each_spelling(self):
         for arguments in (["-c", "a.c", "-oj.o"], ["-c", "a.c", "--output", "k.o"], ["-c", "--output=l.o", "a.c"]):
-            self.assertEqual(self.run_shim(*arguments).returncode, 0)
-        self.assertEqual([line["output"] for line in self.lines()], ["j.o", "k.o", "l.o"])
+            assert self.run_shim(*arguments).returncode == 0
+        assert [line["output"] for line in self.lines()] == ["j.o", "k.o", "l.o"]
 
     def test_each_object_and_its_language(self):
-        self.assertEqual(self.run_shim("-c", "a.c", "lib/b.cc", "-x", "c++", "e.S", "-I", "f.c").returncode, 0)
-        self.assertEqual([(line["output"], line["file"], line["language"]) for line in self.lines()],
-                         [("a.o", "a.c", "c"), ("b.o", "lib/b.cc", "c++"), ("e.o", "e.S", "c++")])
+        assert self.run_shim("-c", "a.c", "lib/b.cc", "-x", "c++", "e.S", "-I", "f.c").returncode == 0
+        assert [(line["output"], line["file"], line["language"]) for line in self.lines()] == \
+            [("a.o", "a.c", "c"), ("b.o", "lib/b.cc", "c++"), ("e.o", "e.S", "c++")]
         # A C++ shim (clang++) takes C as C++.
         cxx = self.dir / "riscv64-linux-musl-clang++-plain"
         cxx.write_text(self.SHIM)
         cxx.chmod(0o755)
         (self.records / "compiles").rename(self.dir / "earlier")
-        self.assertEqual(self.run_shim("-c", "a.c", "f.S", shim=cxx).returncode, 0)
-        self.assertEqual([(line["output"], line["language"]) for line in self.lines()],
-                         [("a.o", "c++"), ("f.o", "assembler-with-cpp")])
+        assert self.run_shim("-c", "a.c", "f.S", shim=cxx).returncode == 0
+        assert [(line["output"], line["language"]) for line in self.lines()] == \
+            [("a.o", "c++"), ("f.o", "assembler-with-cpp")]
 
     def test_a_front_hands_the_shim_every_argument(self):
         original = self.shim.read_bytes()
         for _ in range(2):  # a shim that has a front keeps it
             subprocess.run([str(RECORD_COMPILE), "--front", str(self.records), str(self.shim)], check=True)
         aside = self.dir / ".recorded" / self.shim.name
-        self.assertEqual(aside.read_bytes(), original)
-        self.assertEqual(self.shim.read_text(), "#!/bin/sh\n# record-compile front\n"
-                         f'exec {RECORD_COMPILE} {self.records} {aside} "$@"\n')
+        assert aside.read_bytes() == original
+        assert self.shim.read_text() == "#!/bin/sh\n# record-compile front\n" \
+            f'exec {RECORD_COMPILE} {self.records} {aside} "$@"\n'
         # The build runs the shim by its path, and the front hands the shim what the shim itself got.
         arguments = ["-c", "a b.c", "-o", "a.o", "-DX=\"$HOME\"", "-D*", "", "--", "-x"]
         done = self.run_shim(*arguments, through=False)
         bare = self.run_shim(*arguments, through=False, shim=aside)
-        self.assertEqual((done.returncode, done.stdout, done.stderr), (bare.returncode, bare.stdout, bare.stderr))
-        self.assertEqual([(line["shim"], line["arguments"]) for line in self.lines()], [(str(self.shim), arguments)])
+        assert (done.returncode, done.stdout, done.stderr) == (bare.returncode, bare.stdout, bare.stderr)
+        assert [(line["shim"], line["arguments"]) for line in self.lines()] == [(str(self.shim), arguments)]
 
     def test_compile_writes_the_wrapper_it_always_wrote(self):
         """compile's wrappers for $CC and $CXX are the text compile has always written, with records and without:
@@ -2493,6 +2475,7 @@ exit "${SHIM_STATUS:-0}"
                   "LIB=/usr/local/lib/oss-verify LIB_FUZZING_ENGINE=/tmp/ov/libFuzzingEngine.a\n"
                   "LIB_ALLOCATION_FAILURE_ENGINE=/tmp/ov/libAllocationFailureEngine.a\n"
                   "LIB_ALLOCATION_COUNTING_ENGINE=/tmp/ov/libAllocationCountingEngine.a OV_RECORDS=$2\n"
+                  "LIB_DSL_ENGINE=/tmp/ov/libDslEngine.a\n"
                   'write_wrapper "$3" /tmp/shim/riscv64-linux-musl-clang-plain\n')
         shim = "/tmp/shim/riscv64-linux-musl-clang-plain"
         expected = (
@@ -2500,13 +2483,13 @@ exit "${SHIM_STATUS:-0}"
             f'  case "$a" in -c|-E|-S|-fsyntax-only|-M|-MM|--version|-dumpmachine|-print-*) exec {shim} "$@" ;; esac\n'
             'done\nfor a in "$@"; do\n'
             '  case "$a" in "/tmp/ov/libFuzzingEngine.a"|"/tmp/ov/libAllocationFailureEngine.a"|'
-            '"/tmp/ov/libAllocationCountingEngine.a")\n'
+            '"/tmp/ov/libAllocationCountingEngine.a"|"/tmp/ov/libDslEngine.a")\n'
             f'    exec /usr/local/lib/oss-verify/link-fuzz-target {shim} "$@" ;; esac\n'
             f'done\nexec {shim} "$@"\n')
         for n, records in enumerate(("", "/tmp/ov/records")):
             out = self.dir / f"wrapper{n}"
             subprocess.run(["bash", "-c", script, "bash", str(BUILDER / "compile"), records, str(out)], check=True)
-            self.assertEqual(out.read_text(), expected)
+            assert out.read_text() == expected
 
     def test_compile_writes_records_that_check_links_reads(self):
         """compile's own record code: the build's flags.json and compiles.jsonl, the records of every compile in byte
@@ -2531,8 +2514,8 @@ exit "${SHIM_STATUS:-0}"
         attributed.chmod(0o755)
         for name in names:
             (self.dir / "src" / f"{name}.c").write_text(f"int {name};\n")
-            self.assertEqual(self.run_shim("-c", f"src/{name}.c", "-o", f"{name}.o",
-                                           shim=attributed if name == "m" else None).returncode, 0)
+            assert self.run_shim("-c", f"src/{name}.c", "-o", f"{name}.o",
+                                 shim=attributed if name == "m" else None).returncode == 0
         stripped = hashlib.sha256(b"stripped m\n").hexdigest()
         out = self.dir / "out"
         for flav, build, wanted_ubsan in (("asanubsan", "asan-ubsan", ubsan.split()), ("asan", "asan", [])):
@@ -2541,29 +2524,29 @@ exit "${SHIM_STATUS:-0}"
                                 "OV_UBSAN_C_EXCLUDE": "function", "OV_UBSAN_CHECKS": "undefined",
                                 "OV_RECORDS": str(self.records), "OUT": str(out)})
             compiles = check_links.read_compiles(out)
-            self.assertIsNotNone(compiles, build)
-            self.assertEqual(compiles.build, build)
+            assert compiles is not None, build
+            assert compiles.build == build
             words = ["-fsanitize=address", "-fsanitize=undefined", '-DQ="a\\b"']
             exclude = ["-fno-sanitize=function"] if wanted_ubsan else []
-            self.assertEqual(compiles.sanitizer, {"c": words + exclude, "c++": words})
-            self.assertEqual(compiles.ubsan, {"c": wanted_ubsan + exclude, "c++": wanted_ubsan})
+            assert compiles.sanitizer == {"c": words + exclude, "c++": words}
+            assert compiles.ubsan == {"c": wanted_ubsan + exclude, "c++": wanted_ubsan}
             lines = (out / ".records" / "compiles.jsonl").read_bytes().splitlines()
-            self.assertEqual((len(lines), lines), (len(names), sorted(lines)))
+            assert (len(lines), lines) == (len(names), sorted(lines))
             digests = {hashlib.sha256((self.dir / f"{name}.o").read_bytes()).hexdigest(): name for name in names}
-            self.assertEqual(set(compiles.objects), set(digests))
+            assert set(compiles.objects) == set(digests)
             for digest, name in digests.items():
                 compile, = compiles.objects[digest]
-                self.assertEqual((compile.file, compile.language), (f"src/{name}.c", "c"))
-                self.assertEqual(compile.no_sanitize, ["no_sanitize_undefined"] if name == "m" else [])
-            self.assertEqual([p.name for p in (out / ".records" / "nosan").iterdir()], [stripped])
-            self.assertEqual((out / ".records" / "nosan" / stripped).read_bytes(), b"stripped m\n")
+                assert (compile.file, compile.language) == (f"src/{name}.c", "c")
+                assert compile.no_sanitize == (["no_sanitize_undefined"] if name == "m" else [])
+            assert [p.name for p in (out / ".records" / "nosan").iterdir()] == [stripped]
+            assert (out / ".records" / "nosan" / stripped).read_bytes() == b"stripped m\n"
 
     def test_release_target_puts_a_front_before_each_shim_it_writes(self):
         """release-target.sh's record code: with OV_RECORDS, a front before each of the four shims it wrote, which
         records each compile; without it, the shims stay as written."""
         block = subprocess.run(["sed", "-n", '/^  if \\[ -n "${OV_RECORDS:-}" \\]; then/,/^  fi/p',
                                 str(BUILDER / "release-target.sh")], capture_output=True, text=True, check=True).stdout
-        self.assertIn("record-compile --front", block)
+        assert "record-compile --front" in block
         block = block.replace("/usr/local/lib/oss-verify/record-compile", str(RECORD_COMPILE))
         names = [f"riscv64-linux-musl-{n}" for n in ("clang-plain", "clang++-plain", "clang-sealed", "clang++-sealed")]
         shims = self.dir / "shim"
@@ -2575,14 +2558,14 @@ exit "${SHIM_STATUS:-0}"
             subprocess.run(["bash", "-euc", block], check=True, cwd=self.dir,
                            env={**os.environ, "SHIM": str(shims), "CHOST": "riscv64-linux-musl", "OV_RECORDS": records})
             fronted = [name for name in names if "# record-compile front" in (shims / name).read_text()]
-            self.assertEqual(fronted, names if records else [])
+            assert fronted == (names if records else [])
         (self.dir / "y.c").write_text("int y;\n")
-        self.assertEqual(subprocess.run([str(shims / names[2]), "-c", "y.c", "-o", "y.o"], cwd=self.dir,
-                                        capture_output=True).returncode, 0)
-        self.assertEqual([(line["output"], line["shim"]) for line in self.lines()], [("y.o", str(shims / names[2]))])
+        assert subprocess.run([str(shims / names[2]), "-c", "y.c", "-o", "y.o"], cwd=self.dir,
+                              capture_output=True).returncode == 0
+        assert [(line["output"], line["shim"]) for line in self.lines()] == [("y.o", str(shims / names[2]))]
 
 
-class ModelRelease(unittest.TestCase):
+class TestModelRelease:
     RELEASE = ("schema: oss-fuzz-theorems/release/1\nrelease: 2026.10.0\nsemantics:\n"
                "  name: rocq-linux-process-semantics-core\n"
                "  repository: https://github.com/theorem-labs/rocq-linux-process-semantics\n"
@@ -2590,49 +2573,44 @@ class ModelRelease(unittest.TestCase):
 
     def test_reads_the_model_from_release_yaml(self):
         model = model_release.release_model(text=self.RELEASE)
-        self.assertEqual((model["release"], model["commit"]), ("2026.10.0", "f1006fe8178338a499b5e5c41be83006c4edd058"))
-        self.assertEqual(model["repository"], "https://github.com/theorem-labs/rocq-linux-process-semantics")
+        assert (model["release"], model["commit"]) == ("2026.10.0", "f1006fe8178338a499b5e5c41be83006c4edd058")
+        assert model["repository"] == "https://github.com/theorem-labs/rocq-linux-process-semantics"
 
     def test_refuses_a_release_yaml_that_names_no_model(self):
         for text in ("release: x\n", self.RELEASE.replace("f1006fe8", "zz"),
                      self.RELEASE.replace("https://github.com", "file://"), "- a list\n",
                      "release: 2024-13-45\n", "created: 2024-01-01T25:00:00\n"):
-            with self.assertRaises(Failed):
+            with pytest.raises(Failed):
                 model_release.release_model(text=text)
 
     def test_code_without_comments(self):
         text = 'Definition a := 1. (* one (* nested *) *)\n\n  Definition   b := "(* not a comment *)".\n'
-        self.assertEqual(model_release.rocq_code(text), ["Definition a := 1.",
-                                                         'Definition b := "(* not a comment *)".'])
-        self.assertEqual(model_release.code_sha256(text), model_release.code_sha256(text.replace("one", "uno")))
-        self.assertNotEqual(model_release.code_sha256(text), model_release.code_sha256(text.replace("1.", "2.")))
+        assert model_release.rocq_code(text) == ["Definition a := 1.", 'Definition b := "(* not a comment *)".']
+        assert model_release.code_sha256(text) == model_release.code_sha256(text.replace("one", "uno"))
+        assert model_release.code_sha256(text) != model_release.code_sha256(text.replace("1.", "2."))
 
-    def test_stale(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = pathlib.Path(tmp)
-            (root / "A.v").write_text("Definition a := 1.\n")
-            files = {"A.v": model_release.code_sha256("(* a comment *) Definition a := 1.")}
-            self.assertEqual(model_release.stale(root, files), [])
-            self.assertEqual(model_release.stale(root, {**files, "B.v": "0" * 64}), ["B.v"])
-            (root / "A.v").write_text("Definition a := 2.\n")
-            self.assertEqual(model_release.stale(root, files), ["A.v"])
+    def test_stale(self, tmp_path):
+        root = tmp_path
+        (root / "A.v").write_text("Definition a := 1.\n")
+        files = {"A.v": model_release.code_sha256("(* a comment *) Definition a := 1.")}
+        assert model_release.stale(root, files) == []
+        assert model_release.stale(root, {**files, "B.v": "0" * 64}) == ["B.v"]
+        (root / "A.v").write_text("Definition a := 2.\n")
+        assert model_release.stale(root, files) == ["A.v"]
 
 
-class Runs(unittest.TestCase):
+class TestRuns:
     """check_binaries' reading of the runs: quiet and loud, the system calls' floors, and the report."""
 
     QEMU = "qemu-riscv64 version 10.0.11 (Debian 1:10.0.11+ds-0+deb13u1)"
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.results = pathlib.Path(self.tmp.name)
+    @pytest.fixture(autouse=True)
+    def set_up(self, tmp_path):
+        self.results = tmp_path
         self.inputs = [(check_binaries.EMPTY, check_binaries.HEADER), ("seed1", check_binaries.HEADER + b"x")]
         for kind in "lq":
             for n in range(2):
                 self.write(f"{kind}{n}.calls", "exec")
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def write(self, name, value):
         (self.results / name).write_text(f"{value}\n")
@@ -2643,9 +2621,9 @@ class Runs(unittest.TestCase):
             for n in range(12):
                 archive_file.writestr(f"s{n}", b"%d" % n)
         inputs = check_binaries.seed_inputs(self.results, "t")
-        self.assertEqual(len(inputs), check_binaries.MAX_SEEDS + 1)
-        self.assertEqual(inputs[0], (check_binaries.EMPTY, check_binaries.HEADER))
-        self.assertEqual(inputs[1], ("s0", check_binaries.HEADER + b"0"))
+        assert len(inputs) == check_binaries.MAX_SEEDS + 1
+        assert inputs[0] == (check_binaries.EMPTY, check_binaries.HEADER)
+        assert inputs[1] == ("s0", check_binaries.HEADER + b"0")
 
     def test_quiet_and_loud(self):
         for n, (loud, quiet, written) in enumerate([(0, 0, 0), (2, 2, 0)]):
@@ -2653,17 +2631,16 @@ class Runs(unittest.TestCase):
             self.write(f"q{n}.status", quiet)
             self.write(f"q{n}.out", written)
             self.write(f"q{n}.err", 0)
-        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results)["result"], "pass")
+        assert check_binaries.quiet_loud(True, "", self.inputs, self.results)["result"] == "pass"
         self.write("q1.status", 0)
         result = check_binaries.quiet_loud(True, "", self.inputs, self.results)
-        self.assertEqual(result["result"], "fail")
-        self.assertIn("exits 2, the quiet twin 0", result["detail"])
+        assert result["result"] == "fail"
+        assert "exits 2, the quiet twin 0" in result["detail"]
         self.write("q1.status", 2)
         self.write("q0.out", 5)
-        self.assertIn("wrote 5 bytes", check_binaries.quiet_loud(True, "", self.inputs, self.results)["detail"])
+        assert "wrote 5 bytes" in check_binaries.quiet_loud(True, "", self.inputs, self.results)["detail"]
         self.write("q0.out", 0)
-        self.assertEqual(check_binaries.quiet_loud(False, "no adapter", self.inputs, self.results)["result"],
-                         "not-run")
+        assert check_binaries.quiet_loud(False, "no adapter", self.inputs, self.results)["result"] == "not-run"
         # A check that did not run must not read as a clean one.
         block = {"model": {"name": "m", "commit": "f" * 40, "release": "x"}, "inputs": {"t": ["a"]},
                  "targets": {"t": {"plain": {"elf": {"result": "pass"}, "system_calls": {"result": "pass"},
@@ -2672,12 +2649,12 @@ class Runs(unittest.TestCase):
                                              "instrumented": {"result": "plain"}}}}}
         text = check_binaries.report(block, {"t": {"plain": [{"name": "libc.a", "kind": "libc"}]}}, ["plain"],
                                      {"t": {"plain": None}})
-        self.assertIn("**not decided** (not run)", text)
-        self.assertIn("quiet and loud: `no quiet twin: a Go program`", text)
+        assert "**not decided** (not run)" in text
+        assert "quiet and loud: `no quiet twin: a Go program`" in text
         # A run that never started: its status is the tracer's, and decides nothing.
         self.write("l0.calls", "")
         self.write("l1.calls", "")
-        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results)["result"], "error")
+        assert check_binaries.quiet_loud(True, "", self.inputs, self.results)["result"] == "error"
 
     def test_a_missing_byte_count_is_not_silence(self):
         for n in range(2):
@@ -2685,12 +2662,12 @@ class Runs(unittest.TestCase):
             self.write(f"q{n}.status", 0)
             self.write(f"q{n}.out", 0)
             self.write(f"q{n}.err", 0)
-        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results)["result"], "pass")
+        assert check_binaries.quiet_loud(True, "", self.inputs, self.results)["result"] == "pass"
         for n in range(2):
             (self.results / f"q{n}.err").unlink()
         result = check_binaries.quiet_loud(True, "", self.inputs, self.results)
-        self.assertEqual(result["result"], "error", result)
-        self.assertIn("count of what the quiet twin wrote is missing", result["detail"])
+        assert result["result"] == "error", result
+        assert "count of what the quiet twin wrote is missing" in result["detail"]
 
     def test_a_run_that_never_reached_its_input_decides_nothing(self):
         """Two binaries that both die before main agree on every status and write nothing."""
@@ -2700,13 +2677,13 @@ class Runs(unittest.TestCase):
             self.write(f"q{n}.out", 0)
             self.write(f"q{n}.err", 0)
         whole = {check_binaries.EMPTY, "seed1"}
-        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, whole)["result"], "pass")
+        assert check_binaries.quiet_loud(True, "", self.inputs, self.results, whole)["result"] == "pass"
         result = check_binaries.quiet_loud(True, "", self.inputs, self.results, set())
-        self.assertEqual(result["result"], "error")
-        self.assertIn("not a whole run of the input", result["detail"])
+        assert result["result"] == "error"
+        assert "not a whole run of the input" in result["detail"]
         # A difference still fails, whether or not the run reached its input.
         self.write("q0.status", 0)
-        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, set())["result"], "fail")
+        assert check_binaries.quiet_loud(True, "", self.inputs, self.results, set())["result"] == "fail"
 
     def test_check_2_without_a_verdict_is_named_as_the_reason(self):
         """When check 2 could not read the runs at all (no model, another qemu), it lists no whole run, and check 3
@@ -2717,19 +2694,19 @@ class Runs(unittest.TestCase):
             self.write(f"q{n}.out", 0)
             self.write(f"q{n}.err", 0)
         result = check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "qemu 8.2.2: not 10.0.11")
-        self.assertEqual(result["result"], "error")
-        self.assertIn("check 2 could not tell whether the binary's run reached its input", result["detail"])
-        self.assertIn("(check 2: qemu 8.2.2: not 10.0.11)", result["detail"])
-        self.assertNotIn("not a whole run", result["detail"])
+        assert result["result"] == "error"
+        assert "check 2 could not tell whether the binary's run reached its input" in result["detail"]
+        assert "(check 2: qemu 8.2.2: not 10.0.11)" in result["detail"]
+        assert "not a whole run" not in result["detail"]
         # A difference still fails.
         self.write("q1.status", 3)
-        self.assertEqual(check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "x")["result"], "fail")
+        assert check_binaries.quiet_loud(True, "", self.inputs, self.results, set(), "x")["result"] == "fail"
 
     def test_a_linked_result_is_not_read(self):
         secret = self.results / "secret"
         secret.write_text("0\n")
         (self.results / "l0.status").symlink_to(secret)
-        self.assertIsNone(check_binaries.read_number(self.results, "l0.status"))
+        assert check_binaries.read_number(self.results, "l0.status") is None
 
     def test_system_calls_need_whole_runs(self):
         traces = {0: '7 openat(AT_FDCWD,"input.bin",O_RDONLY|O_LARGEFILE) = 3\n7 read(3,0x1,65536) = 6\n',
@@ -2750,40 +2727,39 @@ class Runs(unittest.TestCase):
         run = lambda stale="", qemu=self.QEMU: check_binaries.system_calls(object(), stale, qemu, "bin", self.inputs,
                                                                            self.results)
         try:
-            self.assertEqual(run()["result"], "pass")
+            assert run()["result"] == "pass"
             # Each run's input.bin holds that run's input, header and all.
-            self.assertEqual(seen, {"stance": "off", "lengths": "exec\n",
-                                    "inputs": {"input.bin": check_binaries.HEADER + b"x"}})
-            self.assertEqual(run(qemu="qemu-riscv64 version 9.1.0")["result"], "error")
+            assert seen == {"stance": "off", "lengths": "exec\n", "inputs": {"input.bin": check_binaries.HEADER + b"x"}}
+            assert run(qemu="qemu-riscv64 version 9.1.0")["result"] == "error"
             # 10.0.0 prints read's and write's buffer in 32 bits, which the checker does not read so.
-            self.assertEqual(run(qemu="qemu-riscv64 version 10.0.0 (Debian 1:10.0.0+ds-1)")["result"], "error")
-            self.assertEqual(run(qemu="qemu-riscv64 version 10.0.110")["result"], "error")
+            assert run(qemu="qemu-riscv64 version 10.0.0 (Debian 1:10.0.0+ds-1)")["result"] == "error"
+            assert run(qemu="qemu-riscv64 version 10.0.110")["result"] == "error"
             # qemu 8.2 hands the host 0 for every anonymous mmap's offset: its runs decide nothing.
             result = run(qemu="qemu-riscv64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)")
-            self.assertEqual(result["result"], "error")
-            self.assertIn("qemu 10.0.11 only", result["detail"])
-            self.assertIn("docs/build-contract.md", result["detail"])
+            assert result["result"] == "error"
+            assert "qemu 10.0.11 only" in result["detail"]
+            assert "docs/build-contract.md" in result["detail"]
             verdicts["calls"] = 3
-            self.assertEqual(run()["result"], "error")
+            assert run()["result"] == "error"
             verdicts["calls"] = 12
             # A call the trace cannot decide is reported with its own reason, and a failure is still a failure when
             # the host-side log is missing.
             verdicts.update(verdict="undecided", undecided=[{"call": "connect", "why": "the address is not printed"}])
-            self.assertIn("connect: the address is not printed", run()["detail"])
+            assert "connect: the address is not printed" in run()["detail"]
             verdicts.update(host_log="missing")
-            self.assertIn("host-side log", run()["detail"])
+            assert "host-side log" in run()["detail"]
             verdicts.update(unmodeled=[{"call": "uname", "why": "not in the model's table"}])
-            self.assertEqual(run()["result"], "fail")
+            assert run()["result"] == "fail"
             verdicts.update(host_log="present", verdict="pass", undecided=[], unmodeled=[])
             (self.results / "l1.trace").write_text("7 read(3,0x1,65536) = 7\n")
             result = run()
-            self.assertEqual(result["result"], "error")
-            self.assertIn("does not open and read input.bin", result["detail"])
+            assert result["result"] == "error"
+            assert "does not open and read input.bin" in result["detail"]
             verdicts["unmodeled"] = [{"call": "uname", "why": "not in the model's table"}]
             result = run()
-            self.assertEqual(result["result"], "fail")
-            self.assertEqual(result["unmodeled"][0]["inputs"], [check_binaries.EMPTY, "seed1"])
-            self.assertEqual(run(stale="the rules are old")["result"], "stale")
+            assert result["result"] == "fail"
+            assert result["unmodeled"][0]["inputs"] == [check_binaries.EMPTY, "seed1"]
+            assert run(stale="the rules are old")["result"] == "stale"
         finally:
             check_binaries.syscall_shapes.check_trace = saved
 
@@ -2816,28 +2792,27 @@ class Runs(unittest.TestCase):
             # Check 2 read the runs: its list of whole runs, and no reason, whatever its result.
             for result, change in (("pass", {}), ("stale", {"stale": "the rules are old"})):
                 calls = check_2(**change)
-                self.assertEqual((calls["result"], check_binaries.whole_runs(calls)), (result, (both, None)))
-            self.assertEqual(check_3(check_2())["result"], "pass")
+                assert (calls["result"], check_binaries.whole_runs(calls)) == (result, (both, None))
+            assert check_3(check_2())["result"] == "pass"
             verdict["unmodeled"] = [{"call": "uname", "why": "not in the model's table"}]
-            self.assertEqual((check_2()["result"], check_binaries.whole_runs(check_2())), ("fail", (both, None)))
+            assert (check_2()["result"], check_binaries.whole_runs(check_2())) == ("fail", (both, None))
             verdict.update(unmodeled=[], exited=False)
             calls = check_2()  # runs that decide nothing: a list, empty, and still no reason
-            self.assertEqual((calls["result"], check_binaries.whole_runs(calls)), ("error", (set(), None)))
-            self.assertIn("not a whole run of the input", check_3(calls)["detail"])
+            assert (calls["result"], check_binaries.whole_runs(calls)) == ("error", (set(), None))
+            assert "not a whole run of the input" in check_3(calls)["detail"]
             verdict.update(exited=True, raises=True)
             # Check 2 could not read the runs, or raised: no list, and its detail as the reason.
             unread = {"model": check_2(model="the model could not be read: no release.yaml"),
                       "qemu": check_2(qemu="qemu-riscv64 version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.18)"),
                       "trace": check_2(), "raised": check_2(results=None)}
             for why, calls in unread.items():
-                with self.subTest(why=why):
-                    self.assertNotIn("whole", calls)
-                    self.assertEqual(check_binaries.whole_runs(calls), (set(), calls["detail"]))
-                    self.assertIn(f"(check 2: {calls['detail'][:40]}", check_3(calls)["detail"])
-                    self.assertNotIn("not a whole run", check_3(calls)["detail"])
-            self.assertIn("the trace could not be read", unread["trace"]["detail"])
-            self.assertTrue(unread["raised"]["detail"].startswith("system_calls: TypeError"))
-            self.assertEqual(check_binaries.whole_runs({"result": "error"}), (set(), "it gave no reason"))
+                assert "whole" not in calls, why
+                assert check_binaries.whole_runs(calls) == (set(), calls["detail"]), why
+                assert f"(check 2: {calls['detail'][:40]}" in check_3(calls)["detail"], why
+                assert "not a whole run" not in check_3(calls)["detail"], why
+            assert "the trace could not be read" in unread["trace"]["detail"]
+            assert unread["raised"]["detail"].startswith("system_calls: TypeError")
+            assert check_binaries.whole_runs({"result": "error"}) == (set(), "it gave no reason")
         finally:
             check_binaries.syscall_shapes.check_trace = saved
 
@@ -2846,7 +2821,6 @@ class Runs(unittest.TestCase):
         check 3 names check 2's reason, not that each run fell short of its input. The third value is the C library
         that the record of each binary declares: the record's libc file, or None for a record that declares none, for
         a Go program and for a binary with no record."""
-        from unittest import mock
         import types
         work = self.results / "work"
         declared = {name: (f"/work/b/musl/lib/{name}", str(n) * 64)
@@ -2872,28 +2846,29 @@ class Runs(unittest.TestCase):
             return results
 
         link = {"plain": {"uninstrumented": None, "instrumented": {"result": "plain"}}}
-        with mock.patch.object(model_release, "release_model", release_model), \
-                mock.patch.object(check_links, "read_compiles", lambda raw: {}), \
-                mock.patch.object(check_links, "analyse", lambda *arguments: link), \
-                mock.patch.multiple(check_binaries, record_of=lambda raw, target, compiles: (records[target], b"quiet"),
-                                    image_hashes=lambda *arguments, **options: {},
-                                    dwarf_reader=lambda *arguments: None, assembly_reader=lambda *arguments: None,
-                                    seed_inputs=lambda directory, target: [(check_binaries.EMPTY,
-                                                                            check_binaries.HEADER)],
-                                    qemu_version=lambda qemu: self.QEMU, run_job=run_job), \
-                mock.patch.object(check_binaries.check_checks, "qemu", lambda: "/bin/true"):
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(model_release, "release_model", release_model)
+            patch.setattr(check_links, "read_compiles", lambda raw: {})
+            patch.setattr(check_links, "analyse", lambda *arguments: link)
+            patch.setattr(check_binaries, "record_of", lambda raw, target, compiles: (records[target], b"quiet"))
+            patch.setattr(check_binaries, "image_hashes", lambda *arguments, **options: {})
+            patch.setattr(check_binaries, "dwarf_reader", lambda *arguments: None)
+            patch.setattr(check_binaries, "assembly_reader", lambda *arguments: None)
+            patch.setattr(check_binaries, "seed_inputs",
+                          lambda directory, target: [(check_binaries.EMPTY, check_binaries.HEADER)])
+            patch.setattr(check_binaries, "qemu_version", lambda qemu: self.QEMU)
+            patch.setattr(check_binaries, "run_job", run_job)
+            patch.setattr(check_binaries.check_checks, "qemu", lambda: "/bin/true")
             block, _, libc = check_binaries.binary_checks(
                 types.SimpleNamespace(builds=["plain"], directory=work), "tag", "toolchain", list(records),
                 {target: {"plain": {"file": f"{target}.plain"}} for target in records}, {}, work, labels=[])
-        self.assertEqual(libc, {"t": {"plain": None}, "u": {"plain": declared}, "v": {"plain": None},
-                                "w": {"plain": None}})
+        assert libc == {"t": {"plain": None}, "u": {"plain": declared}, "v": {"plain": None}, "w": {"plain": None}}
         checks = block["targets"]["t"]["plain"]
-        self.assertEqual(checks["system_calls"], {"result": "error",
-                                                  "detail": "the model could not be read: no release.yaml"})
+        assert checks["system_calls"] == {"result": "error", "detail": "the model could not be read: no release.yaml"}
         agreement = checks["quiet_loud"]
-        self.assertEqual(agreement["result"], "error")
-        self.assertIn("check 2 could not tell whether the binary's run reached its input", agreement["detail"])
-        self.assertIn("(check 2: the model could not be read: no release.yaml)", agreement["detail"])
+        assert agreement["result"] == "error"
+        assert "check 2 could not tell whether the binary's run reached its input" in agreement["detail"]
+        assert "(check 2: the model could not be read: no release.yaml)" in agreement["detail"]
 
     def test_a_trace_that_cannot_be_read_fails_one_binary_only(self):
         self.write("l0.status", 0)
@@ -2908,13 +2883,13 @@ class Runs(unittest.TestCase):
             result = check_binaries.system_calls(object(), "", self.QEMU, "bin", self.inputs, self.results)
         finally:
             check_binaries.syscall_shapes.check_trace = saved
-        self.assertEqual(result["result"], "error")
-        self.assertIn("kind_reason", result["detail"])
+        assert result["result"] == "error"
+        assert "kind_reason" in result["detail"]
         # And a check that raises anywhere gives that binary an error, not the step.
         def fails(binary, stale):
             raise ValueError("not a RISC-V program")
-        self.assertEqual(check_binaries.guarded(fails, "bin", ""),
-                         {"result": "error", "detail": "fails: ValueError: not a RISC-V program"})
+        assert check_binaries.guarded(fails, "bin", "") == \
+            {"result": "error", "detail": "fails: ValueError: not a RISC-V program"}
 
     def test_report_names_the_four_checks_per_binary(self):
         block = {"model": {"name": "m", "commit": "f" * 40, "release": "2026.10.0"}, "inputs": {"t": ["a", "b"]},
@@ -2926,11 +2901,7 @@ class Runs(unittest.TestCase):
                               "quiet_loud": {"result": "pass"}, "instrumented": {"result": "pass"}}}}}
         listing = {"t": {"plain": [{"name": "libc.a", "kind": "libc"}], "asan": None}}
         text = check_binaries.report(block, listing, ["plain", "asan"], {"t": {"plain": None, "asan": None}})
-        self.assertIn("| ELF and instructions | system calls | quiet and loud | instrumented |", text)
-        self.assertIn("| `t.plain` | pass | pass | pass | not instrumented (plain) | 1 files |", text)
-        self.assertIn("| `t.asan` | pass | **fail** | pass | pass | not recorded |", text)
-        self.assertIn("`t.asan`, system calls: `uname: not in the table`", text)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert "| ELF and instructions | system calls | quiet and loud | instrumented |" in text
+        assert "| `t.plain` | pass | pass | pass | not instrumented (plain) | 1 files |" in text
+        assert "| `t.asan` | pass | **fail** | pass | pass | not recorded |" in text
+        assert "`t.asan`, system calls: `uname: not in the table`" in text
