@@ -807,18 +807,22 @@ def shards():
 
 def run_the_tests_step(tmp_path, last_line, status=0, job="suite", shard=None):
     """Run the TESTS_STEP of tests.yaml's `job`, with its own env, the workflow's DOCKER_TESTS and, for docker, the
-    matrix values of `shard` (the first by default), a stand-in nproc that says 3, and a stand-in python3 that records
-    its arguments and the PYTHONSAFEPATH it gets, prints `last_line` as pytest's last line, and exits `status`. Each
-    pytest-xdist worker inherits that environment (the step's comment). Return the step's exit status, its output, and
-    pytest's arguments after -m pytest."""
+    matrix values of `shard` (the first by default), a stand-in nproc that says 3, a stand-in lscpu that gives 2 cores
+    (one of them listed twice) and the model "Stand-in CPU 1", and a stand-in python3 that records its arguments and the
+    PYTHONSAFEPATH it gets, prints `last_line` as pytest's last line, and exits `status`. Each pytest-xdist worker
+    inherits that environment (the step's comment). Return the step's exit status, its output, and pytest's arguments
+    after -m pytest."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     bin = tmp_path / "bin"
     bin.mkdir()
     (bin / "nproc").write_text("#!/bin/sh\necho 3\n")
+    (bin / "lscpu").write_text('#!/bin/sh\nif [ "$1" = -p=CORE,SOCKET ]; then\n'
+                               '  printf "# The following is the parsable format\\n# Core,Socket\\n0,0\\n0,0\\n1,0\\n"\n'
+                               'else\n  printf "Architecture:  x86_64\\nModel name:    Stand-in CPU 1\\n"\nfi\n')
     (bin / "python3").write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$ARGV"\n'
                                  'printf "%s\\n" "${PYTHONSAFEPATH-unset}" > "$ARGV.safepath"\n'
                                  f'echo "SKIPPED [1] tests/test_x.py:1: a reason"\necho {last_line!r}\nexit {status}\n')
-    for name in ("nproc", "python3"):
+    for name in ("nproc", "lscpu", "python3"):
         (bin / name).chmod(0o755)
     flow = workflow("tests.yaml")
     tests = step(flow["jobs"][job], TESTS_STEP[job])
@@ -826,7 +830,8 @@ def run_the_tests_step(tmp_path, last_line, status=0, job="suite", shard=None):
     if job == "docker":
         [entry] = [e for e in flow["jobs"]["docker"]["strategy"]["matrix"]["include"]
                    if e["shard"] == (shard or shards()[0][0])]
-        matrix = {"${{ matrix.tests }}": entry["tests"], "${{ matrix.workers }}": str(entry["workers"])}
+        matrix = {"${{ matrix.tests }}": entry["tests"], "${{ matrix.workers }}": str(entry["workers"]),
+                  "${{ matrix.shard }}": entry["shard"]}
     env = {name: matrix.get(value, value) for name, value in tests["env"].items()}
     ambient = {name: value for name, value in os.environ.items() if name != "PYTHONSAFEPATH"}
     run = subprocess.run(["bash", "-e", "-c", tests["run"]], cwd=tmp_path, capture_output=True, text=True,
@@ -1106,6 +1111,32 @@ def test_the_tests_step_fails_when_a_test_skips(tmp_path, job, last_line, status
     code, out, _ = run_the_tests_step(tmp_path, last_line, status, job=job)
     assert (code != 0) == fails, out
     assert ("::error::A test skipped here" in out) == (fails and status == 0), out
+
+
+# The CPU line of the docker step The Docker tests, as it reads with run_the_tests_step's stand-ins: 3 CPUs, 2 cores
+# and the model "Stand-in CPU 1".
+CPU_LINE = re.compile(
+    r"cpu of docker \((?P<shard>[^)]*)\): wall [0-9]+\.[0-9] s; "
+    r"pytest's own processes \(GNU time\): user [0-9]+\.[0-9] s, system [0-9]+\.[0-9] s; "
+    r"the whole runner over the same span, its agent and daemons too \(/proc/stat\): "
+    r"user [0-9]+\.[0-9] s, system [0-9]+\.[0-9] s, "
+    r"\(user \+ system\) / wall ([0-9]+\.[0-9]{2}|none \(no wall time\)), "
+    r"of at most 3: 3 CPUs, 2 cores, Stand-in CPU 1")
+
+
+@pytest.mark.parametrize("status", [0, 1])
+def test_each_docker_shard_prints_its_cpu_line_and_keeps_pytests_status(tmp_path, status):
+    """The step The Docker tests of each shard prints one CPU line after pytest, whether pytest passes or fails, and
+    still exits with pytest's status. The line names the shard and gives the wall time and pytest's own CPU (GNU time),
+    the whole runner's CPU over the same span (/proc/stat), and what that is read against: nproc's CPUs, the cores that
+    lscpu lists (a core listed twice, as its two threads are, counts once) and the CPU model."""
+    for shard, _, _ in shards():
+        code, out, _ = run_the_tests_step(tmp_path / shard, "5 passed in 1.00s", status, job="docker", shard=shard)
+        assert code == status, out
+        lines = [line for line in out.splitlines() if line.startswith("cpu of docker")]
+        assert len(lines) == 1, out
+        found = CPU_LINE.fullmatch(lines[0])
+        assert found and found["shard"] == shard, lines[0]
 
 
 def test_a_newer_run_of_a_pull_request_or_of_main_cancels_the_older():

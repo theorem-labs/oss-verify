@@ -526,6 +526,13 @@ jobs:
       # The tests of this shard (the matrix above), on its pytest-xdist workers. --dist loadscope keeps the tests of a
       # class on one worker, so that its setUpClass builds its images once; each class runs the builds of its fixture at
       # once (tests/test_builder.py, compile_builds). A skip fails the step, as in suite.
+      # The step prints its CPU time in one line, whether the tests pass or fail, so that how busy a shard keeps its
+      # runner is read from the job's own log: the wall time and pytest's own user and system time, from GNU time; the
+      # user and system time of the whole runner over the same span, from /proc/stat; and the runner's CPUs. The builds
+      # run in containers that dockerd starts, not pytest, so GNU time does not count them and /proc/stat does. /proc/stat
+      # counts every process on the runner, the runner's agent and daemons too, so it is the machine's CPU over the step,
+      # not the step's own. (user + system) / wall is read against the CPUs beside it: 4 CPUs of 2 cores with 2 threads
+      # each can give at most 4.0.
       - name: The Docker tests
         if: steps.fork.outputs.enrollment != 'true'
         env:
@@ -533,13 +540,35 @@ jobs:
           OV_FP_TOOLCHAIN_C: ${{ steps.images.outputs.c }}
           OV_FP_TOOLCHAIN_RUST: ${{ steps.images.outputs.rust }}
           PYTHONSAFEPATH: "1"
+          SHARD: ${{ matrix.shard }}
           SHARD_TESTS: ${{ matrix.tests }}
           WORKERS: ${{ matrix.workers }}
         run: |
           set -o pipefail
           read -r -a tests <<< "$SHARD_TESTS"
-          python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$WORKERS" --dist loadscope --durations=30 \
-            "${tests[@]}" | tee "$RUNNER_TEMP/pytest"
+          # user + nice, and system + irq + softirq, of all the CPUs, in clock ticks.
+          cpu() { awk '$1 == "cpu" { print $2 + $3, $4 + $7 + $8 }' /proc/stat; }
+          before=$(cpu)
+          status=0
+          /usr/bin/time -o "$RUNNER_TEMP/time" -f '%e %U %S' \
+            python3 -P -m pytest -q -p no:cacheprovider -c pyproject.toml -rs -n "$WORKERS" --dist loadscope \
+            --durations=30 "${tests[@]}" | tee "$RUNNER_TEMP/pytest" || status=$?
+          after=$(cpu)
+          # GNU time writes a line "Command exited with non-zero status" first when pytest fails: its format is last.
+          read -r wall user system < <(tail -n 1 "$RUNNER_TEMP/time")
+          cores=$(lscpu -p=CORE,SOCKET | grep -v '^#' | sort -u | wc -l)
+          model=$(lscpu | sed -n 's/^Model name: *//p')
+          awk -v shard="$SHARD" -v w="$wall" -v u="$user" -v s="$system" -v b="$before" -v a="$after" \
+            -v hz="$(getconf CLK_TCK)" -v n="$(nproc)" -v cores="$cores" -v model="$model" 'BEGIN {
+              split(b, x, " "); split(a, y, " "); ru = (y[1] - x[1]) / hz; rs = (y[2] - x[2]) / hz
+              printf "cpu of docker (%s): wall %.1f s; pytest'"'"'s own processes (GNU time): user %.1f s, system %.1f s; ",
+                shard, w, u, s
+              printf "the whole runner over the same span, its agent and daemons too (/proc/stat): user %.1f s, ", ru
+              # A wall of 0.00 s, the resolution of GNU time, has no ratio.
+              ratio = w > 0 ? sprintf("%.2f", (ru + rs) / w) : "none (no wall time)"
+              printf "system %.1f s, (user + system) / wall %s, of at most %d: %d CPUs, %d cores, %s\n",
+                rs, ratio, n, n, cores, model }'
+          [ "$status" -eq 0 ] || exit "$status"
           if tail -n 1 "$RUNNER_TEMP/pytest" | grep -qE '(^|[ ,])[0-9]+ skipped'; then
             echo "::error::A test skipped here (each SKIPPED line above names one, and why): each test of this job must run."
             exit 1
