@@ -2133,6 +2133,11 @@ shutil.copyfile(home / "archive", args[args.index("-o") + 1])
                  for p in sorted((ROOT / ".github" / "workflows").iterdir()) if p.suffix in (".yml", ".yaml")]
         self.assertEqual(names.count(images["name"]), 1, names)
 
+    def test_publish_starts_when_a_run_of_toolchain_images_completes(self):
+        # A requested or an in-progress run has no conclusion yet, so the if of each job of publish's file (its
+        # conclusion is success) is false there, and nothing would be published, with no error.
+        self.assertEqual(triggers(self.workflow(ROOT, self.PUBLISH))["workflow_run"]["types"], ["completed"])
+
     def tracked(self):
         """The path of each file of this repository that git tracks: what a checkout of the whole tree gives."""
         done = subprocess.run([REAL_GIT, "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True)
@@ -5455,6 +5460,22 @@ class HeldRuns(Stand):
                                  ("workflow_dispatch", "refs/heads/other", False)):
             self.assertEqual(bool(test_outside_screen.evaluate(job["if"], {"github.event_name": event,
                                                                            "github.ref": ref})), runs, (event, ref))
+
+    def test_held_runs_workflow_starts_on_events_alone_and_runs_no_action(self):
+        # Events only, never a schedule: a run of Build, Triage or Tests that ended (not Terms: the file says why), a
+        # push to main, an issue opened or reopened, and a run by hand. Each of them runs main's copy of the file. No
+        # job runs an action or calls a workflow: a job may hold actions: write (the test above), which can approve
+        # held runs, and an action is code that this file does not hold.
+        workflow = parse(self.workflow_text)
+        self.assertEqual(triggers(workflow), {
+            "workflow_run": {"workflows": ["Build", "Triage", "Tests"], "types": ["completed"]},
+            "push": {"branches": ["main"]},
+            "issues": {"types": ["opened", "reopened"]},
+            "workflow_dispatch": None})
+        self.assertTrue(workflow["jobs"])
+        for name, job in workflow["jobs"].items():
+            self.assertNotIn("uses", job, name)
+            self.assertEqual([s for s in job.get("steps") or [] if "uses" in s], [], name)
 
 
 class ReviewThatPasses(Stand):

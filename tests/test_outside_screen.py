@@ -1182,6 +1182,47 @@ class Holdings(unittest.TestCase):
                 with self.subTest(**said):
                     self.assertEqual(screen.combine({c: said.get(c, "clean") for c in ran}, rule), "held")
 
+    # The model that the rule in use was measured with (.github/scripts/screen.py, the measurement beside RULES). In
+    # that measurement the detectors, either one, held none of the 220 ordinary items and 39 of the 125 injections (the
+    # rule detectors), so the model's word made all 6 false holds of claude_or_both_detectors and at least 80 of the
+    # 119 injections it held. Another model needs a new measurement (screen.py --measure) before it screens, and this
+    # name changes with it.
+    MEASURED_MODEL = "claude-haiku-5-5"
+
+    def test_the_screen_asks_the_model_its_rule_was_measured_with(self):
+        """Each step of the screen job that runs screen.py runs it with that model: the screen, its sign-in, and a
+        measurement, which would otherwise measure another model than the one that screens."""
+        ran = []
+        for s in REVIEW_JOBS["screen"]["steps"]:
+            if "screen.py" in str(s.get("run", "")):
+                ran.append(s["name"])
+                with self.subTest(step=s["name"]):
+                    self.assertEqual(step_env("screen", s)["SCREEN_MODEL"], self.MEASURED_MODEL)
+        self.assertLessEqual({"Screen", "Measure"}, set(ran))
+
+    # Every attempt a run can have: GitHub runs at most 50 re-runs of a run (held-runs.yml's comment), so its
+    # run_attempt is 1 to 51. Two run ids, the second the first with a digit 1 after it: a name that joins a run id and
+    # an attempt with no separator gives run 46129892577's attempt 11 and run 461298925771's attempt 1 one name.
+    ATTEMPTS = tuple(str(n) for n in range(1, 52))
+    RUN_IDS = ("46129892577", "461298925771")
+
+    def test_each_attempt_of_each_run_stores_its_screen_record_under_a_name_of_its_own(self):
+        """screen.py stores the reason of a screen (the Screen step's REASON_OBJECT) and the record of a measurement
+        (the Measure step's MEASURE_OBJECT) as a new object, never over one (ifGenerationMatch=0, test_screen.py). A
+        name that a re-run, or another run, gives again would lose that run's record. Each name differs for every
+        attempt of the two runs, and holds its run's id and its attempt each as a whole number, with no digit
+        beside it."""
+        for name, variable in (("Screen", "REASON_OBJECT"), ("Measure", "MEASURE_OBJECT")):
+            value = step_env("screen", step("screen", name))[variable]
+            names = {(run, attempt): interpolated(value, {"github.repository": REPO, "github.run_id": run,
+                                                          "github.run_attempt": attempt})
+                     for run in self.RUN_IDS for attempt in self.ATTEMPTS}
+            with self.subTest(step=name):
+                self.assertEqual(len(set(names.values())), len(names), sorted(names.values()))
+                numbers = {key: re.findall(r"\d+", said) for key, said in names.items()}
+                self.assertEqual([key for key, found in numbers.items()
+                                  if key[0] not in found or key[1] not in found], [])
+
 
 class TakeReviewData(Runner):
     """.github/scripts/take-review-data: only the gather job's file, by its SHA-256, and only what the review reads."""
@@ -1525,6 +1566,10 @@ class Hold(Runner):
         lines = run.stdout.splitlines()
         self.assertEqual(lines[-1], "<!-- oss-verify-review-head " + "a" * 40 + " -->")
         self.assertEqual([x for x in lines if "oss-verify-review-head" in x], [lines[-1]])
+
+    def test_the_comment_jobs_never_cancel_each_other(self):
+        self.assertEqual(REVIEW_JOBS["comment"]["concurrency"]["queue"], "max")
+        self.assertIs(REVIEW_JOBS["comment"]["concurrency"]["cancel-in-progress"], False)
 
     STARTED = "2026-11-03T10:00:00Z"
 

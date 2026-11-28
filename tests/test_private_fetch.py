@@ -442,6 +442,17 @@ class TestCredentialHelper:
 class TestTheList:
     """infra/private-libraries.tsv: the only thing that makes a build ask for a token."""
 
+    # The repositories of the list, written here and not read from the file: the file is what this checks. A row that
+    # goes missing already fails that library's build, whose message says that the repository needs a row there
+    # (check_build.unreadable), so this finds it earlier, not where nothing did. No project in projects/ names one of
+    # these, and none mounts the token (test_no_project_in_this_repository_mounts_the_secret), so nothing here can
+    # check the rows themselves: this holds the list to this set alone.
+    PRIVATE = {"https://github.com/theorem-labs/cjson-ossv267", "https://github.com/theorem-labs/theorem-cli",
+               "https://github.com/theorem-labs/model-gateway"}
+
+    def test_it_lists_the_private_libraries_and_no_other(self):
+        assert set(check_build.private_libraries()) == self.PRIVATE
+
     def test_a_public_library_is_not_in_it(self):
         assert check_build.private_reason("https://github.com/DaveGamble/cJSON") is None
         assert check_build.private_reason("https://github.com/theorem-labs/oss-verify") is None

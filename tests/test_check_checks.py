@@ -30,7 +30,7 @@ from oss_verify import validate
 from test_enroll_dispatch import marked_encrypted  # noqa: E402
 # The workflow tests' workflow reader, expression evaluator, job graph, collector and step runner with a stand-in gh,
 # review.yml and its jobs, and route's outputs for each kind of item.
-from test_outside_screen import (ITEMS, REVIEW, REVIEW_JOBS, Runner, comment_job_env, evaluate,  # noqa: E402
+from test_outside_screen import (ITEMS, REVIEW, REVIEW_JOBS, Runner, as_text, comment_job_env, evaluate,  # noqa: E402
                                  interpolated, read_workflow, required, run_graph, step)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -3438,6 +3438,49 @@ class SessionCache(unittest.TestCase):
         root = pathlib.PurePosixPath(os.path.commonpath(kept))
         landed = [str(pathlib.PurePosixPath(take["with"]["path"]) / path.relative_to(root)) for path in kept]
         self.assertEqual(landed, save["with"]["path"].split("\n"))
+
+    def test_the_session_job_saves_a_kept_session_whatever_the_review_jobs_result(self):
+        """The session job runs when the review job kept a session (its output session), whether the review job then
+        succeeded or failed, and not when it kept none: a step that fails after the upload loses no session."""
+        for kind in ("enrollment", "change"):
+            for result in ("success", "failure"):
+                for session, runs in (("4242", True), ("", False)):
+                    with self.subTest(kind=kind, review=result, session=session):
+                        review = {"comment": "Thanks.", "held_object": "", "session": session, "kind": kind}
+                        got, _ = run_graph(dict(ITEMS[kind], trust="writer"), results={"review": result},
+                                           outputs={"review": review})
+                        self.assertEqual(got["review"], result)
+                        self.assertEqual(got["session"] != "skipped", runs, got)
+
+    # The inputs of the pinned actions/cache/save and actions/cache/restore (v6.1.0) that have a default, and that
+    # default (their action.yml). GitHub evaluates an input's expressions before the action reads it, and the action
+    # reads it with its white space trimmed; an input set to its default changes nothing.
+    CACHE_DEFAULTS = {"enableCrossOsArchive": "false", "fail-on-cache-miss": "false", "lookup-only": "false"}
+
+    def test_the_save_and_each_restore_take_the_same_paths_and_no_other_input_but_their_keys(self):
+        """actions/cache finds an entry only under the version that its inputs make (the paths, and
+        enableCrossOsArchive with the compression). A restore's lookup-only: true restores nothing, and its
+        fail-on-cache-miss: true fails the gather job before any session was saved. So, with each input set to its
+        default left out, the save takes its paths and its key alone, as the deleted test held, and each restore takes
+        the same paths, its key and its restore-keys alone. An input added to or dropped from any of the three fails
+        here, also one added to all three; so does the save's upload-chunk-size, which changes only how it uploads.
+        An input whose expression reads a context is kept: this test cannot tell its value."""
+        def default(name, value):
+            text = as_text(value)
+            return "${{" not in re.sub(r"\$\{\{\s*(true|false)\s*\}\}", "", text) and \
+                interpolated(text, {}).strip().lower() == self.CACHE_DEFAULTS.get(name)
+
+        def inputs(given):
+            return {k: v for k, v in given.items() if not default(k, v)}
+
+        saved = inputs(step("session", "Keep it for the next push's review")["with"])
+        self.assertEqual(sorted(saved), ["key", "path"])
+        for name in ("Restore the last review's session and the head it reviewed",
+                     "Restore the last change review's session"):
+            with self.subTest(restore=name):
+                restored = inputs(step("gather", name)["with"])
+                self.assertEqual(sorted(restored), ["key", "path", "restore-keys"])
+                self.assertEqual(restored["path"], saved["path"])
 
     def test_the_collector_collects_the_session_job(self):
         """When the review job kept a session, the check review jobs asks for the session job: it fails when that job
