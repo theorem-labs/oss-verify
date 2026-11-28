@@ -389,7 +389,7 @@ jobs:
             workers: 2
             languages: rust
             frame_pointers: oss-fuzz-theorems-2026.10-rust
-            tests: tests/test_builder.py::RustBuilder tests/test_builder.py::FramePointersRust
+            tests: tests/test_builder.py::RustBuilder tests/test_builder.py::FramePointersRust tests/test_builder.py::RustPlainShared
           - shard: c
             workers: 3
             languages: c go
