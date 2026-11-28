@@ -1,0 +1,3 @@
+# The Go modules of the fuzz targets (go.lock).
+# kind	path	arguments: see lay-out-sources
+gomodules	go-modules	go.lock
