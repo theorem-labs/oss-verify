@@ -712,10 +712,10 @@ jobs:
       contents: read
     uses: ./.github/workflows/frame-pointer-tests.yaml
 
-  # compare-digests: the images that docker-tests tested are the images that make made, checked and probed. It is the
-  # one job of this file that waits for others, so docker-tests runs beside make and its probes. It reads only the
-  # digest artifacts of this run, and runs no code of the pull request. Its downloads read this run, so the token
-  # needs no permission.
+  # compare-digests: the images that docker-tests tested are the images that make made, checked and probed. It waits
+  # for make and docker-tests, and no job waits for docker-tests before it, so docker-tests runs beside make and its
+  # probes (prebuilt waits only for rows). It reads only the digest artifacts of this run, and runs no code of the pull
+  # request. Its downloads read this run, so the token needs no permission.
   compare-digests:
     needs: [make, docker-tests]
     runs-on: ubuntu-24.04
