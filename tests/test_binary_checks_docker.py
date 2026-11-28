@@ -19,7 +19,7 @@ from oss_verify import check_binaries
 from oss_verify import check_build
 from oss_verify import check_links
 from oss_verify import manifest
-from test_builder import RUN, compile_builds, docker_ready
+from test_builder import RUN, at_once, compile_builds, docker_ready
 
 FIXTURE = pathlib.Path(__file__).resolve().parent / "fixtures" / "example"
 TAG = f"oss-verify-test/example-records:{RUN}"
@@ -41,8 +41,9 @@ class TestRecords:
         builder = check_build.build_builder()
         check_build.build_project(job, "0" * 40, builder, TAG, cls.work)
         labels = check_build.work_label(cls.work)
-        for kind, record in (("recorded", True), ("unrecorded", False)):
-            compile_builds(TAG, {build: cls.work / kind / build for build in BUILDS}, labels, record=record)
+        # The six compiles at once: the recorded and the unrecorded builds read nothing of each other.
+        at_once(lambda kind: compile_builds(TAG, {build: cls.work / kind / build for build in BUILDS}, labels,
+                                            record=kind == "recorded"), ("recorded", "unrecorded"))
         cls.raw = {build: cls.work / "recorded" / build for build in BUILDS}
         cls.targets, _ = manifest.resolve_targets({b: manifest.discover(d) for b, d in cls.raw.items()})
         cls.entries, _ = manifest.collect(cls.raw, cls.targets, cls.work / "out")

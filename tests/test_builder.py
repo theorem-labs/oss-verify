@@ -104,11 +104,11 @@ ALLOCATION_FAILURE = {
     "af-N-second": (COUNT_FAIL_SECOND, "N", statuses(ZERO, ZERO, ZERO, cxx_count=ONE)),
 }
 
-# Runs every case in one container: prints "<target> <build> <case> <status>" per line.
+# Runs every case of the build that $B names (each_build_at_once): prints "<target> <build> <case> <status>" per line.
 RUNNER = r"""
 cd /in
 for t in example_fuzzer example_fuzzer_cc example_fuzzer_af example_fuzzer_cc_af example_fuzzer_count example_fuzzer_cc_count; do
-  for b in plain ubsan asan asan-ubsan; do
+  for b in $B; do
     for c in /in/case-*; do
       q /bin/$t.$b "$c" > /dev/null 2>&1; echo "$t $b ${c#/in/case-} $?"
     done
@@ -137,15 +137,36 @@ def docker_ready(image=None):
 # core_pattern is a pipe, that dump can outlast the time limit, and the run reads the time limit's status. A core
 # limit of 0 does not stop a dump to a pipe (OSSV-729's measurement).
 NO_CORE_MEMORY = "if [ -e /proc/self/coredump_filter ]; then echo 0 > /proc/self/coredump_filter; fi"
+# The core-file limit of each container that run_in_container starts: 1 byte. A run that a test makes crash on purpose
+# (its status, 132, 134 or 139, is what the test checks) then hands no core to the host at all: Linux aborts a dump to
+# a pipe when the limit is 1, and a core file cannot be written in 1 byte. A limit of 0 does not: the dump still goes to
+# the pipe. On GitHub's ubuntu-24.04 runner, whose core_pattern pipes each dump to systemd-coredump and on to Apport's
+# coredump hook, a run under qemu that aborted, took a SIGSEGV or trapped took 120-256 ms with no limit or a limit of
+# 0, and the hook then spent about 2 CPU-s on each dump; with this limit it took 3-4 ms, as a run that returns 0 does,
+# with the same status and no dump (run 46033445302, INFRA-5359). infra/checks/run-seeds and run-binaries, which
+# oss-verify check --checks runs, set no such limit: their tests (tests/test_seed_runs_docker.py) run them as they run
+# on a project's runner, with the host's handler.
+NO_CORE_LIMIT = ["--ulimit", "core=1"]
 
 
 def run_in_container(image, runner, *mounts):
     """Run the sh script runner in a container of image with no network, with qemu-riscv64 at /qemu and each (host
-    path, container path) of mounts read-only. image is a tag that the test built, so docker never pulls it from a
-    registry. Returns the completed process, with its output as text."""
+    path, container path) of mounts read-only, and no core dump (NO_CORE_LIMIT). image is a tag that the test built, so
+    docker never pulls it from a registry. Returns the completed process, with its output as text."""
     volumes = [arg for host, container in ((QEMU, "/qemu"), *mounts) for arg in ("-v", f"{host}:{container}:ro")]
-    return subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", *volumes, "--entrypoint", "sh",
-                           image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True, text=True, check=True)
+    return subprocess.run(["docker", "run", "--rm", "--network=none", "--pull=never", *NO_CORE_LIMIT, *volumes,
+                           "--entrypoint", "sh", image, "-c", f"{NO_CORE_MEMORY}\n{runner}"], capture_output=True,
+                          text=True, check=True)
+
+
+def each_build_at_once(image, runner, builds, *mounts):
+    """run_in_container(image, runner, *mounts) for each build of `builds`, all at once, each in a container of its own
+    whose shell has the build's name in B: the standard output of every container, joined in the order of `builds`.
+    Each run under qemu is one process, on one hardware thread: in one container, the runs of four builds one after
+    another leave the others idle (on an n2d-standard-4, Builder.test_exit_statuses took 31.5 s that way, 21.1 s at
+    once)."""
+    return "".join(done.stdout for done in at_once(
+        lambda build: run_in_container(image, f"B={build}\n{runner}", *mounts), builds))
 
 
 def at_once(function, items):
@@ -221,9 +242,10 @@ class Builder(unittest.TestCase):
             for build in BUILDS:
                 shutil.copy(self.work / "out" / target / f"{target}.{build}", binaries)
         runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{RUNNER}"
-        done = run_in_container(TAG, runner.replace("/bin/", "/bin2/"), (inputs, "/in"), (binaries, "/bin2"))
+        output = each_build_at_once(TAG, runner.replace("/bin/", "/bin2/"), BUILDS, (inputs, "/in"),
+                                    (binaries, "/bin2"))
         results = {}
-        for line in done.stdout.splitlines():
+        for line in output.splitlines():
             target, build, case, status = line.split(" ", 3)
             results[(target, build, case)] = status
         for target in self.targets:
@@ -386,12 +408,12 @@ class PythonBuilder(unittest.TestCase):
         binaries.mkdir()
         for build in BUILDS:
             shutil.copy(self.work / "out" / "fuzz_example" / f"fuzz_example.{build}", binaries)
-        runner = ('for b in plain ubsan asan asan-ubsan; do for c in /in/*; do '
+        runner = ('for b in $B; do for c in /in/*; do '
                   'timeout 600 /qemu /bin2/fuzz_example.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 600 /qemu /bin2/fuzz_example.$b /in/case-p | tr "\\n" ,; echo; '
                   'done')
-        done = run_in_container(PYTHON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
-        results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in done.stdout.splitlines()}
+        output = each_build_at_once(PYTHON_TAG, runner, BUILDS, (inputs, "/in"), (binaries, "/bin2"))
+        results = {tuple(line.split(" ", 2)[:2]): line.split(" ", 2)[2] for line in output.splitlines()}
         for case, status in PYTHON_EXPECTED.items():
             for build in BUILDS:
                 with self.subTest(build=build, case=case):
@@ -455,9 +477,9 @@ class RustBuilder(unittest.TestCase):
             shutil.copy(self.work / "out" / "example_fuzzer" / f"example_fuzzer.{build}", binaries)
         # An AddressSanitizer detection in a Rust fuzz target took minutes under qemu (about 160 s here, 234 s on
         # ubuntu-24.04-16core): that was the core dump of the qemu process. With run_in_container's write to
-        # coredump_filter the dump holds no memory, and all the cases of this test run in less than a second there
-        # (OSSV-729's measurement). OSSV-729 keeps each helper's time limit, as its R2 asks, and measured no lower
-        # limit.
+        # coredump_filter the dump held no memory, and all the cases of this test ran in less than a second there
+        # (OSSV-729's measurement); its containers now make no dump at all (NO_CORE_LIMIT). OSSV-729 keeps each
+        # helper's time limit, as its R2 asks, and measured no lower limit.
         runner = ('for b in plain ubsan asan asan-ubsan; do for c in /in/*; do '
                   'timeout 600 /qemu /bin2/example_fuzzer.$b "$c" > /dev/null 2>&1; echo "$b ${c#/in/case-} $?"; done; '
                   'printf "%s " "$b printed"; timeout 60 /qemu /bin2/example_fuzzer.$b /in/case-r | tr "\\n" ,; echo; '
@@ -556,7 +578,7 @@ CJSON_RELEASE = {
 CJSON_INPUT = b'1010{"a":[1,2,{"b":"c"}],"d":"e","f":[true,false,null,1.5e3]}\0'
 CJSON_ALLOCATIONS = 21
 CJSON_RUNNER = r"""
-for b in plain ubsan asan asan-ubsan; do
+for b in $B; do
   for t in cjson_read_fuzzer_allocation_failure cjson_read_fuzzer_allocation_counting; do
     for c in /in/*; do q /bin2/$t.$b "$c" > /dev/null 2>&1; echo "$t $b ${c#/in/} $?"; done
   done
@@ -609,8 +631,8 @@ class AllocationFailureOnCjson(unittest.TestCase):
             for build in BUILDS:
                 shutil.copy(self.work / "out" / target / f"{target}.{build}", binaries)
         runner = f"q() {{ timeout 60 /qemu \"$@\"; }}\n{CJSON_RUNNER}"
-        done = run_in_container(CJSON_TAG, runner, (inputs, "/in"), (binaries, "/bin2"))
-        results = {tuple(line.split(" ")[:3]): line.split(" ")[3] for line in done.stdout.splitlines()}
+        output = each_build_at_once(CJSON_TAG, runner, BUILDS, (inputs, "/in"), (binaries, "/bin2"))
+        results = {tuple(line.split(" ")[:3]): line.split(" ")[3] for line in output.splitlines()}
         for build in BUILDS:
             for case in sorted(path.name for path in inputs.iterdir()):
                 published = results[("cjson_read_fuzzer_allocation_failure", build, case)]
