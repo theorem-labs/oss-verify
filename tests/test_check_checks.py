@@ -4585,11 +4585,16 @@ def credentials_baseline(tmp_path_factory):
 
 def credentials_control(baseline, tmp_path, changes):
     """Run the script on a copy of `baseline` with `changes`, each (path, old, new): the one `old` of the file replaced
-    by `new`, or with old None a new file. Return (its exit status, the lines it printed)."""
+    by `new`, with old None a new file, and with new None the file deleted. Return (its exit status, the lines it
+    printed)."""
     root = tmp_path / "tree"
     shutil.copytree(baseline, root)
     for name, old, new in changes:
         path = root / name
+        if new is None:
+            assert path.exists(), name
+            path.unlink()
+            continue
         if old is None:
             assert not path.exists(), name
             path.write_text(new)
@@ -4688,9 +4693,18 @@ def test_a_credential_on_pull_request_review_fails(credentials_baseline, tmp_pat
     got = credentials_control(credentials_baseline, tmp_path, [(
         ".github/workflows/review-approvals.yml", "    timeout-minutes: 2\n",
         "    timeout-minutes: 2\n    environment: comment\n    permissions: {id-token: write}\n")])
+    # (m) refuses the credential, and (n) the two keys that are not in the notification's shape.
     assert got == (1, ["::error::.github/workflows/review-approvals.yml: the job decided can get a credential "
                        "(id-token: write) and its workflow starts on pull_request_review, where it would run beside a "
-                       "pull request's code"])
+                       "pull request's code",
+                       "::error::.github/workflows/review-approvals.yml, the job decided holds the key 'environment', "
+                       "which it must not: of a key this check does not read, a defaults, a container, a concurrency "
+                       "or an env could keep its run from ending success, which review.yml acts on. It holds if and "
+                       "runs-on and steps and timeout-minutes alone",
+                       "::error::.github/workflows/review-approvals.yml, the job decided holds the key 'permissions', "
+                       "which it must not: of a key this check does not read, a defaults, a container, a concurrency "
+                       "or an env could keep its run from ending success, which review.yml acts on. It holds if and "
+                       "runs-on and steps and timeout-minutes alone"])
 
 
 @pytest.mark.parametrize("step, said", [
@@ -4723,6 +4737,145 @@ def test_a_job_with_a_main_only_environment_and_its_own_checkout_passes(credenti
                                       [(ADDED, None, added_workflow(job, on="{workflow_run: {workflows: [Build]}}"))])
     assert code == 0, lines
     assert f"{ADDED} deploy in comment" in lines[0]
+
+
+# (n) of .github/scripts/workflow-credentials: the workflow whose completion has review.yml post the check run review
+# again with the approvals read then. Without it a check run that a person's approval passed would stay success after
+# that approval was taken back (dispatch://INFRA-5359/ask/605104e3-b85c-4c22-9a54-b254ba0e3c10). A pull_request_review
+# run takes its file from refs/pull/<n>/merge, which holds main's tip, and main's ruleset requires a branch to hold
+# that tip before it merges, so only the pull request itself can take main's copy away.
+NOTIFICATION = ".github/workflows/review-approvals.yml"
+# Its one job's condition and its one step, as main writes them: what each control below changes.
+IF = ("    if: >-\n      github.event.action == 'dismissed'\n"
+      "      || github.event.review.state == 'approved' || github.event.review.state == 'changes_requested'\n")
+STEP = ('      - run: echo "A review of this pull request decided; review.yml posts its check run review again '
+        'when this run completes."\n')
+IF_WORDS = workflow_credentials().NOTIFICATION_IF
+# What a control of the notification makes of one key, as the script parses it: the file on main with that one
+# change, read back.
+def notification_key(old, new, key):
+    script = workflow_credentials()
+    text = (ROOT / NOTIFICATION).read_text()
+    assert text.count(old) == 1, old
+    return script.parse(text.replace(old, new), NOTIFICATION)[key]
+
+
+# The whole on of the file on main, and what every control of it is told.
+ON = "{'pull_request_review': {'types': ['submitted', 'dismissed']}}"
+# The event block of the file on main, and the two jobs mappings that a control makes of it.
+EVENT = "  pull_request_review:\n    types: [submitted, dismissed]\n"
+EXTRA = "jobs:\n  extra: x\n"
+SECOND_JOB = (f"jobs:\n  second:\n{IF}    runs-on: ubuntu-latest\n    timeout-minutes: 2\n"
+              '    steps:\n      - run: echo "two"\n')
+# What every control of the jobs mapping is told.
+# The whole job block of the file on main, which one control replaces with a job that is no mapping.
+JOB_TEXT = (ROOT / NOTIFICATION).read_text()[(ROOT / NOTIFICATION).read_text().index("  decided:\n"):]
+JOBS_TAIL = ("review.yml acts on a run of it that ended success, and GitHub starts no run at all of a file "
+             "whose jobs, or whose job id, it refuses")
+TAIL = ("it answers for a review submitted or dismissed and for nothing else, and review.yml reads a run of it "
+        "on no other event")
+
+
+def test_the_notification_of_a_review_is_there_and_its_run_ends_success():
+    script = workflow_credentials()
+    assert script.notification(ROOT, script.workflow_files(ROOT)) == []
+    workflow = script.load(ROOT, NOTIFICATION)
+    assert workflow["permissions"] == {}
+    assert sorted(script.triggers(workflow)["pull_request_review"]["types"]) == ["dismissed", "submitted"]
+    [(name, job)] = script.jobs(workflow).items()
+    assert (name, job.get("permissions"), job["if"].split()) == ("decided", None, script.NOTIFICATION_IF.split())
+    assert job["timeout-minutes"] == 2 and "needs" not in job and "uses" not in job
+    assert [set(step) for step in job["steps"]] == [{"run"}]
+
+
+@pytest.mark.parametrize("changes, said", [
+    pytest.param([(NOTIFICATION, None, None)],
+                 f"{NOTIFICATION} is not there, but review.yml acts on its completion, a review of a pull request "
+                 "submitted or dismissed, by posting the check run review again with the approvals read then: without "
+                 "it a check run that a person's approval passed would stay success after that approval was taken back",
+                 id="the file is deleted"),
+    pytest.param([(NOTIFICATION, "    types: [submitted, dismissed]\n", "    types: [submitted]\n")],
+                 f"{NOTIFICATION} starts on "
+                 f"{notification_key('    types: [submitted, dismissed]\n', '    types: [submitted]\n', 'on')!r}, "
+                 f"not on {ON}: {TAIL}",
+                 id="it no longer fires on a dismissal"),
+    pytest.param([(NOTIFICATION, "permissions: {}\n", "permissions: {contents: read}\n")],
+                 f"{NOTIFICATION} gives 'permissions' the value {{'contents': 'read'}}, not {{}}",
+                 id="it gains a permission"),
+    pytest.param([(NOTIFICATION, "    timeout-minutes: 2\n",
+                   "    timeout-minutes: 2\n    permissions: {checks: write}\n")],
+                 f"{NOTIFICATION}, the job decided holds the key 'permissions', which it must not: of a key this check "
+                 "does not read, a defaults, a container, a concurrency or an env could keep its run from ending "
+                 "success, which review.yml acts on. It holds if and runs-on and steps and timeout-minutes alone",
+                 id="its job gains a permission"),
+    pytest.param([(NOTIFICATION, "  pull_request_review:\n    types: [submitted, dismissed]\n", "  push:\n")],
+                 f"{NOTIFICATION} starts on "
+                 f"{notification_key(EVENT, '  push:\n', 'on')!r}, not on {ON}: {TAIL}",
+                 id="it no longer starts on a review"),
+    pytest.param([(NOTIFICATION, IF, "    if: false\n")],
+                 f"{NOTIFICATION}, the job decided runs on the condition False, not on {IF_WORDS!r}: a job that "
+                 "skips a dismissed review, or that skips at all, ends its run skipped, and review.yml acts on a run "
+                 "that ended success alone", id="its job can skip"),
+    pytest.param([(NOTIFICATION, IF, IF.replace("github.event.action == 'dismissed'\n", "false\n"))],
+                 f"{NOTIFICATION}, the job decided runs on the condition \"false || github.event.review.state == "
+                 "'approved' || github.event.review.state == 'changes_requested'\", not on "
+                 f"{IF_WORDS!r}: a job that skips a dismissed review, or that skips at all, ends its run skipped, and "
+                 "review.yml acts on a run that ended success alone", id="it stops firing on a dismissal"),
+    pytest.param([(NOTIFICATION, STEP, '      - run: exit 1\n')],
+                 f"{NOTIFICATION}, the job decided, step 1: it holds only run and name, and its run echoes one line "
+                 "of plain words: a step that can fail, that can skip, or that a pull request can steer, ends the "
+                 "run otherwise than success", id="its step can fail"),
+    pytest.param([(NOTIFICATION, STEP, STEP + "      - if: false\n        run: echo \"two\"\n")],
+                 f"{NOTIFICATION}, the job decided, step 2: it holds only run and name, and its run echoes one line "
+                 "of plain words: a step that can fail, that can skip, or that a pull request can steer, ends the "
+                 "run otherwise than success", id="a step that can skip"),
+    pytest.param([(NOTIFICATION, "    timeout-minutes: 2\n", "    timeout-minutes: 360\n")],
+                 f"{NOTIFICATION}, the job decided has the timeout 360, not a whole number of 1 to 10 minutes: a job "
+                 "that hangs holds back the notification of a dismissal", id="its job can hang"),
+    pytest.param([(NOTIFICATION, "jobs:\n", SECOND_JOB)],
+                 f"{NOTIFICATION} declares the jobs "
+                 f"{notification_key('jobs:\n', SECOND_JOB, 'jobs')!r}, but it declares the one job decided, as a "
+                 f"mapping: {JOBS_TAIL}", id="a second job"),
+    pytest.param([(NOTIFICATION, "permissions: {}\n", "permissions: {}\ndefaults: {run: {working-directory: x}}\n")],
+                 f"{NOTIFICATION} holds the key 'defaults', which it must not: of a key this check does not read, a "
+                 "defaults, a container, a concurrency or an env could keep its run from ending success, which "
+                 "review.yml acts on. It holds cache-mode and jobs and name and on and permissions alone",
+                 id="a defaults the steps cannot run in"),
+    pytest.param([(NOTIFICATION, "    runs-on: ubuntu-latest\n",
+                   "    runs-on: ubuntu-latest\n    container: {image: nowhere:1}\n")],
+                 f"{NOTIFICATION}, the job decided holds the key 'container', which it must not: of a key this check "
+                 "does not read, a defaults, a container, a concurrency or an env could keep its run from ending "
+                 "success, which review.yml acts on. It holds if and runs-on and steps and timeout-minutes alone",
+                 id="a container that cannot start"),
+    pytest.param([(NOTIFICATION, "    runs-on: ubuntu-latest\n", "    runs-on: [self-hosted, nowhere]\n")],
+                 f"{NOTIFICATION}, the job decided gives 'runs-on' the value ['self-hosted', 'nowhere'], not "
+                 "'ubuntu-latest'", id="a runner that never comes"),
+    pytest.param([(NOTIFICATION, 'name: "Review approvals"\n', 'name: "Something else"\n')],
+                 f"{NOTIFICATION} gives 'name' the value 'Something else', not 'Review approvals'",
+                 id="another name than the one review.yml waits for"),
+    pytest.param([(NOTIFICATION, "jobs:\n", EXTRA)],
+                 f"{NOTIFICATION} declares the jobs {notification_key('jobs:\n', EXTRA, 'jobs')!r}, but it declares "
+                 f"the one job decided, as a mapping: {JOBS_TAIL}", id="a second entry of jobs that is no mapping"),
+    pytest.param([(NOTIFICATION, "  decided:\n", "  2decided:\n")],
+                 f"{NOTIFICATION} declares the jobs "
+                 f"{notification_key('  decided:\n', '  2decided:\n', 'jobs')!r}, but it declares the one job "
+                 f"decided, as a mapping: {JOBS_TAIL}", id="a job id GitHub refuses"),
+    pytest.param([(NOTIFICATION, JOB_TEXT, "  decided: x\n")],
+                 f"{NOTIFICATION} declares the jobs {{'decided': 'x'}}, but it declares the one job "
+                 f"decided, as a mapping: {JOBS_TAIL}", id="the job is no mapping"),
+    pytest.param([(NOTIFICATION, "  pull_request_review:\n", "  push:\n  pull_request_review:\n")],
+                 f"{NOTIFICATION} starts on "
+                 f"{notification_key('  pull_request_review:\n', '  push:\n  pull_request_review:\n', 'on')!r}, not "
+                 f"on {ON}: {TAIL}", id="a second event"),
+    pytest.param([(NOTIFICATION, "    types: [submitted, dismissed]\n",
+                   "    types: [submitted, dismissed]\n    branches: [main]\n")],
+                 f"{NOTIFICATION} starts on "
+                 f"{notification_key('    types: [submitted, dismissed]\n', '    types: [submitted, dismissed]\n'
+                                     '    branches: [main]\n', 'on')!r}, not on {ON}: {TAIL}",
+                 id="another key under the event"),
+])
+def test_losing_the_notification_of_a_review_fails(credentials_baseline, tmp_path, changes, said):
+    assert credentials_control(credentials_baseline, tmp_path, changes) == (1, [f"::error::{said}"])
 
 
 if __name__ == "__main__":

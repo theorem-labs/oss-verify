@@ -392,6 +392,9 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #   checklist.txt               review-gather's own heredoc, against .github/PULL_REQUEST_TEMPLATE.md. The box
 #                               labels it echoes from the description are in the description, read as body.
 #   description.md              jq -r .body of pr.json: the description again, read as body.
+#   review-authors.txt          review-gather's list of each review's node id and the login the REST API gives its
+#                               author, a pair a line, which the gather job reads to tell a writer App's review
+#                               from one of a user who took that App's name; an id and a login carry no prose.
 #   review-comment-authors.txt  review-gather's list of the review comments' logins, one a line, which the gather
 #                               job and all_review_comments_are_ours() read; a login is letters, digits and
 #                               hyphens, and carries no prose.
@@ -408,7 +411,8 @@ SPAN = re.compile(r"`([^`\n]*)`")
 #                               titles of the pull requests whose head branch is the ref are that repository's.
 #   build/checks.md             the report of the fuzz targets' checks, which quotes the reasons marked `not a
 #                               property` from the project's own source at the built commit.
-GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review-comment-authors.txt", "source.txt",
+GENERATED = frozenset({"checks.json", "checklist.txt", "description.md", "review-authors.txt",
+                       "review-comment-authors.txt", "source.txt",
                        "template-history.txt", "validate.txt", os.path.join("build", "result.md")})
 
 
@@ -428,6 +432,13 @@ def app_comments():
     return {n.strip() for n in os.environ.get("SCREEN_APP_COMMENTS", "").split(",") if n.strip()}
 
 
+def app_reviews():
+    """The node ids of the reviews the gather job confirmed are an App's of WRITER_BOTS, by the login the REST API
+    gives each review (SCREEN_APP_REVIEWS): gh names an App without its [bot] in pr.json's reviews, and gives no
+    address by which a review could be asked about."""
+    return {n.strip() for n in os.environ.get("SCREEN_APP_REVIEWS", "").split(",") if n.strip()}
+
+
 # The id of a comment, at the end of its URL.
 COMMENT_ID = re.compile(r"#issuecomment-([0-9]+)\Z")
 
@@ -438,11 +449,13 @@ def ours(login):
     return (login or "").lower() in writers()
 
 
-def by_us(comment):
+def by_us(comment, kind="comments"):
     """Whether this comment or review is ours: its author has write access, or the gather job confirmed that
-    this very comment is this App's."""
+    this very comment is this App's, or this very review an App's of WRITER_BOTS (by its node id)."""
     if ours((comment.get("author") or {}).get("login")):
         return True
+    if kind == "reviews":
+        return isinstance(comment.get("id"), str) and comment["id"] in app_reviews()
     at = COMMENT_ID.search(comment.get("url") or "")
     return bool(at) and at.group(1) in app_comments()
 
@@ -466,10 +479,14 @@ def parts(review, project=None):
     """The text an outside account decides, of what the review reads, as (source, text) pairs, and the reasons it
     cannot be screened (empty when it can).
 
-    What is read: the item's title and body; each comment, review and review comment that is not ours -- this
-    App's own, or an account with write access (SCREEN_WRITERS); the commit messages; the diff; the seed corpora
-    (their bytes); and the two files of review-gather that carry text the project decides (GENERATED says which
-    files are not read, and why). Any other file the gather job writes is read too, so that a file added there
+    What is read: the item's title and body; each comment and review that is not ours -- this App's own comment
+    (SCREEN_APP_COMMENTS), a writer App's review (SCREEN_APP_REVIEWS), or any text of an account with write
+    access (SCREEN_WRITERS); the review comments, whole or not at all (all_review_comments_are_ours: a body can
+    hold newlines, so no line of review-comments.txt can be given back to its author, and one outside author
+    makes the file read with every writer's review comment in it); the commit messages; the diff; the seed
+    corpora (their bytes); and the five files of review-gather that carry text the project decides, three
+    through their code spans and two whole (GENERATED says which files are not read, and why). Any other file
+    the gather job writes is read too, so that a file added there
     is screened until someone says it is ours. Not read: the changed files under head/, the project's repository
     (source/), and the last review's session. A projects/<name>/patch_style.md the diff writes is read as a
     source of its own, under its path: claude() asks another question of it.
@@ -502,13 +519,14 @@ def parts(review, project=None):
         found.append(("body", item.get("body") or ""))
     for kind in ("comments", "reviews"):
         for i, c in enumerate(item.get(kind) or []):
-            if not isinstance(c, dict) or by_us(c):
+            if not isinstance(c, dict) or by_us(c, kind):
                 continue
             found.append((f"{kind} {i + 1}", c.get("body") or ""))
     if scope == "comments":
         # A writer's pull request or issue that holds comments of others: only the comments, reviews and review
-        # comments are screened, every one of them that is not ours, and the rest is a writer's, which the review
-        # reads as before.
+        # comments are screened, every comment and review of them that is not ours, and the review comments whole
+        # or not at all (all_review_comments_are_ours), and the rest is a writer's, which the review reads as
+        # before.
         path = os.path.join(review, "review-comments.txt")
         text = read_text(path) if os.path.isfile(path) else ""
         if text is None:

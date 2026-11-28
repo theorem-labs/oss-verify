@@ -4,8 +4,9 @@ The review job of `.github/workflows/review.yml` reads this file from `main` for
 that changes no file under `projects/`, or that `.github/scripts/take-project` takes no project from (a pull request
 that changes several projects, or only removes one, a fork's too). `.github/CODEOWNERS` names its owner, as for
 `review.md`. The workflow's gather job gathers the pull request into `.review/`: `pr.json` (description, files, commits,
-comments), `pr.diff`, `checks.json`, `review-comments.txt` and its authors in `review-comment-authors.txt`, and
-`head/<path>`, each changed file as it is at the head. The checkout around them is `main`.
+comments), `pr.diff`, `checks.json`, `review-comments.txt` and its authors in `review-comment-authors.txt`, the
+reviews' authors in `review-authors.txt`, and `head/<path>`, each changed file as it is at the head. The checkout
+around them is `main`.
 `head/` leaves out these files; for them, only `pr.diff` shows the change:
 - `CLAUDE*.md`, `AGENTS*.md` and anything under `.claude/`, at any depth: Claude Code would read them as
   instructions;

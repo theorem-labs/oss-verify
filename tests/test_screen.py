@@ -791,6 +791,7 @@ class ScreenTest(unittest.TestCase):
         "checks.json": '{"statusCheckRollup": [{"name": "OURS-CHECK-NAME", "state": "SUCCESS"}]}\n(exit status 0)\n',
         "checklist.txt": "ticked   OURS-CHECKLIST-BOX\n(exit status 0)\n",
         "description.md": "OURS-DESCRIPTION-AGAIN\n",
+        "review-authors.txt": "PRR_OURSID OURS-REVIEW-LOGIN[bot]\n(exit status 0)\n",
         "review-comment-authors.txt": "OURS-LOGIN\n(exit status 0)\n",
         "source.txt": "Not gathered: OURS-SOURCE-NOTE, so there is no source to read.\n",
         "template-history.txt": "0000000 2026-11-01T00:00:00Z OURS-TEMPLATE-LOG\n(exit status 0)\n",
