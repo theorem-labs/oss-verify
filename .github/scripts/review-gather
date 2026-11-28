@@ -253,12 +253,17 @@ EOF
 done
 
 # The project's repository: the facts of check G1, and its source at the built commit, as data.
-# repo comes from the pull request: it is used only if oss-verify validate's rule for it holds, and its ref is used in
-# an API path only if it has no `..` part.
+# repo comes from the pull request. load reads project.yaml as oss-verify validate reads it: it refuses a file larger
+# than validate.MAX_CONFIG_BYTES, and a merge key (<<). repo is used only if oss-verify validate's rule for it holds,
+# and its ref is used in an API path only if it has no `..` part.
 url=$(python3 -P - "$dir/project.yaml" <<'EOF' 2>/dev/null
-import sys
+import pathlib, sys
 from validate_rules import validate
-url = validate.yaml.safe_load(open(sys.argv[1])).get("repo")
+try:
+    config = validate.load(pathlib.Path(sys.argv[1]).parent)
+except (ValueError, OSError):
+    config = None
+url = config.get("repo") if isinstance(config, dict) else None
 print(url if validate.is_https_url(url) else "")
 EOF
 )

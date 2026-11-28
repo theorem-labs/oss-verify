@@ -1120,7 +1120,8 @@ class TestBuildAll:
             patch.setattr(manifest, collector, raises(unreadable))
             with pytest.raises(check_build.Failed) as failed:
                 check_tool.build_all(job, COMMIT, self.scratch / "work", TOOLCHAIN, self.home)
-        assert str(unreadable) in str(failed.value)
+        what = "the programs" if collector == "collect_programs" else "the fuzz targets"
+        assert str(failed.value) == f"{what} cannot be taken from $OUT: {unreadable}"
 
 
 class TestTreeHash:

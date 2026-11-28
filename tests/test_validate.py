@@ -473,7 +473,7 @@ class TestPrograms:
         text = (MINIMAL + f"programs:\n  - &entry {{file: hello, sha256: {PIN}, link_map: hello.map, {unknown}}}\n"
                 + "  - *entry\n" * 199)
         problems, _, summary = check(text)
-        assert len(problems) < 1000
+        assert validate.MORE_PROBLEMS not in problems
         assert summary is None
         for number in range(20):
             assert sum(f"unknown field 'k{number}'" in problem for problem in problems) == 1, number
@@ -672,6 +672,9 @@ class TestProblems:
         # PyYAML raises a plain ValueError, not a YAMLError, for a date or a timestamp that does not exist.
         self.expect_problem(MINIMAL + "homepage: 2024-13-45\n", "project.yaml does not parse: ValueError")
         self.expect_problem(MINIMAL + "x: 2024-01-01T25:00:00\n", "project.yaml does not parse: ValueError")
+        # load() refuses a merge key (<<), with its line. Anchors and aliases are allowed.
+        self.expect_problem(MINIMAL + "budgets:\n  <<: {halts: 16GiB}\n",
+                            "project.yaml does not parse: line 5: a merge key (<<) is not allowed; write the keys out")
         self.expect_problem(MINIMAL + "#" * (validate.MAX_CONFIG_BYTES + 1) + "\n", "project.yaml is larger than")
 
     def test_symbolic_links_and_directories(self):
@@ -695,19 +698,29 @@ class TestProblems:
 
 
 # The hostile spellings of TestHostileYaml: YAML text that a small project.yaml can give at any place. The largest
-# project.yaml of the test has 28,227 bytes. LONG_TEXT is a string of 20,000 characters. HUGE_INT is 4,000 hex digits:
+# project.yaml of the test has 10,227 bytes. LONG_TEXT is a string of 2,000 characters. HUGE_INT is 4,000 hex digits:
 # an integer of 16,000 bits. Python gives no integer of more than 4,300 decimal digits as text, so its repr() raises.
 # UNKNOWN_KEYS is a mapping of 200 unknown keys.
-LONG_TEXT = "x" * 20000
+LONG_TEXT = "x" * 2000
 HUGE_INT = "0x" + "f" * 4000
 UNKNOWN_KEYS = "{" + ", ".join(f"k{number}: 1" for number in range(200)) + "}"
-# An address of 20,000 characters on a domain reserved for examples. It is valid, and it makes a warning.
-LONG_ADDRESS = "x" * (20000 - len("@example.com")) + "@example.com"
+# An address of 2,000 characters on a domain reserved for examples. It is valid, and it makes a warning.
+LONG_ADDRESS = "x" * (2000 - len("@example.com")) + "@example.com"
 
 
 def repeated(text):
     """A YAML flow list of `text` and 2,000 aliases of it."""
     return f"[&e {text}" + ", *e" * 2000 + "]"
+
+
+def nested_merges(levels, merges):
+    """A YAML flow mapping of the mappings m0 to m<levels>: m0 is {k: 1}, and each other m<n> merges `merges` aliases of
+    m<n-1> (the merge key <<). PyYAML copies the key-value pairs of each mapping that a mapping merges into it, so
+    m<levels> has merges ** levels pairs."""
+    text = "{m0: &m0 {k: 1}"
+    for level in range(1, levels + 1):
+        text += f", m{level}: &m{level} {{<<: [" + ", ".join([f"*m{level - 1}"] * merges) + "]}"
+    return text + "}"
 
 
 def flow(*entries):
@@ -734,8 +747,11 @@ def in_field(field, *entries):
 HOSTILE_SPELLINGS = {
     # 4,782,969 strings, 25 MB as text, in 303 bytes of YAML.
     "a nested alias": {"value": nested_list(6)},
-    # Each {<<: *e} makes a new mapping of the 200 keys. A check of the object's id() does not join them.
+    # 99 merges of a mapping of 200 keys: yaml.safe_load copies 19,800 key-value pairs.
     "a merge key": {"value": f"[&e {UNKNOWN_KEYS}" + ", {<<: *e}" * 99 + "]", "entry": ("<<", UNKNOWN_KEYS)},
+    # 6 levels of 8 merges: yaml.safe_load copies 299,592 key-value pairs, from 352 bytes of YAML. Each level of 56
+    # bytes more is 8 times as much.
+    "nested merge keys": {"value": nested_merges(6, 8)},
     "an integer key": {"value": flow((HUGE_INT, "1")), "entry": (HUGE_INT, "1")},
     "a long string": {"value": LONG_TEXT, "entry": (LONG_TEXT, "1"), "addresses": f"[{LONG_ADDRESS}]"},
     "a repeated alias": {"value": repeated(LONG_TEXT), "addresses": repeated(LONG_ADDRESS)},
@@ -769,23 +785,27 @@ HOSTILE_PLACES = {
 }
 HOSTILE_CASES = [(spelling, place) for spelling, forms in HOSTILE_SPELLINGS.items()
                  for place, (form, _) in HOSTILE_PLACES.items() if form in forms]
+# The spellings with merge keys. Each of their project.yaml files has its merge keys on one line.
+MERGE_SPELLINGS = ("a merge key", "nested merge keys")
 
 
 class TestHostileYaml:
-    """Any YAML spelling at any field of project.yaml gives bounded work and output. Through aliases and merge keys, a
-    small project.yaml can give a large value, or one value at many places. A mapping key can be an integer whose repr()
-    raises. For each spelling at each place, validate raises no exception. It gives at most 101 problems and at most
-    101 warnings: 100, then one line that says that more are not shown. Each line has at most 1,000 characters, and all
-    the lines together have at most 101,000. validate takes at most 2.25 MiB at the peak."""
+    """Any YAML spelling at any field of project.yaml gives bounded work and output. Through aliases, a small
+    project.yaml can give a large value, or one value at many places. Through merge keys (<<), it can make PyYAML copy
+    many key-value pairs as it parses. A mapping key can be an integer whose repr() raises. For each spelling at each
+    place, validate raises no exception. It gives at most 101 problems and at most 101 warnings: 100, then one line that
+    says that more are not shown. Each line has at most 1,000 characters, and all the lines together have at most
+    101,000. validate takes at most 1 MiB at the peak. A spelling with merge keys gives one problem alone: load()
+    refuses the merge key, with its line."""
 
     MAX_LINES = 101
-    # A line that quotes 200 characters of a value has fewer than 500.
+    # A line that quotes 200 ASCII characters of a value has fewer than 500.
     MAX_LINE = 1000
     MAX_CHARACTERS = MAX_LINES * MAX_LINE
-    # Measured with Python 3.12 and PyYAML 6.0.3: yaml.safe_load of these project.yaml files alone takes at most
-    # 1.11 MiB at the peak (a merge key as a value: 99 new mappings of 200 keys), and at most 0.26 MiB for each other
-    # spelling. The bound is about twice the most.
-    MAX_PEAK = int(2.25 * 2**20)
+    # Measured with Python 3.12 and PyYAML 6.0.3: validate takes at most 0.41 MiB at the peak (a merge key as a value:
+    # PyYAML has made the nodes of the 200 keys and of the 99 mappings when load() refuses the first merge key), and at
+    # most 0.09 MiB for each other spelling. The bound is about two and a half times the most.
+    MAX_PEAK = 2**20
 
     @pytest.mark.parametrize("spelling, place", HOSTILE_CASES,
                              ids=[f"{spelling} at {place}" for spelling, place in HOSTILE_CASES])
@@ -808,6 +828,10 @@ class TestHostileYaml:
         characters = sum(len(line) for line in problems + warnings)
         assert characters <= self.MAX_CHARACTERS, f"{characters:,} characters of problems and warnings"
         assert peak <= self.MAX_PEAK, f"validate allocated {peak:,} bytes at the peak for {len(text):,} bytes of YAML"
+        if spelling in MERGE_SPELLINGS:
+            [line] = {number for number, row in enumerate(text.splitlines(), 1) if "<<" in row}
+            assert (problems, warnings) == (
+                [f"project.yaml does not parse: line {line}: a merge key (<<) is not allowed; write the keys out"], [])
 
 
 class TestOutput:

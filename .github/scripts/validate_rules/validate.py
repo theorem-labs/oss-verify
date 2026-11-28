@@ -118,12 +118,12 @@ MAX_QUOTED = 200
 # The most bits of an integer that a problem quotes by its digits: it then has at most MAX_QUOTED decimal digits. A
 # mapping key of a small project.yaml can be an integer of more than 4,300 digits, which Python does not give as text.
 MAX_QUOTED_BITS = int(MAX_QUOTED * math.log2(10))
-# The most problems that validate gives for one project, and the most warnings. Through YAML aliases and merge keys, a
-# small project.yaml can give one bad value at thousands of places, and each place makes a new problem. After the
-# first MAX_PROBLEMS, one more line says that validate does not show the others.
-MAX_PROBLEMS = 100
-MORE_PROBLEMS = f"more problems are not shown: validate gives the first {MAX_PROBLEMS}"
-MORE_WARNINGS = f"more warnings are not shown: validate gives the first {MAX_PROBLEMS}"
+# The most problems that validate gives for one project, and the most warnings. Through YAML aliases, a small
+# project.yaml can give one bad value at thousands of places, and each place makes a new problem. After the first
+# MAX_LINES, one more line says that validate does not show the others.
+MAX_LINES = 100
+MORE_PROBLEMS = f"more problems are not shown: validate gives the first {MAX_LINES}"
+MORE_WARNINGS = f"more warnings are not shown: validate gives the first {MAX_LINES}"
 SIZE = re.compile(r"([1-9][0-9]{0,15})(KiB|MiB|GiB|TiB)?")
 # The smallest plain-side agrees budget: one page. Below it, no run is in the statement.
 MIN_PLAIN_BUDGET = 4096
@@ -381,15 +381,16 @@ def is_address_list(value):
 
 
 def finding_addresses(config):
-    """The addresses that get findings from a project.yaml that is a mapping: primary_contact, unless it is n/a, and
-    each address of auto_ccs. A value that is not a string, and an auto_ccs that is not a list of strings, give none.
-    .github/scripts/terms-accepted reads the addresses of a seeded project with it."""
+    """The addresses that get findings from a project.yaml that is a mapping, each address once: primary_contact,
+    unless it is n/a, and each address of auto_ccs. A value that is not a string, and an auto_ccs that is not a list of
+    strings, give none. .github/scripts/terms-accepted reads the addresses of a seeded project with it."""
     addresses = []
     if isinstance(config.get("primary_contact"), str) and config["primary_contact"] != NO_CONTACT:
         addresses.append(config["primary_contact"])
     if is_address_list(config.get("auto_ccs")):
         addresses += config["auto_ccs"]
-    return addresses
+    # Each address once: through YAML aliases, auto_ccs can name one long address thousands of times.
+    return list(dict.fromkeys(addresses))
 
 
 def check_addresses(config):
@@ -397,8 +398,7 @@ def check_addresses(config):
     ccs = config.get("auto_ccs")
     if ccs is not None and not is_address_list(ccs):
         yield "auto_ccs must be a list of addresses"
-    # Each address once: through YAML aliases, auto_ccs can name one long address thousands of times.
-    for address in dict.fromkeys(finding_addresses(config)):
+    for address in finding_addresses(config):
         if not EMAIL.fullmatch(address):
             yield f"bad email {quoted(address)}"
 
@@ -474,10 +474,9 @@ def check_programs(config):
                "(or left out, for a project of fuzz targets)")
         return
     # Through YAML aliases, a small project.yaml can give tens of thousands of entries, and one entry object can be at
-    # many places. An entry that is not a mapping is refused at each place (check_config shows at most MAX_PROBLEMS
-    # problems). The keys and values of a mapping are checked at its first place only. A merge key (<<) makes a new
-    # mapping, which is checked at its own place. The file and link map of a mapping count at each place, so that the
-    # checks of names given twice see them.
+    # many places. An entry that is not a mapping is refused at each place (check_config shows at most MAX_LINES
+    # problems). The keys and values of a mapping are checked at its first place only. The file and link map of a
+    # mapping count at each place, so that the checks of names given twice see them.
     files, link_maps, first_maps, checked = [], [], [], set()
     for number, entry in enumerate(entries, 1):
         if not isinstance(entry, dict):
@@ -723,14 +722,14 @@ def newest_toolchain_applies_ubsan_checks():
 
 
 def first_distinct(lines, more):
-    """The lines that the iterable `lines` gives, each distinct line once, in the order found, and at most MAX_PROBLEMS
-    of them. When one more distinct line comes, the list ends with the line `more`, and no more of `lines` is read: the
-    checks after it do no work. Through YAML aliases and merge keys, a small project.yaml can give one bad item at
-    thousands of places."""
+    """The lines that the iterable `lines` gives, each distinct line once, in the order found, and at most MAX_LINES of
+    them. When one more distinct line comes, the list ends with the line `more`, and no more of `lines` is read: the
+    checks after it do no work. Through YAML aliases, a small project.yaml can give one bad item at thousands of
+    places."""
     found = {}
     for line in lines:
         if line not in found:
-            if len(found) == MAX_PROBLEMS:
+            if len(found) == MAX_LINES:
                 return [*found, more]
             found[line] = None
     return list(found)
@@ -760,8 +759,7 @@ def warnings_of(config, files):
                    "oss-verify check refuses the field with it")
     if config.get("primary_contact") == NO_CONTACT:
         yield "primary_contact is n/a: only a project we seeded may say that, and only until a maintainer adopts it"
-    # Each address once: through YAML aliases, auto_ccs can name one long address thousands of times.
-    for address in dict.fromkeys(finding_addresses(config)):
+    for address in finding_addresses(config):
         if RESERVED_DOMAIN.fullmatch(address.rpartition("@")[2]):
             yield f"{quoted(address)} is a placeholder: its domain is reserved for examples, so no report reaches it"
     repo = config.get("repo")
@@ -785,13 +783,13 @@ def warnings_of(config, files):
 
 def config_warnings(config, files):
     """Return the warnings of a project.yaml with no problem and of the files next to it: each distinct warning once, in
-    the order found, and at most MAX_PROBLEMS of them, then MORE_WARNINGS (first_distinct)."""
+    the order found, and at most MAX_LINES of them, then MORE_WARNINGS (first_distinct)."""
     return first_distinct(warnings_of(config, files), MORE_WARNINGS)
 
 
 def check_config(config, files):
     """Return the problems with a parsed project.yaml and the files next to it: each distinct problem once, in the order
-    found, and at most MAX_PROBLEMS of them, then MORE_PROBLEMS (first_distinct). The checks give their problems one at
+    found, and at most MAX_LINES of them, then MORE_PROBLEMS (first_distinct). The checks give their problems one at
     a time, so a check after the last problem shown does no work."""
     if not isinstance(config, dict):
         return [f"not a mapping (top level is a {type(config).__name__})"]
@@ -874,13 +872,34 @@ def limit_for(name, suffixes=SOURCE_SUFFIXES):
     return MAX_FILE_BYTES
 
 
+class Refused(yaml.YAMLError):
+    """YAML that project.yaml may not use: a merge key (<<). Its text names the line."""
+
+
+class ProjectLoader(yaml.SafeLoader):
+    """yaml.safe_load's loader, less merge keys. PyYAML copies the key-value pairs of each mapping that a merge key (<<)
+    names into the mapping that holds the key, and a mapping that it merges can merge others: each level of about 65
+    bytes of YAML can make 10 times as many copies. A project.yaml of 483 bytes took 0.8 s to parse, and 128 KiB is
+    room for thousands of levels. This loader refuses the first merge key that it finds, before it copies a pair.
+    Anchors and aliases copy nothing, and stay allowed."""
+
+    def flatten_mapping(self, node):
+        for key_node, _ in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                line = key_node.start_mark.line + 1
+                raise Refused(f"line {line}: a merge key (<<) is not allowed; write the keys out")
+        super().flatten_mapping(node)
+
+
 def load(directory):
     """Parse projects/<name>/project.yaml. Raise ValueError with the reason if it cannot be read."""
     config_file = directory / "project.yaml"
     if config_file.lstat().st_size > MAX_CONFIG_BYTES:
         raise ValueError(f"project.yaml is larger than {MAX_CONFIG_BYTES // 1024} KiB")
     try:
-        return yaml.safe_load(config_file.read_text(encoding="utf-8")) or {}
+        return yaml.load(config_file.read_text(encoding="utf-8"), Loader=ProjectLoader) or {}
+    except Refused as error:
+        raise ValueError(f"project.yaml does not parse: {error}") from None
     # ValueError covers UnicodeDecodeError, and what PyYAML's scalar constructors raise for a value such as the date
     # 2024-13-45, which is not a YAMLError.
     except (yaml.YAMLError, ValueError, RecursionError) as error:
