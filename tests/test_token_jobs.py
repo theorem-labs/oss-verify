@@ -52,15 +52,18 @@ MODULE = re.compile(r"-m\s+([A-Za-z_][\w.]*)|^\s*from\s+([A-Za-z_][\w.]*)\s+impo
                     re.M)
 # The jobs that hold a token today, and the jobs they need: the test checks at least these. publish-prebuilt, which
 # holds packages: write, needs remake-prebuilt, which runs .github/scripts/python-runtime/make, which builds the runtime
-# with docker: publish-prebuilt pushes the image of remake-prebuilt's artifact.
+# with docker: publish-prebuilt pushes the image of remake-prebuilt's artifact. Both need rows, whose output gives their
+# matrix.
 HOLDERS = {("enroll-dispatch.yml", "dispatch"), ("held-runs.yml", "held-runs"), ("review.yml", "screen"),
            ("review.yml", "review"), ("review.yml", "hold"), ("review.yml", "comment"), ("review.yml", "triage"),
            ("toolchain-images-publish.yaml", "publish"), ("toolchain-images-publish.yaml", "publish-prebuilt")}
 FEEDERS = {("enroll-dispatch.yml", "decide"), ("review.yml", "route"), ("review.yml", "gather"),
-           ("review.yml", "triage-gather"), ("toolchain-images-publish.yaml", "remake-prebuilt")}
-# publish-prebuilt and remake-prebuilt, each by its file and its name.
+           ("review.yml", "triage-gather"), ("toolchain-images-publish.yaml", "remake-prebuilt"),
+           ("toolchain-images-publish.yaml", "rows")}
+# publish-prebuilt, remake-prebuilt and rows, each by its file and its name.
 PUBLISH_PREBUILT = ("toolchain-images-publish.yaml", "publish-prebuilt")
 REMAKE_PREBUILT = ("toolchain-images-publish.yaml", "remake-prebuilt")
+ROWS = ("toolchain-images-publish.yaml", "rows")
 # A step that runs make, as remake-prebuilt's make step runs it.
 MAKE_STEP = {"name": "make", "run": '.github/scripts/python-runtime/make "$START" "localhost:5000/x:$ROW"'}
 
@@ -274,9 +277,18 @@ def test_it_checks_the_jobs_that_hold_a_token_and_those_they_need_and_the_files_
     assert {"review-hold", "review-held", "review-neutralize"} <= relative[("review.yml", "hold")]
     assert {"review-verdict", "review-neutralize"} <= relative[("review.yml", "comment")]
     # remake-prebuilt runs .github/scripts/python-runtime/make, which runs layer.py beside it. publish-prebuilt, which
-    # holds packages: write, runs no file of .github/scripts.
+    # holds packages: write, runs no file of .github/scripts, and neither does rows, whose output gives both their matrix.
     assert {"python-runtime/make", "python-runtime/layer.py"} <= relative[REMAKE_PREBUILT]
     assert relative[PUBLISH_PREBUILT] == set()
+    assert relative[ROWS] == set()
+
+
+def test_control_make_in_rows():
+    # A step of rows that runs make: the audit follows make and layer.py from it, as from any job that a job with a
+    # token needs, so the assertion that rows runs no file of .github/scripts fails.
+    workflows = read_workflows()
+    workflows[ROWS[0]]["jobs"][ROWS[1]]["steps"].append(dict(MAKE_STEP))
+    assert {"python-runtime/make", "python-runtime/layer.py"} <= files_run(workflows)[ROWS]
 
 
 def test_control_make_back_in_publish_prebuilt():

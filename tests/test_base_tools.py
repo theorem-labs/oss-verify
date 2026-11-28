@@ -114,11 +114,11 @@ REFUSALS = {
 SKIPS = {
     "validate.yaml:validate": ({"event": "workflow_dispatch"}, "a run by hand"),
 }
-# The checkouts of the workflows that name a ref, as (file, job, ref): publish, remake-prebuilt and publish-prebuilt
-# check out the commit of the run of toolchain-images.yaml that they publish, which ToolchainPublish of
+# The checkouts of the workflows that name a ref, as (file, job, ref): rows, publish, remake-prebuilt and
+# publish-prebuilt check out the commit of the run of toolchain-images.yaml that they publish, which ToolchainPublish of
 # tests/test_trigger_move.py holds to a push to main.
 REF_CHECKOUTS = [("toolchain-images-publish.yaml", job, "${{ github.event.workflow_run.head_sha }}")
-                 for job in ("publish", "remake-prebuilt", "publish-prebuilt")]
+                 for job in ("rows", "publish", "remake-prebuilt", "publish-prebuilt")]
 # The sizes that the stand-in binary-sizes prints: one line of JSON, as the real one prints it.
 SIZES = '{"demo_fuzzer":{"plain":{"exec":4096,"text":1024}}}'
 # The line that the build step writes when binary-sizes --cut exits 0 and prints nothing.

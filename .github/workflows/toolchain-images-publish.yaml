@@ -3,12 +3,12 @@
 name: "Toolchain images: publish"
 # toolchain-images-publish puts the frame-pointer toolchain images and the prebuilt Python toolchain images on ghcr.io.
 # toolchain-images.yaml (Toolchain images) makes them and checks them: its header says how. GitHub starts this workflow
-# each time a run of Toolchain images on the branch main completes. Its three jobs, publish, remake-prebuilt and
-# publish-prebuilt, act only when that run was for a push to main of this repository, and passed: make, prebuilt,
-# docker-tests and compare-digests passed for every image. For any other run, they are skipped. docker-tests is the job
-# of frame-pointer-tests.yaml that Toolchain images calls. A push to main that changes only files that no image depends
-# on (the tests, or src/oss_verify/check_build.py alone) runs no Toolchain images: then nothing is published, and no run
-# looks for the artifacts of make and prebuilt.
+# each time a run of Toolchain images on the branch main completes. Its four jobs, rows, publish, remake-prebuilt and
+# publish-prebuilt, act only when that run was for a push to main of this repository, and passed: rows, make,
+# docker-tests and compare-digests passed, and prebuilt passed for each prebuilt row. For any other run, they are
+# skipped. docker-tests is the job of frame-pointer-tests.yaml that Toolchain images calls. A push to main that changes
+# only files that no image depends on (the tests, or src/oss_verify/check_build.py alone) runs no Toolchain images:
+# then nothing is published, and no run looks for the artifacts of make and prebuilt.
 #
 # publish runs once for each base image (the matrix). It checks out infra/toolchains.tsv at the commit that the run of
 # Toolchain images built, and takes the digest that make made in that run from its artifact fp-digest-<base row>. It
@@ -23,22 +23,32 @@ name: "Toolchain images: publish"
 # fails unless the manifest names the base image's layers and has its media type, and unless the configuration is the
 # base image's with OFT_FRAME_POINTERS=1 added. Its step summary gives the digest. It runs crane, and no docker.
 #
-# remake-prebuilt and publish-prebuilt publish the images of Toolchain images' job prebuilt, once for each of its rows
-# (the matrix): the Python toolchain image with the CPython runtime of its four builds in one more layer, and its
-# frame-pointer image with it too. They follow publish's rule: a job of this file makes the image again on its own
-# runner, and compares its digest with the one that Toolchain images made, and only that image goes to ghcr.io, only
-# after that comparison. To make the image again takes docker and the code of the commit that the run of Toolchain
-# images built (infra/base-builder and .github/scripts/python-runtime). That code runs as a user that can use sudo, and
-# GitHub holds the job's token on the runner for the whole job, so the code can read the token of its job. Thus the job
-# that makes the image, remake-prebuilt, has no write permission and no secret: contents: read and actions: read alone.
-# The job that has packages: write, publish-prebuilt, runs no docker and no script of the repository: only pinned
-# actions and crane, on bytes that it checks by their digest.
+# rows, remake-prebuilt and publish-prebuilt publish the images of Toolchain images' job prebuilt. rows checks out
+# infra/toolchains.tsv alone, at the commit that the run of Toolchain images built, and gives the matrix of the other
+# two: one entry for each prebuilt row of that table, by the same step as the job rows of Toolchain images. With no
+# prebuilt row, its output any is false, and neither of the other two runs. They run once for each entry (the matrix):
+# the Python toolchain image with the CPython runtime of its four builds in one more layer, or the frame-pointer image
+# of a Python row with it. They follow publish's rule: a job of this file makes the image again on its own runner, and
+# compares its digest with the one that Toolchain images made, and only that image goes to ghcr.io, only after that
+# comparison. To make the image again takes docker and the code of the commit that the run of Toolchain images built
+# (infra/base-builder and .github/scripts/python-runtime). That code runs as a user that can use sudo, and GitHub holds
+# the job's token on the runner for the whole job, so the code can read the token of its job. Thus the job that makes
+# the image, remake-prebuilt, has no write permission and no secret: contents: read and actions: read alone. The job
+# that has packages: write, publish-prebuilt, runs no docker and no script of the repository: only pinned actions and
+# crane, on bytes that it checks by their digest.
 #
 # Both jobs check out the commit that the run of Toolchain images built, a commit of main that passed, and take the
 # digest that prebuilt made from the artifact prebuilt-digest-<row> of that run. Each fails, and pushes nothing, if the
-# artifact gives no digest, or if the row <row> of infra/toolchains.tsv names another image. If ghcr.io holds that
-# digest in FP_PACKAGE, remake-prebuilt makes nothing, and publish-prebuilt pushes nothing and goes on to the check of
-# the files.
+# artifact gives no digest, or if infra/toolchains.tsv has no row <row>. They do not compare the image that the row
+# names with that digest: prebuilt passed the row in that run, and it passes a row that names the start image, the
+# image that prebuilt made, or, when the change did not change the row, an image that publish-prebuilt tagged before.
+# So they publish the image that prebuilt made from a new row, or after a change of the builder, and a pull request can
+# then move the row to it. If ghcr.io holds that digest in FP_PACKAGE, remake-prebuilt makes nothing, and
+# publish-prebuilt pushes no image: it only tags the image that ghcr.io holds, after the same comparisons, and goes on
+# to the check of the files. Thus each commit of main whose run passed gets a tag <row>-<commit> of each prebuilt row,
+# for the image that prebuilt made from that commit. prebuilt (toolchain-images.yaml) passes a row that names neither
+# its start image nor the image made in its run only when the change did not change the row and such a tag names the
+# row's image, for a commit of the history of HEAD.
 #
 # remake-prebuilt's steps:
 #   1. It checks out the whole tree.
@@ -49,32 +59,36 @@ name: "Toolchain images: publish"
 #      the artifact prebuilt-image-<row> of this run. GitHub keeps that artifact for 1 day (retention-days: 1):
 #      publish-prebuilt reads it when remake-prebuilt ends, and it holds the whole image, each layer of the base image
 #      too.
-# publish-prebuilt starts after remake-prebuilt (needs). Its steps:
+# publish-prebuilt starts after rows and remake-prebuilt (needs). Its steps:
 #   1. It checks out infra/toolchains.tsv alone.
-#   2. It downloads the artifact prebuilt-image-<row> of this run, and pushes the layout into its own registry on the
-#      runner (crane push). crane reads the manifest and each blob by its digest, and the registry keeps each by the
-#      digest of its bytes. publish-prebuilt fails, and pushes nothing, unless the digest that crane push gives is the
-#      one that prebuilt made: the digest that publish-prebuilt took itself from prebuilt's artifact, not one that
-#      remake-prebuilt gives. So an artifact of other bytes stops the job before the push step.
-#   3. It fails, and pushes nothing, if ghcr.io has the tag python-prebuilt-<commit>, or
-#      python-frame-pointers-prebuilt-<commit> for the frame-pointer image, for another digest, or if crane cannot read
-#      that tag. Thus publish-prebuilt never moves a tag to another image.
-#   4. Only then the push step logs in to ghcr.io, copies the image of its registry, by the digest that prebuilt made,
-#      to that tag in FP_PACKAGE, and logs out. It fails unless ghcr.io then gives the digest that prebuilt made.
+#   2. Unless ghcr.io holds the image, it downloads the artifact prebuilt-image-<row> of this run, and pushes the layout
+#      into its own registry on the runner (crane push). crane reads the manifest and each blob by its digest, and the
+#      registry keeps each by the digest of its bytes. publish-prebuilt fails, and pushes nothing, unless the digest
+#      that crane push gives is the one that prebuilt made: the digest that publish-prebuilt took itself from
+#      prebuilt's artifact, not one that remake-prebuilt gives. So an artifact of other bytes stops the job before the
+#      push step.
+#   3. It fails, and pushes nothing, if ghcr.io has the tag <row>-<commit> for another digest, or if crane cannot read
+#      that tag. Thus publish-prebuilt never moves a tag to another image. The tag names the row, not its language: two
+#      base rows of one language give two prebuilt rows, and each gets a tag of its own. Before the tag <row>-<commit>,
+#      the tag was python-prebuilt-<commit>, or python-frame-pointers-prebuilt-<commit> for the frame-pointer image;
+#      prebuilt takes those tags as the base case.
+#   4. Only then the push step logs in to ghcr.io. It copies the image of its registry, by the digest that prebuilt
+#      made, to that tag in FP_PACKAGE; or, when ghcr.io holds that digest, it tags it there (crane tag), and pushes
+#      nothing else. It logs out, and fails unless ghcr.io then gives the digest that prebuilt made for the tag.
 #   5. It reads the files of the image on ghcr.io (crane export), and fails unless /opt/oft-py/prebuilt holds exactly
 #      one directory <flav>-<key> for each of the four flavs (plain, ubsan, asan, asanubsan), each with
 #      runtime/libpython3.11.a, records/compiles.jsonl and manifest, and nothing else. Its step summary lists them.
 # The token of publish-prebuilt goes to the push step alone, in its env (GH_TOKEN). No step before it gets the token
 # from this file, but two pinned actions: actions/checkout, which fetches with it and keeps no copy
 # (persist-credentials: false), and actions/download-artifact, which reads the digest of the run of Toolchain images
-# with it. The push step logs in after the comparisons and logs out right after the copy, and no step of this file
-# writes GITHUB_PATH or GITHUB_ENV. remake-prebuilt's make gets no token and no secret, and remake-prebuilt's own token
-# can only read.
+# with it. The push step logs in after the comparisons and logs out right after the copy or the tag, and no step of
+# this file writes GITHUB_PATH or GITHUB_ENV. remake-prebuilt's make gets no token and no secret, and remake-prebuilt's
+# own token can only read.
 #
 # It runs on workflow_run, so GitHub runs main's copy of this file, whatever the commit of the run that completed. Thus
 # main's file decides when its jobs act and what they push. Toolchain images runs on pull_request too, and no job of
 # it has a write permission: the token has packages: write only here, in publish and publish-prebuilt, jobs that act
-# only after make, prebuilt, docker-tests and compare-digests of a push run on main passed.
+# only after rows, make, prebuilt, docker-tests and compare-digests of a push run on main passed.
 #
 # The jobs publish and publish-prebuilt of this file are the only route of these images to ghcr.io. No person and no
 # agent pushes an image by hand, with any token. No copy goes to a different registry or to a different package:
@@ -104,8 +118,9 @@ name: "Toolchain images: publish"
 # keeps for 1 day: after that day, run all the jobs of that run again, so that remake-prebuilt uploads it again. A rerun
 # runs this file as it was at the first run, so a fix of this file takes a later push.
 #
-# A row of infra/toolchains.tsv names an image only after the image is published. Thus the rows of these images come in
-# a pull request after the push.
+# A frame-pointer row of infra/toolchains.tsv names an image only after the image is published. Thus such a row comes in
+# a pull request after the push. A prebuilt row begins with its start image, which ghcr.io holds already, and a pull
+# request moves it to the image that publish-prebuilt published (toolchain-images.yaml's header).
 
 # Each run is named after the run of Toolchain images whose completion started it, by that run's id and attempt: the
 # run's own commit is main's newest. This workflow runs only on workflow_run, so both values are always set; they are
@@ -123,9 +138,9 @@ on:
 permissions: {}
 
 env:
-  # These values, the base rows of publish's matrix, the rows of the matrix of remake-prebuilt and of publish-prebuilt,
-  # and the image of their registry must stay equal to toolchain-images.yaml's (make's and prebuilt's):
-  # test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails if one differs.
+  # These values, the base rows of publish's matrix, the step of rows that gives remake-prebuilt and publish-prebuilt
+  # their matrix, and the image of their registry must stay equal to toolchain-images.yaml's (make's, rows' and
+  # prebuilt's): test_publish_takes_what_toolchain_images_hands_over (tests/test_trigger_move.py) fails if one differs.
   #
   # go-containerregistry's crane, pinned by version and by the SHA-256 of its release archive.
   CRANE_VERSION: v0.22.1
@@ -136,6 +151,78 @@ env:
   FP_PACKAGE: ghcr.io/theorem-labs/oss-fuzz-theorems-toolchain
 
 jobs:
+  # rows: the prebuilt rows of infra/toolchains.tsv at the commit that the run of Toolchain images built, as the matrix
+  # of remake-prebuilt and publish-prebuilt (the header). It reads that one file, and runs only awk and jq on it.
+  rows:
+    # publish's if: a push run on main of this repository that passed, of the file toolchain-images.yaml.
+    if: >-
+      github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.head_branch == 'main'
+      && github.event.workflow_run.head_repository.full_name == github.repository
+      && github.event.workflow_run.path == '.github/workflows/toolchain-images.yaml'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read  # to check out infra/toolchains.tsv at the commit that the run of Toolchain images built
+    outputs:
+      prebuilt: ${{ steps.rows.outputs.prebuilt }}
+      any: ${{ steps.rows.outputs.any }}
+    steps:
+      # infra/toolchains.tsv alone, at the commit that the run of Toolchain images built, from which prebuilt took its
+      # matrix: no script of the repository is on this runner. A workflow_run run's own commit is main's newest, which
+      # can be a later one.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (sha-pinned)
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          sparse-checkout: infra/toolchains.tsv
+          sparse-checkout-cone-mode: false
+
+      # The step of rows of toolchain-images.yaml, with the same text.
+      - name: the prebuilt rows of infra/toolchains.tsv, each with the row that it starts from
+        id: rows
+        run: |
+          set -euo pipefail
+          # Each row <base>-frame-pointers-prebuilt gives frame_pointers 1, and each other row <base>-prebuilt gives
+          # frame_pointers empty: one line each, with the row, the base row and frame_pointers. The table must have
+          # the row <base>. A row <b>-frame-pointers-prebuilt reads as the prebuilt image of the row <b>-frame-pointers
+          # too, so the table must not have that row.
+          found=$(awk -F'\t' '
+            /^#/ || $1 == "" { next }
+            { names[++count] = $1; held[$1] = 1 }
+            END {
+              for (n = 1; n <= count; n++) {
+                row = names[n]
+                if (row !~ /-prebuilt$/) continue
+                base = substr(row, 1, length(row) - length("-prebuilt"))
+                fp = ""
+                if (base ~ /-frame-pointers$/) {
+                  if (base in held) {
+                    printf "::error::infra/toolchains.tsv has the rows %s and %s: the name %s reads two ways\n",
+                      base, row, row > "/dev/stderr"
+                    failed = 1
+                    continue
+                  }
+                  base = substr(base, 1, length(base) - length("-frame-pointers"))
+                  fp = "1"
+                }
+                if (!(base in held)) {
+                  printf "::error::infra/toolchains.tsv has the prebuilt row %s, but no row %s to start from\n",
+                    row, base > "/dev/stderr"
+                  failed = 1
+                  continue
+                }
+                printf "%s\t%s\t%s\n", row, base, fp
+              }
+              exit failed
+            }' infra/toolchains.tsv)
+          prebuilt=$(printf '%s' "$found" | jq -R -s -c 'split("\n") | map(select(. != "") | split("\t")
+            | {row: .[0], base: .[1], frame_pointers: .[2]})')
+          any=$(jq -r 'length > 0' <<< "$prebuilt")
+          echo "prebuilt=$prebuilt" >> "$GITHUB_OUTPUT"
+          echo "any=$any" >> "$GITHUB_OUTPUT"
+          echo "the prebuilt rows of infra/toolchains.tsv: \`$prebuilt\`" | tee -a "$GITHUB_STEP_SUMMARY"
+
   publish:
     # A push run on main of this repository that passed, of the file toolchain-images.yaml. The branch alone does not
     # say so: branches above also lets GitHub start this for a run of a pull request whose head is a branch named main,
@@ -252,16 +339,19 @@ jobs:
             { echo "::error::$ref's configuration is not the base image's with OFT_FRAME_POINTERS=1 added"; exit 1; }
           echo "### $BASE_ROW, with frame pointers: \`$ref\` ($how)" | tee -a "$GITHUB_STEP_SUMMARY"
 
-  # remake-prebuilt: unless ghcr.io holds it, the image of each row of Toolchain images' job prebuilt, made again here
-  # from the commit that that run built, and handed to publish-prebuilt as an artifact only when its digest is
-  # prebuilt's (the header). It runs docker and that commit's code, so its token can only read.
+  # remake-prebuilt: unless ghcr.io holds it, the image of each prebuilt row of Toolchain images' job prebuilt, made
+  # again here from the commit that that run built, and handed to publish-prebuilt as an artifact only when its digest
+  # is prebuilt's (the header). It runs docker and that commit's code, so its token can only read.
   remake-prebuilt:
-    # publish's if: a push run on main of this repository that passed, of the file toolchain-images.yaml.
+    needs: rows
+    # publish's if: a push run on main of this repository that passed, of the file toolchain-images.yaml. And a
+    # prebuilt row: with none, rows gives no entry, and a matrix of no entry is an error.
     if: >-
       github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository
       && github.event.workflow_run.path == '.github/workflows/toolchain-images.yaml'
+      && needs.rows.outputs.any == 'true'
     runs-on: ubuntu-24.04
     # make builds the runtime of the four builds, as in prebuilt; then the export and the upload of the image.
     timeout-minutes: 90
@@ -271,16 +361,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # prebuilt's rows (toolchain-images.yaml). row: the row of infra/toolchains.tsv that is to name the image.
-        # base: the row of infra/toolchains.tsv to start from. frame_pointers: 1 to start from the frame-pointer image
-        # of base.
-        include:
-          - row: oss-fuzz-theorems-2026.10-python-prebuilt
-            base: oss-fuzz-theorems-2026.10-python
-            frame_pointers: ""
-          - row: oss-fuzz-theorems-2026.10-python-frame-pointers-prebuilt
-            base: oss-fuzz-theorems-2026.10-python
-            frame_pointers: "1"
+        # rows' entries, as prebuilt's (toolchain-images.yaml). row: the prebuilt row of infra/toolchains.tsv. base:
+        # the row of infra/toolchains.tsv to start from. frame_pointers: 1 to start from the frame-pointer image of
+        # base.
+        include: ${{ fromJSON(needs.rows.outputs.prebuilt) }}
     services:
       registry:
         # The image of the registry of toolchain-images.yaml's jobs, pinned by the same digest.
@@ -328,10 +412,10 @@ jobs:
           [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] ||
             { echo "::error::prebuilt gave no digest for $ROW: '$want': nothing pushed"; exit 1; }
           ref="$FP_PACKAGE@$want"
-          # the row, once infra/toolchains.tsv has it, must name this image: else push nothing
+          # The row is in infra/toolchains.tsv, which rows read. Whichever image it names, prebuilt passed it.
           named=$(awk -F'\t' -v row="$ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
-          [ -z "$named" ] || [ "$named" = "$ref" ] ||
-            { echo "::error::infra/toolchains.tsv's row $ROW names $named, not $ref: nothing pushed"; exit 1; }
+          [ -n "$named" ] ||
+            { echo "::error::infra/toolchains.tsv has no row $ROW: nothing pushed"; exit 1; }
           if crane manifest "$ref" > /dev/null 2>&1; then held=true; else held=false; fi
           echo "digest=$want" >> "$GITHUB_OUTPUT"
           echo "held=$held" >> "$GITHUB_OUTPUT"
@@ -414,16 +498,20 @@ jobs:
           # Each layer is gzip already.
           compression-level: 0
 
-  # publish-prebuilt: unless ghcr.io holds it, the image of remake-prebuilt's artifact, copied to FP_PACKAGE only when
-  # its digest is prebuilt's (the header). It holds packages: write, and runs only pinned actions and crane.
+  # publish-prebuilt: the image of remake-prebuilt's artifact, copied to FP_PACKAGE only when its digest is prebuilt's,
+  # or, when ghcr.io holds that digest, a tag of it (the header). It holds packages: write, and runs only pinned actions
+  # and crane.
   publish-prebuilt:
-    needs: remake-prebuilt
-    # publish's if: a push run on main of this repository that passed, of the file toolchain-images.yaml.
+    # rows for the matrix, and remake-prebuilt for the artifact of the image.
+    needs: [rows, remake-prebuilt]
+    # publish's if: a push run on main of this repository that passed, of the file toolchain-images.yaml. And a
+    # prebuilt row, as remake-prebuilt's if.
     if: >-
       github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.head_branch == 'main'
       && github.event.workflow_run.head_repository.full_name == github.repository
       && github.event.workflow_run.path == '.github/workflows/toolchain-images.yaml'
+      && needs.rows.outputs.any == 'true'
     runs-on: ubuntu-24.04
     # The download and the push of the image to the runner's registry, the copy, and the export for the check of the
     # files.
@@ -431,20 +519,14 @@ jobs:
     permissions:
       contents: read  # to check out infra/toolchains.tsv at the commit that the run of Toolchain images built
       actions: read   # to download the artifacts prebuilt-digest-<row> of the run of Toolchain images
-      packages: write # to push the image of remake-prebuilt's artifact, when ghcr.io does not hold it yet
+      packages: write # to push the image of remake-prebuilt's artifact, or to tag the image that ghcr.io holds
     strategy:
       fail-fast: false
       matrix:
-        # prebuilt's rows (toolchain-images.yaml). row: the row of infra/toolchains.tsv that is to name the image.
-        # base: the row of infra/toolchains.tsv that remake-prebuilt starts from. frame_pointers: 1 for the image made
-        # from the frame-pointer image of base.
-        include:
-          - row: oss-fuzz-theorems-2026.10-python-prebuilt
-            base: oss-fuzz-theorems-2026.10-python
-            frame_pointers: ""
-          - row: oss-fuzz-theorems-2026.10-python-frame-pointers-prebuilt
-            base: oss-fuzz-theorems-2026.10-python
-            frame_pointers: "1"
+        # rows' entries, as prebuilt's (toolchain-images.yaml). row: the prebuilt row of infra/toolchains.tsv. base:
+        # the row of infra/toolchains.tsv that remake-prebuilt starts from. frame_pointers: 1 for the image made from
+        # the frame-pointer image of base.
+        include: ${{ fromJSON(needs.rows.outputs.prebuilt) }}
     services:
       registry:
         # The image of the registry of toolchain-images.yaml's jobs, pinned by the same digest.
@@ -453,7 +535,6 @@ jobs:
           - 5000:5000
     env:
       ROW: ${{ matrix.row }}
-      FRAME_POINTERS: ${{ matrix.frame_pointers }}
     steps:
       # infra/toolchains.tsv alone, at the commit that the run of Toolchain images built: no script of the repository is
       # on this runner. A workflow_run run's own commit is main's newest, which can be a later one.
@@ -494,10 +575,10 @@ jobs:
           [[ "$want" =~ ^sha256:[0-9a-f]{64}$ ]] ||
             { echo "::error::prebuilt gave no digest for $ROW: '$want': nothing pushed"; exit 1; }
           ref="$FP_PACKAGE@$want"
-          # the row, once infra/toolchains.tsv has it, must name this image: else push nothing
+          # The row is in infra/toolchains.tsv, which rows read. Whichever image it names, prebuilt passed it.
           named=$(awk -F'\t' -v row="$ROW" '$1 == row { print $2 }' infra/toolchains.tsv)
-          [ -z "$named" ] || [ "$named" = "$ref" ] ||
-            { echo "::error::infra/toolchains.tsv's row $ROW names $named, not $ref: nothing pushed"; exit 1; }
+          [ -n "$named" ] ||
+            { echo "::error::infra/toolchains.tsv has no row $ROW: nothing pushed"; exit 1; }
           if crane manifest "$ref" > /dev/null 2>&1; then held=true; else held=false; fi
           echo "digest=$want" >> "$GITHUB_OUTPUT"
           echo "held=$held" >> "$GITHUB_OUTPUT"
@@ -527,9 +608,10 @@ jobs:
           echo "ref=$loaded" >> "$GITHUB_OUTPUT"
 
       # A tag of FP_PACKAGE names one image for good. crane reads the tag with no login. ghcr.io answers
-      # MANIFEST_UNKNOWN for a tag that it does not have; on any other failure, the job cannot tell, and stops.
+      # MANIFEST_UNKNOWN for a tag that it does not have; on any other failure, the job cannot tell, and stops. The tag
+      # is <row>-<commit>: prebuilt (toolchain-images.yaml) reads it to tell that this job published the image of a row
+      # from a commit of main.
       - name: the tag of the image, unless ghcr.io has it for another digest
-        if: steps.want.outputs.held == 'false'
         id: tag
         env:
           # The commit that the run of Toolchain images built, for the tag. In a workflow_run run, GITHUB_SHA is main's
@@ -539,13 +621,10 @@ jobs:
         run: |
           set -euo pipefail
           PATH="$RUNNER_TEMP/bin:$PATH"
-          # The tag names the language and whether the image has frame pointers.
-          case $FRAME_POINTERS in
-            1) kind=python-frame-pointers ;;
-            "") kind=python ;;
-            *) echo "::error::frame_pointers is 1 or empty, not '$FRAME_POINTERS': nothing pushed"; exit 1 ;;
-          esac
-          tag="$FP_PACKAGE:$kind-prebuilt-$HEAD_SHA"
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] ||
+            { echo "::error::the run of Toolchain images gives no commit: '$HEAD_SHA': nothing pushed"; exit 1; }
+          # The tag names the row, so two rows of one language get two tags.
+          tag="$FP_PACKAGE:$ROW-$HEAD_SHA"
           if named=$(crane digest "$tag" 2> "$RUNNER_TEMP/tag.log"); then
             [ "$named" = "$WANT" ] ||
               { echo "::error::ghcr.io has the tag ${tag##*:} for $named, not for $WANT: nothing pushed"; exit 1; }
@@ -556,14 +635,15 @@ jobs:
           fi
           echo "ref=$tag" >> "$GITHUB_OUTPUT"
 
-      # The one step that gets the token (GH_TOKEN). It compares again, before it logs in, so that it copies only the
-      # image of the runner's registry with prebuilt's digest. It logs out right after the copy.
-      - name: copy the image of the runner's registry to ghcr.io, by its digest, if it has the digest that prebuilt made
-        if: steps.want.outputs.held == 'false'
+      # The one step that gets the token (GH_TOKEN). It compares again, before it logs in: it copies only the image of
+      # the runner's registry with prebuilt's digest, or, when ghcr.io holds that digest, it tags it there and pushes
+      # nothing else. It logs out right after the copy or the tag.
+      - name: copy the image of the runner's registry to ghcr.io, or tag the image that ghcr.io holds, by the digest that prebuilt made
         id: push
         env:
           GH_TOKEN: ${{ github.token }}
           WANT: ${{ steps.want.outputs.digest }}
+          HELD: ${{ steps.want.outputs.held }}
           LOADED: ${{ steps.loaded.outputs.ref }}
           TAG: ${{ steps.tag.outputs.ref }}
         run: |
@@ -572,12 +652,24 @@ jobs:
           [[ "$WANT" =~ ^sha256:[0-9a-f]{64}$ ]] ||
             { echo "::error::no digest of prebuilt: '$WANT': nothing pushed"; exit 1; }
           ours="localhost:5000/${FP_PACKAGE#ghcr.io/}"
-          [ "$LOADED" = "$ours@$WANT" ] ||
-            { echo "::error::the image of the runner's registry for $ROW is '$LOADED', not $ours@$WANT: nothing pushed"; exit 1; }
+          case $HELD in
+            false)
+              [ "$LOADED" = "$ours@$WANT" ] ||
+                { echo "::error::the image of the runner's registry for $ROW is '$LOADED', not $ours@$WANT: nothing pushed"; exit 1; } ;;
+            true)
+              crane manifest "$FP_PACKAGE@$WANT" > /dev/null ||
+                { echo "::error::ghcr.io does not hold $FP_PACKAGE@$WANT: nothing tagged"; exit 1; } ;;
+            *) echo "::error::held is true or false, not '$HELD': nothing pushed"; exit 1 ;;
+          esac
           [[ "$TAG" == "$FP_PACKAGE":* ]] || { echo "::error::no tag in $FP_PACKAGE: '$TAG': nothing pushed"; exit 1; }
           echo "$GH_TOKEN" | crane auth login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          # Copy that image, by its digest. Thus ghcr.io gets the manifest whose digest this job compared.
-          crane copy "$ours@$WANT" "$TAG"
+          # Copy that image, by its digest: ghcr.io then gets the manifest whose digest this job compared. Or tag the
+          # image of that digest on ghcr.io, which copies no bytes.
+          if [ "$HELD" = false ]; then
+            crane copy "$ours@$WANT" "$TAG"
+          else
+            crane tag "$FP_PACKAGE@$WANT" "${TAG##*:}"
+          fi
           pushed=$(crane digest "$TAG")
           crane auth logout ghcr.io
           [ "$pushed" = "$WANT" ] ||
@@ -597,11 +689,10 @@ jobs:
           PATH="$RUNNER_TEMP/bin:$PATH"
           [[ "$WANT" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest of prebuilt: '$WANT'"; exit 1; }
           ref="$FP_PACKAGE@$WANT"
+          [ -n "$TAG" ] || { echo "::error::the push step gave no tag"; exit 1; }
           case $HELD in
-            true) how="already on ghcr.io, nothing pushed" ;;
-            false)
-              [ -n "$TAG" ] || { echo "::error::the push step gave no tag"; exit 1; }
-              how="pushed under the tag $TAG" ;;
+            true) how="already on ghcr.io, tagged $TAG" ;;
+            false) how="pushed under the tag $TAG" ;;
             *) echo "::error::held is true or false, not '$HELD'"; exit 1 ;;
           esac
           crane export "$ref" - | tar -tf - | sed -e 's|^\./||' -e 's|/$||' | LC_ALL=C sort -u > "$RUNNER_TEMP/files.txt"

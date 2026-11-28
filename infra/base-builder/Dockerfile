@@ -30,7 +30,13 @@ COPY rust/ /usr/local/lib/oss-verify/rust/
 COPY python/ /usr/local/lib/oss-verify/python/
 COPY go/ /usr/local/lib/oss-verify/go/
 COPY compile fetch-commit git-credential-oss-verify lay-out-sources /usr/local/bin/
-RUN chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources \
+# COPY keeps each file's mode from the checkout, and a checkout's modes follow its umask: 664 and 775 under umask 002
+# (Ubuntu's default for a user with a group of their own), 644 and 755 under 022 (a GitHub runner's). The key of the
+# CPython runtime (python/runtime.sh) reads the modes of these files and of their directories, so the first chmod gives
+# them modes that git alone decides: read for everyone, write for the owner, and execute where git says so (X). The
+# second makes the commands executable whatever git says.
+RUN chmod -R u=rwX,go=rX /usr/local/lib/oss-verify \
+ && chmod 0755 /usr/local/bin/compile /usr/local/bin/fetch-commit /usr/local/bin/lay-out-sources \
                /usr/local/bin/git-credential-oss-verify \
                /usr/local/lib/oss-verify/link-fuzz-target /usr/local/lib/oss-verify/record-compile \
                /usr/local/lib/oss-verify/go/compile-go \
